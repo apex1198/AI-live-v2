@@ -21,6 +21,7 @@ services/talking-head/livetalking/.git-upstream-backup/
 # Secrets and local overrides
 .env.*
 !.env.example
+!.env.production.example
 *.pem
 *.key
 secrets/

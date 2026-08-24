@@ -150,11 +150,11 @@ export class IdolRuntimeServer {
             if (tickCount % 15 === 0) {
                 const mockViewers = ['ThanhTam_99', 'GamerPro_VN', 'Ha_Linh_Cute', 'DragonSlayer', 'Minh_Tri'];
                 const mockMessages = [
-                    'Chơi game này vui ghê Mimi ơi!',
-                    'Hôm nay stream tới mấy giờ vậy em?',
-                    'Pha vừa rồi xử lý mượt quá!',
+                    'Game này vui quá Mimi ơi!',
+                    'Hôm nay Mimi live đến mấy giờ vậy?',
+                    'Pha vừa rồi mượt quá!',
                     'Chào Mimi và cả nhà nha!',
-                    'Tí có chơi chung với viewer không Mimi?',
+                    'Lát nữa mình vào chơi cùng được không Mimi?',
                 ];
                 const randomViewer = mockViewers[Math.floor(Math.random() * mockViewers.length)];
                 const randomMsg = mockMessages[Math.floor(Math.random() * mockMessages.length)];

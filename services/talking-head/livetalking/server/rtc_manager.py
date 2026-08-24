@@ -23,6 +23,7 @@ from utils.logger import logger
 
 from server.session_manager import session_manager
 from server.session_manager import MaxSessionError
+from server.security import require_safe_id
 
 class RTCManager:
     """
@@ -78,6 +79,13 @@ class RTCManager:
     async def handle_offer(self, request):
         """处理 WebRTC offer 信令"""
         params = await request.json()
+        if params.get("type") != "offer" or not isinstance(params.get("sdp"), str) or not params["sdp"] or len(params["sdp"]) > 2_000_000:
+            return web.json_response({"code": 400, "msg": "invalid WebRTC offer"}, status=400)
+        if params.get("avatar"):
+            try:
+                params["avatar"] = require_safe_id(params["avatar"], "avatar")
+            except ValueError as exc:
+                return web.json_response({"code": 400, "msg": str(exc)}, status=400)
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
         try:
@@ -115,6 +123,10 @@ class RTCManager:
         params = dict(request.query)
         # 客户端可通过 query param 自定义 sessionid，不传则自动生成
         client_sid = params.pop("sessionid", None)
+        if client_sid:
+            client_sid = require_safe_id(client_sid, "sessionid")
+        if params.get("avatar"):
+            params["avatar"] = require_safe_id(params["avatar"], "avatar")
 
         offer_sdp = await request.text()
         offer = RTCSessionDescription(sdp=offer_sdp, type="offer")

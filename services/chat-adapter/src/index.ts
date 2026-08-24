@@ -38,7 +38,7 @@ export class SmartChatFilter {
   ];
   private readonly _positiveKeywords = [
     'hay', 'gioi', 'giỏi', 'xinh', 'de thuong', 'dễ thương', 'vui', 'chuc mung',
-    'chúc mừng', 'dinh', 'đỉnh', 'pro', 'dép', 'dep', 'top 1', 'thang to', 'thắng to',
+    'chúc mừng', 'dinh', 'đỉnh', 'pro', 'dep', 'đẹp', 'top 1', 'thang to', 'thắng to',
   ];
 
   /**

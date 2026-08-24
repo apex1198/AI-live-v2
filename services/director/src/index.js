@@ -350,7 +350,7 @@ export class DirectorAgent {
             intent: 'thank_donation',
             emotion: 'grateful',
             visualState: targetState,
-            speechText: `Cảm ơn ${donation.viewerName} đã ủng hộ $${donation.amount}!`,
+            speechText: `Cảm ơn ${donation.viewerName} đã ủng hộ ${donation.amount} đô nha!`,
             priority: 2,
             timestamp: now,
             maxSpeechSeconds: 5,

@@ -209,7 +209,7 @@
         return;
       }
 
-      // ── Mode B: Empty Avatar State (Mặc định để trống) ──
+      // ── Mode B: Empty avatar state ──
       ctx.save();
       ctx.translate(w / 2, h / 2);
 
@@ -248,11 +248,11 @@
       // Text Prompt
       ctx.font = '600 20px Inter, system-ui, sans-serif';
       ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
-      ctx.fillText('Chưa có Avatar', 0, 115);
+      ctx.fillText('No avatar selected', 0, 115);
 
       ctx.font = '16px Inter, system-ui, sans-serif';
       ctx.fillStyle = 'rgba(191, 90, 242, 0.9)';
-      ctx.fillText('Tải ảnh trên Dashboard', 0, 142);
+      ctx.fillText('Upload media in Dashboard', 0, 142);
 
       ctx.restore();
 
@@ -453,7 +453,11 @@
       const port = window.location.port || '8765';
       const wsUrl = `ws://${host}:${port}`;
 
-      const ws = new WebSocket(wsUrl);
+      const runtimeToken = sessionStorage.getItem('idol_runtime_auth_token') || new URLSearchParams(location.hash.slice(1)).get('token') || '';
+      const protocols = runtimeToken
+        ? ['idol-runtime', `auth.${btoa(runtimeToken).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')}`]
+        : undefined;
+      const ws = protocols ? new WebSocket(wsUrl, protocols) : new WebSocket(wsUrl);
 
       ws.onopen = () => {
         console.log('[OBS Overlay] Connected to Runtime Server');

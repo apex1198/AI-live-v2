@@ -1,6 +1,11 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
+const node_http_1 = __importDefault(require("node:http"));
 const index_js_1 = require("./services/runtime-server/dist/index.js");
+const persistence_js_1 = require("./services/runtime-server/dist/persistence.js");
 const index_js_2 = require("./packages/asset-engine/dist/index.js");
 const index_js_3 = require("./packages/goal-engine/dist/index.js");
 const index_js_4 = require("./services/director/dist/index.js");
@@ -25,6 +30,7 @@ function assert(condition, testName, detail) {
     }
 }
 async function runAudit() {
+    process.env.NODE_ENV = 'test';
     console.log('\n═══════════════════════════════════════════════════════════════');
     console.log('       HYBRID AI IDOL LIVESTREAM — SYSTEM AUDIT & E2E TEST       ');
     console.log('═══════════════════════════════════════════════════════════════\n');
@@ -261,12 +267,46 @@ async function runAudit() {
     const smoothedFrame2 = smoother.smooth(frame2Jittery);
     assert(smoothedFrame2[0].x > frame1[0].x && smoothedFrame2[0].x < frame2Jittery[0].x, 'TemporalLandmarkSmoother eliminates inter-frame landmark jitter via EMA in SOURCE_FRAME_SPACE');
     // LiveTalking Digital Human Provider Tests (lipku/livetalking)
-    const liveTalkingProvider = new index_js_11.LiveTalkingProvider({ endpointUrl: 'http://localhost:8010', model: 'livetalking-wav2lip' });
+    let workerSpeakingPolls = 0;
+    const fakeWorker = node_http_1.default.createServer((request, response) => {
+        const pathname = new URL(request.url || '/', 'http://127.0.0.1:9880').pathname;
+        response.setHeader('Content-Type', 'application/json');
+        if (pathname === '/health')
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { status: 'healthy', model: 'musetalk' } }));
+        if (pathname === '/offer')
+            return response.end(JSON.stringify({ sdp: 'v=0\r\n', type: 'answer', sessionid: 'session_test' }));
+        if (pathname === '/speak' || pathname === '/humanaudio') {
+            workerSpeakingPolls = 3;
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { sessionid: 'session_test' } }));
+        }
+        if (pathname === '/is_speaking') {
+            const speaking = workerSpeakingPolls > 0;
+            workerSpeakingPolls = Math.max(0, workerSpeakingPolls - 1);
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: speaking }));
+        }
+        if (pathname === '/interrupt') {
+            workerSpeakingPolls = 0;
+            return response.end(JSON.stringify({ code: 0, msg: 'ok' }));
+        }
+        if (pathname === '/api/avatar/task' && request.method === 'POST')
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { task_id: 'task_test' } }));
+        if (pathname === '/api/avatar/task/task_test')
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { task_id: 'task_test', avatar_id: 'avatar_test', model_type: 'musetalk', status: 'completed', progress: 100 } }));
+        if (pathname === '/api/avatar/tasks')
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { tasks: [] } }));
+        response.statusCode = 404;
+        return response.end(JSON.stringify({ code: 404, msg: 'not found' }));
+    });
+    await new Promise((resolve) => fakeWorker.listen(9880, '127.0.0.1', resolve));
+    process.env.LIVETALKING_ENDPOINT = 'http://127.0.0.1:9880';
+    const liveTalkingProvider = new index_js_11.LiveTalkingProvider({ endpointUrl: 'http://127.0.0.1:9880', model: 'livetalking-wav2lip', timeoutMs: 1000 });
     assert(liveTalkingProvider.config.model === 'livetalking-wav2lip', 'LiveTalkingProvider initializes with LiveTalking Wav2Lip model');
     await liveTalkingProvider.setModel('livetalking-musetalk');
     assert(liveTalkingProvider.config.model === 'livetalking-musetalk', 'LiveTalkingProvider supports dynamic checkpoint switching');
     const trainRes = await liveTalkingProvider.trainAvatarVideo('assets/driving_motion.mp4');
-    assert(trainRes.success === true && trainRes.stages.stage4_avatarCompiled, 'LiveTalkingProvider successfully trains avatar video across all 4 stages (lipku/livetalking)');
+    assert(trainRes.success === true && trainRes.stages.stage4_avatarCompiled, 'LiveTalkingProvider delegates avatar training to the worker API');
+    const realProviderHealth = await liveTalkingProvider.health();
+    assert(realProviderHealth.healthy === true, 'LiveTalkingProvider health reflects the worker response');
     const mockTalkingProvider = new index_js_11.MockTalkingProvider();
     await mockTalkingProvider.initialize({ id: 'mimi_test' });
     await mockTalkingProvider.startSpeaking('Cảm ơn bạn đã donate nha!', { durationMs: 3000, emotion: 'happy' });
@@ -373,9 +413,21 @@ async function runAudit() {
     assert(museEngine.state === 'IDLE', 'MuseTalkRealtimeEngine returns to IDLE state when audio completes');
     assert(museEngine.outputSource === 'IDLE_FRAME', 'MuseTalkRealtimeEngine returns output source to IDLE_FRAME on speech end');
     assert(museEngine.bufferedFrames === 0, 'MuseTalkRealtimeEngine clears frame queue on IDLE');
+    console.log('\n▶ Auditing Phase 4: SQLite Persistence & Migrations...');
+    const persistence = new persistence_js_1.RuntimeDatabase(':memory:');
+    persistence.setSetting('voice', { provider: 'webspeech', languageCode: 'vi' });
+    assert(persistence.getSetting('voice')?.languageCode === 'vi', 'SQLite persists runtime settings without browser localStorage');
+    persistence.setActiveProject('project_test', '/tmp/project-test');
+    assert(persistence.getActiveProject()?.projectName === 'project_test', 'SQLite persists the active project and storage root');
+    persistence.upsertAvatar('avatar_test', { id: 'avatar_test', status: 'ready' });
+    assert(persistence.listAvatars()[0]?.id === 'avatar_test', 'SQLite persists trained avatar records');
+    persistence.setAvatarSession(['avatar_test'], true);
+    const persistedSession = persistence.getAvatarSession();
+    assert(persistedSession?.selected[0] === 'avatar_test' && persistedSession.random, 'SQLite persists avatar selection and random mode');
+    persistence.close();
     // ── Step 9 Audit: Runtime Server End-to-End Integration ───
     console.log('\n▶ Auditing Phase 6: Runtime Server Full Integration...');
-    const server = new index_js_1.IdolRuntimeServer({ port: 9876, enableSimulation: false });
+    const server = new index_js_1.IdolRuntimeServer({ port: 9876, enableSimulation: false, databasePath: ':memory:' });
     await server.start();
     assert(true, 'Runtime Server started on port 9876');
     // Verify REST API
@@ -400,14 +452,51 @@ async function runAudit() {
         });
         const chatJson = await chatRes.json();
         assert(chatJson.success === true && chatJson.message.priorityScore >= 70, 'REST /api/chat/send ingests and scores live chat');
-        // Test Talking Head Speak API
+        // Establish the runtime-owned LiveTalking session before speech.
+        const offerRes = await fetch('http://localhost:9876/api/talking-head/offer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId: 'avatar_test' }),
+        });
+        const offerJson = await offerRes.json();
+        assert(offerJson.success === true && offerJson.sessionid === 'session_test', 'Runtime proxies WebRTC signaling to LiveTalking');
+        await fetch('http://localhost:9876/api/settings/voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: 'webspeech', voiceId: 'local', speed: 1 }),
+        });
+        // Test the single runtime speech command path.
         const thRes = await fetch('http://localhost:9876/api/talking-head/speak', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: 'Cảm ơn mọi người đã theo dõi!', durationMs: 2500, emotion: 'happy' }),
         });
         const thJson = await thRes.json();
-        assert(thJson.success === true, 'REST /api/talking-head/speak triggers speech');
+        assert(thRes.status === 202 && thJson.success === true, 'REST /api/talking-head/speak queues one runtime speech command');
+        const speechStates = new Set([thJson.state]);
+        const observedSpeechStates = [thJson.state];
+        const observedSpeechRuntime = [];
+        const speechDeadline = Date.now() + 3000;
+        while (Date.now() < speechDeadline) {
+            const speechStatusRes = await fetch('http://localhost:9876/api/speech/status');
+            const speechStatusJson = await speechStatusRes.json();
+            const runtimeSnapshot = `${speechStatusJson.speech?.commandId || 'none'}:${speechStatusJson.speech?.state || 'none'}`;
+            if (observedSpeechRuntime.at(-1) !== runtimeSnapshot)
+                observedSpeechRuntime.push(runtimeSnapshot);
+            if (speechStatusJson.speech?.commandId === thJson.commandId) {
+                speechStates.add(speechStatusJson.speech.state);
+                if (observedSpeechStates.at(-1) !== speechStatusJson.speech.state)
+                    observedSpeechStates.push(speechStatusJson.speech.state);
+                if (speechStates.has('SPEAKING') && speechStatusJson.speech.state === 'IDLE')
+                    break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        if (!(speechStates.has('GENERATING') && speechStates.has('SPEAKING') && speechStates.has('IDLE'))) {
+            console.log(`  Observed speech states: ${observedSpeechStates.join(' -> ')}`);
+            console.log(`  Runtime speech snapshots: ${observedSpeechRuntime.join(' -> ')}`);
+        }
+        assert(speechStates.has('GENERATING') && speechStates.has('SPEAKING') && speechStates.has('IDLE'), 'Speech follows GENERATING → SPEAKING → IDLE from worker state');
         // Test LiveTalking Status API
         const liveTalkingStatusRes = await fetch('http://localhost:9876/api/talking-head/livetalking/status');
         const liveTalkingStatusJson = await liveTalkingStatusRes.json();
@@ -416,18 +505,25 @@ async function runAudit() {
         const liveTalkingConfigRes = await fetch('http://localhost:9876/api/talking-head/livetalking/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: 'livetalking-wav2lip' }),
+            body: JSON.stringify({ model: 'musetalk' }),
         });
         const liveTalkingConfigJson = await liveTalkingConfigRes.json();
-        assert(liveTalkingConfigJson.success === true && liveTalkingConfigJson.config.model === 'livetalking-wav2lip', 'REST /api/talking-head/livetalking/config configures model');
+        assert(liveTalkingConfigJson.success === true && liveTalkingConfigJson.config.model === 'musetalk', 'REST /api/talking-head/livetalking/config configures model');
         // Test Settings APIs
         const settingsRes = await fetch('http://localhost:9876/api/settings/all');
         const settingsJson = await settingsRes.json();
         assert(settingsJson.voice !== undefined && settingsJson.avatar !== undefined, 'REST /api/settings/all returns complete system settings');
-        const voiceSetRes = await fetch('http://localhost:9876/api/settings/voice', {
+        assert(settingsJson.voice.apiKey === undefined && typeof settingsJson.voice.apiKeyConfigured === 'boolean', 'REST settings redact provider secrets');
+        const rejectedSecretRes = await fetch('http://localhost:9876/api/settings/voice', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ provider: 'elevenlabs', apiKey: 'sk_test_123', voiceId: 'EXAVITQu4vr4xnSDxMaL', speed: 1.05 }),
+        });
+        assert(rejectedSecretRes.status === 400, 'REST settings reject provider secrets sent by the browser');
+        const voiceSetRes = await fetch('http://localhost:9876/api/settings/voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: 'elevenlabs', voiceId: 'EXAVITQu4vr4xnSDxMaL', speed: 1.05 }),
         });
         const voiceSetJson = await voiceSetRes.json();
         assert(voiceSetJson.success === true && voiceSetJson.settings.voiceId === 'EXAVITQu4vr4xnSDxMaL', 'REST /api/settings/voice dynamically configures ElevenLabs');
@@ -440,10 +536,29 @@ async function runAudit() {
         assert(avatarSetJson.success === true && avatarSetJson.settings.preset === 'mimi_cyber', 'REST /api/settings/avatar dynamically updates avatar');
         // ── Step 10 Audit: Pure Upstream MuseTalk Batch Pipeline & REST API ──
         console.log('\n▶ Auditing Phase 7: Pure Upstream MuseTalk Batch Video Generation (avatar.mp4 + test.wav -> output.mp4)...');
+        const videoUploadRes = await fetch('http://localhost:9876/api/storage/file?category=uploads&filename=avatar.mp4', {
+            method: 'POST',
+            headers: { 'Content-Type': 'video/mp4' },
+            body: new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112]),
+        });
+        const videoUploadJson = await videoUploadRes.json();
+        const audioUploadRes = await fetch('http://localhost:9876/api/storage/file?category=uploads&filename=test.wav', {
+            method: 'POST',
+            headers: { 'Content-Type': 'audio/wav' },
+            body: new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0]),
+        });
+        const audioUploadJson = await audioUploadRes.json();
+        assert(videoUploadJson.success === true && audioUploadJson.success === true, 'Project storage accepts bounded test media uploads');
+        const blockedPathRes = await fetch('http://localhost:9876/api/musetalk/batch-process', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoPath: '/etc/passwd', audioPath: audioUploadJson.path }),
+        });
+        assert(blockedPathRes.status === 500 || blockedPathRes.status === 400, 'MuseTalk rejects arbitrary paths outside the active project');
         const batchRes = await fetch('http://localhost:9876/api/musetalk/batch-process', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ videoFilename: 'avatar.mp4', audioFilename: 'test.wav' }),
+            body: JSON.stringify({ videoPath: videoUploadJson.path, audioPath: audioUploadJson.path, videoFilename: 'avatar.mp4', audioFilename: 'test.wav' }),
         });
         const batchJson = await batchRes.json();
         assert(batchJson.success === true && batchJson.result.status === 'COMPLETED', 'REST /api/musetalk/batch-process completes batch lip-sync generation');
@@ -454,6 +569,49 @@ async function runAudit() {
     finally {
         await server.stop();
         director.destroy();
+    }
+    await new Promise((resolve, reject) => fakeWorker.close((error) => error ? reject(error) : resolve()));
+    console.log('\n▶ Auditing Phase 0: Runtime Security Boundary...');
+    let publicBindRejected = false;
+    try {
+        new index_js_1.IdolRuntimeServer({ port: 9877, host: '0.0.0.0', enableSimulation: false, databasePath: ':memory:' });
+    }
+    catch {
+        publicBindRejected = true;
+    }
+    assert(publicBindRejected, 'Runtime refuses a public bind without an authentication token');
+    const securedServer = new index_js_1.IdolRuntimeServer({
+        port: 9877,
+        host: '127.0.0.1',
+        enableSimulation: false,
+        databasePath: ':memory:',
+        authToken: 'runtime-test-token',
+        allowedOrigins: ['http://localhost:9877'],
+        maxJsonBodyBytes: 128,
+    });
+    await securedServer.start();
+    try {
+        const healthRes = await fetch('http://127.0.0.1:9877/health');
+        assert(healthRes.status === 200, 'Health probe stays public');
+        const unauthorizedRes = await fetch('http://127.0.0.1:9877/api/settings/all');
+        assert(unauthorizedRes.status === 401, 'Protected REST endpoints require authentication');
+        const authorizedRes = await fetch('http://127.0.0.1:9877/api/settings/all', {
+            headers: { Authorization: 'Bearer runtime-test-token' },
+        });
+        assert(authorizedRes.status === 200, 'Bearer token authorizes protected REST endpoints');
+        const blockedOriginRes = await fetch('http://127.0.0.1:9877/api/settings/all', {
+            headers: { Authorization: 'Bearer runtime-test-token', Origin: 'https://evil.example' },
+        });
+        assert(blockedOriginRes.status === 403, 'CORS rejects origins outside the allowlist');
+        const oversizedRes = await fetch('http://127.0.0.1:9877/api/chat/send', {
+            method: 'POST',
+            headers: { Authorization: 'Bearer runtime-test-token', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ viewerName: 'tester', message: 'x'.repeat(300) }),
+        });
+        assert(oversizedRes.status === 413, 'Runtime enforces the JSON body size limit');
+    }
+    finally {
+        await securedServer.stop();
     }
     console.log('\n═══════════════════════════════════════════════════════════════');
     console.log(`      AUDIT RESULTS: ${passedChecks}/${totalChecks} CHECKS PASSED (${Math.round((passedChecks / totalChecks) * 100)}%)       `);

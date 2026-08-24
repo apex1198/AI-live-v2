@@ -110,6 +110,7 @@ export interface ElevenLabsConfig {
   apiKey: string;
   voiceId?: string;
   modelId?: string;
+  languageCode?: string;
   stability?: number;
   similarityBoost?: number;
 }
@@ -132,6 +133,7 @@ export class ElevenLabsTTSAdapter implements TTSAdapter {
   constructor(config: ElevenLabsConfig) {
     this._config = {
       modelId: 'eleven_multilingual_v2',
+      languageCode: 'vi',
       stability: 0.5,
       similarityBoost: 0.75,
       voiceId: '21m00Tcm4TlvDq8ikWAM',
@@ -179,6 +181,7 @@ export class ElevenLabsTTSAdapter implements TTSAdapter {
               body: JSON.stringify({
                 text: request.text,
                 model_id: modelId,
+                language_code: this._config.languageCode || 'vi',
                 voice_settings: {
                   stability: this._config.stability ?? 0.5,
                   similarity_boost: this._config.similarityBoost ?? 0.75,

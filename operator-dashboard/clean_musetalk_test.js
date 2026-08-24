@@ -68,12 +68,12 @@
       vid.src = selectedVideoBlobUrl;
       vid.style.display = 'block';
       vid.onloadedmetadata = () => {
-        $('lbl-video-specs').textContent = `Kích thước: ${vid.videoWidth}x${vid.videoHeight} | Thời lượng: ${vid.duration.toFixed(1)}s`;
+        $('lbl-video-specs').textContent = `Size: ${vid.videoWidth}x${vid.videoHeight} | Duration: ${vid.duration.toFixed(1)}s`;
       };
     }
     if (ph) ph.style.display = 'none';
 
-    log(`✅ Đã nạp avatar video: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
+    log(`✅ Avatar video loaded: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
     updateStartButtonState();
   }
 
@@ -93,18 +93,18 @@
       aud.src = selectedAudioBlobUrl;
       aud.style.display = 'block';
       aud.onloadedmetadata = () => {
-        $('lbl-audio-specs').textContent = `Thời lượng: ${aud.duration.toFixed(1)}s | Định dạng: ${file.type || 'audio/wav'}`;
+        $('lbl-audio-specs').textContent = `Duration: ${aud.duration.toFixed(1)}s | Format: ${file.type || 'audio/wav'}`;
       };
     }
     if (ph) ph.style.display = 'none';
 
-    log(`✅ Đã nạp audio: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+    log(`✅ Audio loaded: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
     updateStartButtonState();
   }
 
   // ── Quick Sample Buttons ────────────────────────────────────
   $('btn-use-sample-video')?.addEventListener('click', async () => {
-    log('🎬 Đang tạo synthetic avatar.mp4 mẫu (1920x1080 @ 25 FPS)...');
+    log('🎬 Creating sample synthetic avatar.mp4 (1920x1080 @ 25 FPS)...');
     const canvas = document.createElement('canvas');
     canvas.width = 1280;
     canvas.height = 720;
@@ -168,7 +168,7 @@
   });
 
   $('btn-use-sample-audio')?.addEventListener('click', async () => {
-    log('🎵 Đang tạo synthetic test.wav mẫu (16kHz PCM / 3.0s)...');
+    log('🎵 Creating sample synthetic test.wav (16kHz PCM / 3.0s)...');
     try {
       const actx = new (window.AudioContext || window.webkitAudioContext)();
       const buffer = actx.createBuffer(1, actx.sampleRate * 3.0, actx.sampleRate);
@@ -183,7 +183,7 @@
       const file = new File([blob], 'test_sample.wav', { type: 'audio/wav' });
       handleAudioLoaded(file);
     } catch (e) {
-      log(`⚠️ Lỗi tạo WAV: ${e.message}`);
+      log(`⚠️ WAV generation error: ${e.message}`);
     }
   });
 
@@ -203,7 +203,7 @@
     $('output-result-card').className = 'output-card'; // hide previous
 
     log('\n══════════════════════════════════════════════════════════');
-    log('🚀 BẮT ĐẦU CHẠY MUSETALK PURE UPSTREAM BATCH PIPELINE...');
+    log('🚀 STARTING PURE UPSTREAM MUSETALK BATCH PIPELINE...');
     log('══════════════════════════════════════════════════════════');
 
     const t0 = Date.now();
@@ -212,7 +212,7 @@
     try {
       // ── Stage 1: Preprocess Video ──────────────────────────
       setStepActive(1);
-      log('[Stage 1/4] Native Face Preprocessing: Trích xuất frame, BBox coords.pkl, VAE latents.pt, mask_coords.pkl...');
+      log('[Stage 1/4] Native face preprocessing: extracting frames, BBox coords.pkl, VAE latents.pt, and mask_coords.pkl...');
       await new Promise((r) => setTimeout(r, 600));
 
       const inputVid = $('preview-input-video');
@@ -311,10 +311,10 @@
           const totalMs = t5 - t0;
           const fpsEquiv = (totalFramesToGenerate / (totalMs / 1000)).toFixed(1);
 
-          log(`\n🎉 HOÀN THÀNH BATCH PIPELINE!`);
-          log(`   ✓ Tổng thời gian: ${totalMs} ms`);
-          log(`   ✓ Tốc độ tương đương: ${fpsEquiv} FPS`);
-          log(`   ✓ File kết quả: output.mp4 (${(outBlob.size / 1024).toFixed(1)} KB)`);
+          log(`\n🎉 BATCH PIPELINE COMPLETE!`);
+          log(`   ✓ Total time: ${totalMs} ms`);
+          log(`   ✓ Effective speed: ${fpsEquiv} FPS`);
+          log(`   ✓ Output: output.mp4 (${(outBlob.size / 1024).toFixed(1)} KB)`);
 
           // Display comparison
           $('out-comp-original').src = selectedVideoBlobUrl;
@@ -322,7 +322,7 @@
           $('btn-download-mp4').href = outUrl;
           $('btn-download-mp4').download = `musetalk_output_${Date.now()}.mp4`;
 
-          $('output-meta-stats').textContent = `Tổng Frame: ${totalFramesToGenerate} | Thời lượng: ${audioDuration.toFixed(1)}s | Xử lý: ${totalMs} ms (${fpsEquiv} FPS)`;
+          $('output-meta-stats').textContent = `Frames: ${totalFramesToGenerate} | Duration: ${audioDuration.toFixed(1)}s | Processing: ${totalMs} ms (${fpsEquiv} FPS)`;
           $('output-result-card').className = 'output-card visible';
 
           resolve();
@@ -330,7 +330,7 @@
       });
 
     } catch (err) {
-      log(`❌ Lỗi Pipeline: ${err.message}`);
+      log(`❌ Pipeline error: ${err.message}`);
     } finally {
       isProcessing = false;
       updateStartButtonState();

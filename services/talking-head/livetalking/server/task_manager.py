@@ -113,6 +113,19 @@ class TaskManager:
             else:
                 raise ValueError(f"Unsupported model type: {task.model_type}")
 
+            save_path = os.path.abspath(task.params.get('save_path', './data/avatars'))
+            native_root = os.path.abspath('./data/avatars')
+            trained_avatar = os.path.join(save_path, task.avatar_id)
+            native_avatar = os.path.join(native_root, task.avatar_id)
+            if save_path != native_root and os.path.isdir(trained_avatar):
+                os.makedirs(native_root, exist_ok=True)
+                if os.path.lexists(native_avatar):
+                    if os.path.islink(native_avatar):
+                        os.unlink(native_avatar)
+                    else:
+                        raise RuntimeError(f"Native avatar path already exists: {native_avatar}")
+                os.symlink(trained_avatar, native_avatar, target_is_directory=True)
+
             task.status = "completed"
             task.progress = 100
             self._notify(task)

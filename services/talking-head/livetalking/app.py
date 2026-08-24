@@ -42,6 +42,7 @@ import registry
 from server.routes import setup_routes
 from server.rtc_manager import RTCManager
 from server.session_manager import session_manager
+from server.security import auth_middleware, csv_env, is_loopback_host
 
 import argparse
 import random
@@ -171,7 +172,11 @@ def main():
             logger.info("[VirtualCam] Virtual camera output enabled - digital human will be rendered to virtual camera")
 
     #############################################################################
-    appasync = web.Application(client_max_size=1024**2*100)
+    max_upload_bytes = int(os.getenv("LIVETALKING_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
+    listen_host = os.getenv("LIVETALKING_HOST", "127.0.0.1").strip()
+    if not is_loopback_host(listen_host) and not os.getenv("LIVETALKING_AUTH_TOKEN", "").strip():
+        raise RuntimeError("LIVETALKING_AUTH_TOKEN is required when the worker is exposed beyond localhost")
+    appasync = web.Application(client_max_size=max_upload_bytes, middlewares=[auth_middleware])
     appasync["llm_response"] = llm_response
     appasync["opt"] = opt
     appasync["rtc_manager"] = rtc_manager
@@ -184,12 +189,17 @@ def main():
     setup_routes(appasync)
 
     # Configure default CORS settings.
+    allowed_origins = csv_env(
+        "LIVETALKING_CORS_ALLOWED_ORIGINS",
+        "http://127.0.0.1:8765,http://localhost:8765",
+    )
     cors = aiohttp_cors.setup(appasync, defaults={
-            "*": aiohttp_cors.ResourceOptions(
+            origin: aiohttp_cors.ResourceOptions(
                 allow_credentials=True,
                 expose_headers="*",
-                allow_headers="*",
+                allow_headers=("Authorization", "Content-Type"),
             )
+            for origin in allowed_origins
         })
     # Configure CORS on all routes.
     for route in list(appasync.router.routes()):
@@ -206,7 +216,7 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(runner.setup())
-        site = web.TCPSite(runner, '0.0.0.0', opt.listenport)
+        site = web.TCPSite(runner, listen_host, opt.listenport)
         loop.run_until_complete(site.start())
         if opt.transport=='rtcpush':
             for k in range(opt.max_session):

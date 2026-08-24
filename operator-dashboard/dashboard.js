@@ -15,7 +15,10 @@ const STORAGE_KEYS = {
   LIVETALKING_ENDPOINT: 'idol_livetalking_endpoint',
   LIVETALKING_MODEL:    'idol_livetalking_model',
   LIVETALKING_AVATAR:   'idol_livetalking_avatar',
-  ELEVENLABS_KEY:       'idol_elevenlabs_key',
+  AVATAR_POOL:          'idol_avatar_pool',
+  AVATAR_RANDOM:        'idol_avatar_random',
+  PROJECT_STORAGE_ROOT: 'idol_project_storage_root',
+  PROJECT_NAME:         'idol_project_name',
   ELEVENLABS_VOICE:     'idol_elevenlabs_voice',
   CUSTOM_VOICES:        'idol_saved_custom_voices',
   VOICE_SPEED:          'idol_voice_speed',
@@ -40,23 +43,49 @@ const STORAGE_KEYS = {
   MODEL_TASKS:          'idol_model_tasks',
 };
 
-const DEFAULT_ELEVENLABS_KEY = 'REMOVED_PROVIDER_SECRET';
+// Provider secrets are server-side only. Remove credentials persisted by older builds.
+localStorage.removeItem('idol_elevenlabs_key');
+
+const RUNTIME_TOKEN_SESSION_KEY = 'idol_runtime_auth_token';
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (input, init = {}) => {
+  const requestUrl = new URL(typeof input === 'string' ? input : input.url, location.href);
+  const isRuntimeApi = requestUrl.origin === location.origin && requestUrl.pathname.startsWith('/api/');
+  if (!isRuntimeApi) return nativeFetch(input, init);
+
+  const send = (token = '') => {
+    const headers = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined));
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    return nativeFetch(input, { ...init, headers });
+  };
+
+  let token = sessionStorage.getItem(RUNTIME_TOKEN_SESSION_KEY) || '';
+  let response = await send(token);
+  if (response.status === 401) {
+    token = window.prompt('Enter the Runtime access token for this session:')?.trim() || '';
+    if (token) {
+      sessionStorage.setItem(RUNTIME_TOKEN_SESSION_KEY, token);
+      response = await send(token);
+    }
+  }
+  return response;
+};
 
 const STATE_COLOR = {
-  GAMEPLAY_IDLE:  '#30d158',
-  GAMEPLAY_FOCUS: '#30d158',
-  TALKING:        '#3b7fff',
-  BIG_WIN:        '#ff9f0a',
-  JACKPOT:        '#ff453a',
-  LOSE:           '#ff453a',
-  HAPPY:          '#30d158',
-  SURPRISED:      '#ff9f0a',
-  LAUGH:          '#30d158',
-  INVITE_PLAY:    '#bf5af2',
-  CTA:            '#bf5af2',
-  THANK_DONATION: '#3b7fff',
-  AFK:            '#636366',
-  RECOVERY:       '#636366',
+  GAMEPLAY_IDLE:  '#60a5fa',
+  GAMEPLAY_FOCUS: '#818cf8',
+  TALKING:        '#a78bfa',
+  BIG_WIN:        '#34d399',
+  JACKPOT:        '#fbbf24',
+  LOSE:           '#fb7185',
+  HAPPY:          '#a3e635',
+  SURPRISED:      '#f472b6',
+  LAUGH:          '#fb923c',
+  INVITE_PLAY:    '#818cf8',
+  CTA:            '#e879f9',
+  THANK_DONATION: '#2dd4bf',
+  AFK:            '#94a3b8',
+  RECOVERY:       '#22d3ee',
 };
 
 // ── Clean State Library ───────────────────────────────────
@@ -105,12 +134,12 @@ const App = {
   queuedTransition: null,
   activeFilter: 'all',
   stateHistory: [
-    { state: 'GAMEPLAY_IDLE', time: Date.now() - 60000, color: '#30d158' }
+    { state: 'GAMEPLAY_IDLE', time: Date.now() - 60000, color: '#d8d8da' }
   ],
 
   // Stream Context Tracker for AI Response Generation
   streamContext: {
-    lastGameEvent: 'Đang chơi ván mới',
+    lastGameEvent: 'New round in progress',
     lastGameOutcome: null,
     totalWins: 0,
     totalLosses: 0,
@@ -119,7 +148,7 @@ const App = {
 
   // Level 3 Realtime Talking Video Engine
   talkingEngine: {
-    provider: localStorage.getItem(STORAGE_KEYS.TALKING_PROVIDER) || 'neural_mesh',
+    provider: localStorage.getItem(STORAGE_KEYS.TALKING_PROVIDER) === 'off' ? 'off' : 'livetalking',
     endpoint: localStorage.getItem(STORAGE_KEYS.LIVETALKING_ENDPOINT) || 'http://localhost:8011',
     model: localStorage.getItem(STORAGE_KEYS.LIVETALKING_MODEL) || 'musetalk',
     checkpoint: localStorage.getItem(STORAGE_KEYS.W2L_CHECKPOINT) || 'wav2lip',
@@ -139,13 +168,16 @@ const App = {
   // Voice Settings (With Native Vietnamese WebSpeech Default & ElevenLabs Option)
   voice: {
     provider: localStorage.getItem(STORAGE_KEYS.VOICE_PROVIDER) || 'webspeech',
-    language: localStorage.getItem(STORAGE_KEYS.VOICE_LANG) || 'vi',
-    elevenLabsKey: localStorage.getItem(STORAGE_KEYS.ELEVENLABS_KEY) || DEFAULT_ELEVENLABS_KEY,
+    language: (() => {
+      const storedLanguage = localStorage.getItem(STORAGE_KEYS.VOICE_LANG);
+      return !storedLanguage || storedLanguage === 'auto' ? 'vi' : storedLanguage;
+    })(),
+    providerConfigured: false,
     elevenLabsVoiceId: localStorage.getItem(STORAGE_KEYS.ELEVENLABS_VOICE) || 'EXAVITQu4vr4xnSDxMaL',
     customVoices: JSON.parse(localStorage.getItem(STORAGE_KEYS.CUSTOM_VOICES) || '[]'),
     speed: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_SPEED) || '1.05'),
     personaName: localStorage.getItem(STORAGE_KEYS.PERSONA_NAME) || 'Mimi',
-    personaPrompt: localStorage.getItem(STORAGE_KEYS.PERSONA_PROMPT) || 'Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện.',
+    personaPrompt: localStorage.getItem(STORAGE_KEYS.PERSONA_PROMPT) || 'Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu.',
   },
 
   // Avatar Settings (Preserved Presets, Custom Image & Video Loop)
@@ -232,8 +264,14 @@ function unlockAudio() {
     });
 
     App.isAudioUnlocked = true;
-    $('btn-test-sound') && ($('btn-test-sound').textContent = '🔊 Audio OK');
-    addLog('Âm thanh đã mở khóa thành công!', 'ok');
+    const audioButton = $('btn-test-sound');
+    if (audioButton) {
+      audioButton.innerHTML = window.materialIcon?.('volume_up') || 'volume_up';
+      audioButton.title = 'Audio enabled';
+      audioButton.setAttribute('aria-label', 'Audio enabled');
+      audioButton.classList.add('is-ready');
+    }
+    addLog('Audio enabled.', 'ok');
   } catch (err) {
     console.warn('Audio unlock warning:', err);
   }
@@ -415,7 +453,7 @@ function populateWebSpeechSelect() {
     const opt = document.createElement('option');
     opt.value = v.voiceURI || v.name;
     const isVi = (v.lang && v.lang.toLowerCase().includes('vi')) || (v.name && v.name.toLowerCase().includes('viet'));
-    opt.textContent = `${isVi ? '⭐ [Tiếng Việt] ' : ''}${v.name} (${v.lang || 'default'})`;
+    opt.textContent = `${isVi ? '⭐ [Vietnamese] ' : ''}${v.name} (${v.lang || 'default'})`;
     if (isVi && !prevVal) opt.selected = true;
     select.appendChild(opt);
   });
@@ -561,7 +599,7 @@ function updateLiveAudioAnalysis() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// LIVETALKING VIETNAMESE ACOUSTIC LIPSYNC & 21-LANDMARK MESH WARP ENGINE
+// LIVETALKING ACOUSTIC LIPSYNC & 21-LANDMARK MESH WARP ENGINE
 // (Standard Implementation based on https://github.com/lipku/livetalking)
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -631,7 +669,7 @@ const VietnamesePhonemeConverter = {
     // 3. Final consonant check
     if (/[mp]$/.test(raw)) {
       result.push({ viseme: 'PP', relativeDuration: 0.2, weight: 0.9 });
-    } else if (/[c|ng|k]$/.test(raw)) {
+    } else if (/(c|ng|k)$/.test(raw)) {
       result.push({ viseme: 'kk', relativeDuration: 0.2, weight: 0.7 });
     } else if (/[ntdđ]$/.test(raw)) {
       result.push({ viseme: 'DD', relativeDuration: 0.2, weight: 0.7 });
@@ -1354,7 +1392,11 @@ const VideoLipSyncRetargeter = {
 
     const vw = videoEl.videoWidth || 1920;
     const vh = videoEl.videoHeight || 1080;
-    const duration = videoEl.duration || 10;
+    const duration = Number(videoEl.duration);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      this.isSampling = false;
+      return;
+    }
     const n = this.NUM_BUCKETS;
 
     for (let fi = 0; fi < this.SCAN_FRAMES; fi++) {
@@ -1836,8 +1878,10 @@ const LiveTalkingWebRTCClient = {
   async connect(endpoint, avatarId = 'avatar_main') {
     this.disconnect();
     this.endpoint = String(endpoint || 'http://localhost:8011').replace(/\/$/, '');
-    const health = await fetch(`${this.endpoint}/health`).then(r => r.json());
-    if (health.code !== 0) throw new Error(health.msg || 'LiveTalking worker chưa sẵn sàng');
+    if (location.protocol === 'file:') throw new Error('Open the dashboard through the runtime server');
+    const healthResponse = await fetch('/api/talking-head/livetalking/status');
+    const health = await healthResponse.json();
+    if (!healthResponse.ok || !health.health?.healthy) throw new Error(health.error || 'LiveTalking worker is not ready');
 
     const pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan' });
     this.pc = pc;
@@ -1884,15 +1928,15 @@ const LiveTalkingWebRTCClient = {
         setTimeout(resolve, 3000);
       });
     }
-    const response = await fetch(`${this.endpoint}/offer`, {
+    const response = await fetch('/api/talking-head/offer', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: 'offer', avatar: avatarId }),
+      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: 'offer', avatarId }),
     });
     const answer = await response.json();
-    if (!answer.sdp) throw new Error(answer.msg || 'Worker không trả SDP WebRTC');
+    if (!response.ok || !answer.sdp) throw new Error(answer.error || 'Worker returned no WebRTC SDP');
     this.sessionId = answer.sessionid || null;
     await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
-    return { sessionId: this.sessionId, health: health.data };
+    return { sessionId: this.sessionId, health: health.health };
   },
 
   disconnect() {
@@ -1914,7 +1958,7 @@ const LiveTalkingStudio = {
   videoBlobUrl: null,
   videoEl: null,
   modelType: 'musetalk', // 'musetalk' | 'wav2lip'
-  avatarId: localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) || 'musetalk_avatar1',
+  avatarId: localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) || '',
   trainedDataset: null,
   museTalkDataset: null,
   cachedFrames: [],
@@ -1939,6 +1983,158 @@ const LiveTalkingStudio = {
   },
   dragState: { isDragging: false, target: null, handle: null, startX: 0, startY: 0, initialBox: null },
 };
+
+const AvatarSession = {
+  selected: JSON.parse(localStorage.getItem(STORAGE_KEYS.AVATAR_POOL) || '[]'),
+  random: localStorage.getItem(STORAGE_KEYS.AVATAR_RANDOM) === 'true',
+};
+
+const AvatarCreateFlow = { status: 'upload', file: null };
+
+const ProjectStorage = {
+  rootPath: localStorage.getItem(STORAGE_KEYS.PROJECT_STORAGE_ROOT) || '',
+  projectName: localStorage.getItem(STORAGE_KEYS.PROJECT_NAME) || 'ai-livestream',
+  projectPath: '',
+};
+
+async function persistProjectFile(file, category = 'uploads', avatarId = '') {
+  if (!file || location.protocol === 'file:') return null;
+  const params = new URLSearchParams({ category, filename: file.name });
+  if (avatarId) params.set('avatarId', avatarId);
+  const response = await fetch(`/api/storage/file?${params}`, { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
+  const payload = await response.json();
+  if (!response.ok || !payload.success) throw new Error(payload.error || 'Could not save the project file');
+  return payload;
+}
+
+async function persistProjectJson(category, filename, data, avatarId = '') {
+  if (location.protocol === 'file:') return null;
+  const response = await fetch('/api/storage/json', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ category, filename, data, avatarId }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.success) throw new Error(payload.error || 'Could not save metadata');
+  return payload;
+}
+
+async function registerProjectAvatar(avatar) {
+  if (location.protocol === 'file:') return avatar;
+  const response = await fetch('/api/avatars/library', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ avatar }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.success) throw new Error(payload.error || 'Could not save the avatar library');
+  return payload.avatar;
+}
+
+async function loadProjectStorageConfig() {
+  const status = $('project-storage-status');
+  if (location.protocol === 'file:') {
+    if ($('project-storage-root')) $('project-storage-root').value = ProjectStorage.rootPath;
+    if ($('project-storage-name')) $('project-storage-name').value = ProjectStorage.projectName;
+    if (status) status.textContent = 'Open the dashboard through localhost to save project files.';
+    return;
+  }
+  try {
+    const response = await fetch('/api/storage/config');
+    const payload = await response.json();
+    if (!response.ok || !payload.success) throw new Error(payload.error || 'Could not load settings');
+    Object.assign(ProjectStorage, payload);
+    if ($('project-storage-root')) $('project-storage-root').value = payload.rootPath;
+    if ($('project-storage-name')) $('project-storage-name').value = payload.projectName;
+    if (status) status.textContent = payload.projectPath;
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
+}
+
+async function saveProjectStorageConfig() {
+  const rootPath = $('project-storage-root')?.value.trim();
+  const projectName = $('project-storage-name')?.value.trim() || 'ai-livestream';
+  const status = $('project-storage-status');
+  if (!rootPath) {
+    if (status) status.textContent = 'Enter a root folder.';
+    return;
+  }
+  if (location.protocol === 'file:') {
+    if (status) status.textContent = 'Open http://localhost:8765 to enable project storage.';
+    return;
+  }
+  const response = await fetch('/api/storage/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rootPath, projectName }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.success) throw new Error(payload.error || 'Could not save settings');
+  Object.assign(ProjectStorage, payload);
+  localStorage.setItem(STORAGE_KEYS.PROJECT_STORAGE_ROOT, payload.rootPath);
+  localStorage.setItem(STORAGE_KEYS.PROJECT_NAME, payload.projectName);
+  if (status) status.textContent = payload.projectPath;
+  addLog(`Project local: ${payload.projectPath}`, 'ok');
+}
+
+async function selectProjectStorageFolder() {
+  const status = $('project-storage-status');
+  if (location.protocol === 'file:') {
+    if (status) status.textContent = 'Open http://localhost:8765 to select a folder.';
+    return;
+  }
+  if (status) status.textContent = 'Waiting for folder selection…';
+  try {
+    const response = await fetch('/api/storage/select-folder', { method: 'POST' });
+    const payload = await response.json();
+    if (payload.cancelled) {
+      if (status) status.textContent = 'Folder selection cancelled.';
+      return;
+    }
+    if (!response.ok || !payload.success || !payload.rootPath) {
+      throw new Error(payload.error || 'Could not select a folder');
+    }
+    if ($('project-storage-root')) $('project-storage-root').value = payload.rootPath;
+    if (status) status.textContent = 'Folder selected. Click Save folder to apply.';
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
+}
+
+async function refreshLocalAiStatus() {
+  const badge = $('local-ai-status-badge');
+  const state = $('local-ai-runtime-state');
+  const modelName = $('local-ai-model-name');
+  const progress = $('local-ai-install-progress');
+  const installButton = $('install-local-ai-model');
+  try {
+    const response = await fetch('/api/ai/local/status');
+    const payload = await response.json();
+    if (!response.ok || !payload.success) throw new Error(payload.error || 'Could not read local AI status');
+    if (modelName) modelName.textContent = payload.model;
+    if (badge) badge.textContent = payload.installed ? 'Ready' : (payload.reachable ? 'Not installed' : 'Offline');
+    if (state) state.textContent = payload.installed ? 'Ollama ready' : (payload.reachable ? 'Ollama connected' : 'Start Ollama first');
+    if (progress) progress.textContent = payload.install?.state === 'INSTALLING' ? payload.install.progress : (payload.install?.error || '');
+    if (installButton) {
+      installButton.disabled = payload.installed || payload.install?.state === 'INSTALLING';
+      installButton.innerHTML = payload.installed
+        ? '<span class="material-symbols-rounded">check</span>Installed'
+        : '<span class="material-symbols-rounded">download</span>Install model';
+    }
+    return payload;
+  } catch (error) {
+    if (badge) badge.textContent = 'Offline';
+    if (state) state.textContent = error.message;
+    return null;
+  }
+}
+
+async function installLocalAiModel() {
+  const response = await fetch('/api/ai/local/install', { method: 'POST' });
+  const payload = await response.json();
+  if (!response.ok && response.status !== 409) throw new Error(payload.error || 'Could not start model installation');
+  await refreshLocalAiStatus();
+  const timer = setInterval(async () => {
+    const status = await refreshLocalAiStatus();
+    if (!status || status.installed || status.install?.state === 'ERROR') clearInterval(timer);
+  }, 2000);
+}
 
 function canonicalizeBox(box) {
   if (!box) return null;
@@ -2065,7 +2261,7 @@ function updateLiveTalkingUI() {
       const sizeMb = (LiveTalkingStudio.videoFile.size / (1024 * 1024)).toFixed(1);
       fileInfo.textContent = `${LiveTalkingStudio.videoFile.type.startsWith('image/') ? '🖼️' : '🎬'} ${LiveTalkingStudio.videoFile.name} (${sizeMb} MB)`;
     } else {
-      fileInfo.textContent = 'Chưa chọn video...';
+      fileInfo.textContent = 'No media selected';
     }
   }
 
@@ -2109,7 +2305,7 @@ function updateLiveTalkingUI() {
 
   if (LiveTalkingStudio.isTrainedReady) {
     if (step1Badge) step1Badge.className = 'lt-step-badge completed';
-    if (lblStep1Status) lblStep1Status.textContent = '✅ Đã hoàn tất';
+    if (lblStep1Status) lblStep1Status.textContent = '✅ Complete';
     if (badgeTrainState) {
       badgeTrainState.className = 'badge-status-pill ok';
       badgeTrainState.textContent = '✅ MuseTalk Neural Ready';
@@ -2118,7 +2314,7 @@ function updateLiveTalkingUI() {
     // Unlock Step 2
     if (colStep2) colStep2.classList.remove('locked');
     if (step2Badge) step2Badge.className = 'lt-step-badge active';
-    if (lblStep2Status) lblStep2Status.textContent = '🟢 Đã mở khóa';
+    if (lblStep2Status) lblStep2Status.textContent = '🟢 Unlocked';
 
     const liveVideo = $('lt-live-stream-video');
     if (liveVideo && LiveTalkingStudio.videoBlobUrl) {
@@ -2129,29 +2325,130 @@ function updateLiveTalkingUI() {
     }
   } else {
     if (step1Badge) step1Badge.className = 'lt-step-badge active';
-    if (lblStep1Status) lblStep1Status.textContent = LiveTalkingStudio.isTraining ? '⏳ Worker đang xử lý...' : (LiveTalkingStudio.videoFile ? 'Chờ tạo avatar' : 'Chờ nạp ảnh/video');
+    if (lblStep1Status) lblStep1Status.textContent = LiveTalkingStudio.isTraining ? '⏳ Worker processing...' : (LiveTalkingStudio.videoFile ? 'Ready to create' : 'Waiting for media');
     if (badgeTrainState) {
       badgeTrainState.className = LiveTalkingStudio.isTraining ? 'badge-status-pill training' : 'badge-status-pill';
-      badgeTrainState.textContent = LiveTalkingStudio.isTraining ? `⏳ Neural ${LiveTalkingStudio.trainProgress}%` : 'Chưa tạo';
+      badgeTrainState.textContent = LiveTalkingStudio.isTraining ? `⏳ Neural ${LiveTalkingStudio.trainProgress}%` : 'Not created';
     }
 
     // Lock Step 2
     if (colStep2) colStep2.classList.add('locked');
     if (step2Badge) step2Badge.className = 'lt-step-badge locked';
-    if (lblStep2Status) lblStep2Status.textContent = '🔒 Đang khóa';
+    if (lblStep2Status) lblStep2Status.textContent = '🔒 Locked';
   }
 
   updateLiveTalkingVoiceUI();
+  updateAvatarCreateUI();
+}
+
+function updateAvatarCreateUI() {
+  const progress = Math.max(0, Math.min(100, Number(LiveTalkingStudio.trainProgress) || 0));
+  const fill = $('avatar-create-progress-fill');
+  const label = $('avatar-create-progress-label');
+  const status = $('avatar-create-status');
+  const button = $('btn-avatar-create-train');
+  const message = $('avatar-create-message');
+  const steps = [...document.querySelectorAll('[data-create-step]')];
+  const current = AvatarCreateFlow.status;
+  const order = ['upload', 'config', 'training', 'done'];
+
+  if (fill) fill.style.width = `${progress}%`;
+  if (label) label.textContent = `${progress}%`;
+  if (status) status.textContent = current === 'done' ? 'Avatar ready'
+    : current === 'training' ? 'Training model…'
+    : current === 'config' ? 'Ready to train'
+    : 'Ready to upload';
+
+  steps.forEach(step => {
+    const stepName = step.dataset.createStep;
+    step.classList.toggle('active', stepName === current);
+    step.classList.toggle('complete', order.indexOf(stepName) < order.indexOf(current));
+  });
+
+  if (button) {
+    button.disabled = !AvatarCreateFlow.file || LiveTalkingStudio.isTraining;
+    button.innerHTML = current === 'done'
+      ? `${window.materialIcon?.('check') || ''}Done`
+      : current === 'training'
+        ? `${window.materialIcon?.('progress_activity') || ''}Training…`
+        : `${window.materialIcon?.('model_training') || ''}Start Training`;
+  }
+  if (message) message.textContent = current === 'done'
+    ? 'Training complete. This avatar is saved and ready for live selection.'
+    : current === 'training'
+      ? 'The worker is preparing frames, face coordinates, latents, and masks.'
+      : 'Your trained avatar will be saved to the local avatar library.';
+}
+
+async function loadAvatarTrainingFile(file) {
+  if (!file) return;
+  AvatarCreateFlow.file = file;
+  AvatarCreateFlow.status = 'config';
+  LiveTalkingStudio.videoFile = file;
+  LiveTalkingStudio.videoBlobUrl = URL.createObjectURL(file);
+  LiveTalkingStudio.isTrainedReady = false;
+  LiveTalkingStudio.trainProgress = 0;
+  VideoLipSyncRetargeter.reset();
+
+  if (file.type.startsWith('image/')) {
+    const img = new Image();
+    img.src = LiveTalkingStudio.videoBlobUrl;
+    await img.decode();
+    LiveTalkingStudio.videoEl = img;
+  } else {
+    const vid = document.createElement('video');
+    vid.src = LiveTalkingStudio.videoBlobUrl;
+    vid.loop = true;
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.autoplay = true;
+    vid.play().catch(() => {});
+    LiveTalkingStudio.videoEl = vid;
+  }
+
+  await IdolDB.saveAvatar('livetalking_avatar', file, {
+    fileName: file.name,
+    fileSize: file.size,
+    isTrainedReady: false,
+    uploadedAt: Date.now(),
+  });
+  persistProjectFile(file, 'avatars/source', $('avatar-create-id')?.value.trim() || $('lt-avatar-id-input')?.value.trim() || 'avatar_main')
+    .then(saved => saved && addLog(`Saved avatar media: ${saved.path}`, 'ok'))
+    .catch(err => addLog(`Could not save avatar media: ${err.message}`, 'warn'));
+
+  if ($('avatar-create-file-name')) $('avatar-create-file-name').textContent = file.name;
+  updateLiveTalkingUI();
+  addLog(`Loaded avatar media: ${file.name}`, 'ok');
+}
+
+function openAvatarCreateModal() {
+  if (!LiveTalkingStudio.isTraining) {
+    AvatarCreateFlow.status = 'upload';
+    AvatarCreateFlow.file = null;
+    LiveTalkingStudio.trainProgress = 0;
+    const suggestedId = `avatar_${String(Date.now()).slice(-6)}`;
+    if ($('avatar-create-id')) $('avatar-create-id').value = suggestedId;
+    if ($('lt-avatar-id-input')) $('lt-avatar-id-input').value = suggestedId;
+    if ($('input-avatar-create-file')) $('input-avatar-create-file').value = '';
+    if ($('avatar-create-file-name')) $('avatar-create-file-name').textContent = 'Upload image or video';
+  }
+  if ($('modal-avatar-create')) $('modal-avatar-create').style.display = 'flex';
+  updateAvatarCreateUI();
+}
+
+function closeAvatarCreateModal() {
+  if ($('modal-avatar-create')) $('modal-avatar-create').style.display = 'none';
 }
 
 async function startLiveTalkingTrainingSimulation() {
   if (!LiveTalkingStudio.videoBlobUrl) {
-    alert('Vui lòng nạp file video (.mp4) trước khi bắt đầu training!');
+    alert('Upload an avatar image or video first.');
     return;
   }
 
   if (LiveTalkingStudio.isTraining) return;
   LiveTalkingStudio.isTraining = true;
+  AvatarCreateFlow.status = 'training';
   LiveTalkingStudio.isTrainedReady = false;
   LiveTalkingStudio.trainProgress = 0;
   updateLiveTalkingUI();
@@ -2161,7 +2458,7 @@ async function startLiveTalkingTrainingSimulation() {
   LiveTalkingStudio.modelType = modelType;
   LiveTalkingStudio.avatarId = avatarId;
 
-  logLiveTalkingTerminal(`⚡ Bắt đầu tiến trình Preprocessing Native LiveTalking + MuseTalk Dataset [${avatarId}]...`, 'info');
+  logLiveTalkingTerminal(`⚡ Starting LiveTalking and MuseTalk preprocessing [${avatarId}]...`, 'info');
 
   try {
     const vid = LiveTalkingStudio.videoEl;
@@ -2169,13 +2466,13 @@ async function startLiveTalkingTrainingSimulation() {
     const vh = vid ? (vid.videoHeight || 1080) : 1080;
 
     // Stage 1: Frame extraction & normalization (video2imgs)
-    logLiveTalkingTerminal('▶ [Stage 1/4] [video2imgs] Trích xuất tuần tự khung hình từ video gốc & chuẩn hóa FPS 25...', 'info');
+    logLiveTalkingTerminal('▶ [Stage 1/4] [video2imgs] Extracting source frames and normalizing to 25 FPS...', 'info');
     LiveTalkingStudio.trainProgress = 25;
     updateLiveTalkingUI();
     await new Promise(r => setTimeout(r, 500));
 
     // Stage 2: Native MuseTalk Face Detection & Bounding Box (face_detection)
-    logLiveTalkingTerminal('▶ [Stage 2/4] [face_detection] Quét và trích xuất BBox khuôn mặt [coord_list_cycle / bbox_list]...', 'info');
+    logLiveTalkingTerminal('▶ [Stage 2/4] [face_detection] Detecting face bounding boxes...', 'info');
     
     const sampleCanvas = document.createElement('canvas');
     sampleCanvas.width = 320;
@@ -2197,7 +2494,7 @@ async function startLiveTalkingTrainingSimulation() {
     await new Promise(r => setTimeout(r, 500));
 
     // Stage 3: VAE Latent & Lower-Face Mask Caching (latent_caching)
-    logLiveTalkingTerminal('▶ [Stage 3/4] [latent_caching] Tạo bộ đệm VAE Latent & Mask nửa dưới mặt [mask_list + latent_list]...', 'info');
+    logLiveTalkingTerminal('▶ [Stage 3/4] [latent_caching] Creating VAE latents and lower-face masks...', 'info');
     const smoothedBoxes = get_smoothened_boxes(detectedBoxes, 5);
     LiveTalkingStudio.coords = smoothedBoxes;
     const rawFace = smoothedBoxes[0] || { x1: 0.32, y1: 0.14, x2: 0.68, y2: 0.54 };
@@ -2262,31 +2559,19 @@ async function startLiveTalkingTrainingSimulation() {
     // Also populate optional 468 mesh for diagnostics
     LiveTalkingStudio.landmarks468 = generate468FaceLandmarks(LiveTalkingStudio.faceBox, LiveTalkingStudio.mouthBox);
 
-    logLiveTalkingTerminal(`🎯 [MuseTalk] Đã lập chỉ mục Ping-Pong Sequence (${LiveTalkingStudio.museTalkDataset.sequence.length} frames)`, 'ok');
-    logLiveTalkingTerminal(`🔒 [Frame Sync] Khóa cứng Lockstep: FRAME=BBOX=LATENT=MASK`, 'ok');
+    logLiveTalkingTerminal(`🎯 [MuseTalk] Indexed ping-pong sequence (${LiveTalkingStudio.museTalkDataset.sequence.length} frames)`, 'ok');
+    logLiveTalkingTerminal(`🔒 [Frame Sync] Lockstep verified: FRAME=BBOX=LATENT=MASK`, 'ok');
 
     LiveTalkingStudio.trainProgress = 75;
     updateLiveTalkingUI();
     await new Promise(r => setTimeout(r, 500));
 
-    // Call backend API if available
-    try {
-      await fetch('/api/avatar/task', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelType,
-          avatar_id: avatarId,
-          video_path: LiveTalkingStudio.videoFile?.name || 'avatar.mp4',
-        })
-      });
-    } catch {}
-
     // Stage 4: Compile Avatar Dataset Package
-    logLiveTalkingTerminal('▶ [Stage 4/4] [compile] Đóng gói Profile Avatar MuseTalk hoàn chỉnh...', 'info');
+    logLiveTalkingTerminal('▶ [Stage 4/4] [compile] Building the MuseTalk avatar profile...', 'info');
     LiveTalkingStudio.trainProgress = 100;
     LiveTalkingStudio.isTraining = false;
     LiveTalkingStudio.isTrainedReady = true;
+    AvatarCreateFlow.status = 'done';
 
     LiveTalkingStudio.trainedDataset = {
       id: avatarId,
@@ -2318,6 +2603,8 @@ async function startLiveTalkingTrainingSimulation() {
         museTalkDataset: LiveTalkingStudio.museTalkDataset,
         trainedAt: Date.now()
       });
+      await registerProjectAvatar({ id: avatarId, name: LiveTalkingStudio.videoFile.name, modelType, status: 'ready', trainedAt: Date.now() }).catch(() => {});
+      await persistProjectJson('models', 'dataset.json', LiveTalkingStudio.trainedDataset, avatarId).catch(() => {});
     }
 
     App.avatar.videoEl = LiveTalkingStudio.videoEl;
@@ -2329,13 +2616,13 @@ async function startLiveTalkingTrainingSimulation() {
     App.avatar.museTalkDataset = LiveTalkingStudio.museTalkDataset;
 
     updateLiveTalkingUI();
-    logLiveTalkingTerminal('✅ HOÀN TẤT PREPROCESSING LIVETALKING + MUSETALK! Đã mở khóa Bước 2 (Kết nối Voice & LipSync).', 'ok');
-    addLog(`✅ LiveTalking MuseTalk Data Prep hoàn tất [${avatarId}]!`, 'ok');
+    logLiveTalkingTerminal('✅ LIVETALKING + MUSETALK PREPROCESSING COMPLETE. Voice and LipSync testing unlocked.', 'ok');
+    addLog(`✅ LiveTalking MuseTalk data preparation complete [${avatarId}]!`, 'ok');
 
     // ── STAGE 5: Sample real video frames for realistic video-based LipSync ──
     // This runs asynchronously after training — it scans the video, extracts
     // 80 timestamps, and fills 16 openness buckets with real face pixels.
-    logLiveTalkingTerminal('▶ [Stage 5/5] [frame_sampler] Quét khung hình video thực — xây dựng kho LipSync từ pixels gốc...', 'info');
+    logLiveTalkingTerminal('▶ [Stage 5/5] [frame_sampler] Sampling source frames for the LipSync frame set...', 'info');
     VideoLipSyncRetargeter.reset();
     const samplerVid = LiveTalkingStudio.videoEl;
     const samplerFaceBox = LiveTalkingStudio.faceBox;
@@ -2348,7 +2635,7 @@ async function startLiveTalkingTrainingSimulation() {
       (progress, openness, bucket) => {
         if (Math.round(progress * 100) % 20 === 0) {
           logLiveTalkingTerminal(
-            `  ⏳ Quét khung ${Math.round(progress * 100)}% — Openness: ${(openness * 100).toFixed(0)}% → Bucket ${bucket}`,
+            `  ⏳ Sampling frame ${Math.round(progress * 100)}% — Openness: ${(openness * 100).toFixed(0)}% → Bucket ${bucket}`,
             'info'
           );
         }
@@ -2359,48 +2646,192 @@ async function startLiveTalkingTrainingSimulation() {
           ? VideoLipSyncRetargeter.bucketTimestamps.filter(t => t !== null && t >= 0).length
           : 0;
         logLiveTalkingTerminal(
-          `✅ [Retargeter] Hoàn tất! ${filledBuckets}/${VideoLipSyncRetargeter.NUM_BUCKETS} buckets — LipSync thực từ video đã sẵn sàng.`,
+          `✅ [Retargeter] Complete. ${filledBuckets}/${VideoLipSyncRetargeter.NUM_BUCKETS} buckets — Source-video LipSync frames are ready.`,
           'ok'
         );
-        addLog('✅ VideoLipSync Retargeter: kho khung hình thực đã sẵn sàng!', 'ok');
+        addLog('✅ Video LipSync frame set is ready.', 'ok');
       }
     }).catch(err => {
-      logLiveTalkingTerminal(`⚠️ Frame Sampler lỗi: ${err.message}`, 'warn');
+      logLiveTalkingTerminal(`⚠️ Frame sampler error: ${err.message}`, 'warn');
     });
 
   } catch (err) {
     LiveTalkingStudio.isTraining = false;
+    AvatarCreateFlow.status = 'config';
     updateLiveTalkingUI();
-    logLiveTalkingTerminal(`❌ Lỗi trong quá trình training: ${err.message}`, 'err');
-    addLog(`Lỗi training avatar: ${err.message}`, 'warn');
+    logLiveTalkingTerminal(`❌ Avatar creation error: ${err.message}`, 'err');
+    addLog(`Avatar creation failed: ${err.message}`, 'warn');
   }
 }
 
 async function refreshLiveTalkingAvatarList() {
   const select = $('lt-existing-avatar-select');
-  if (!select) return;
-  const endpoint = (App.talkingEngine.endpoint || 'http://localhost:8011').replace(/\/$/, '');
-  const ids = new Set(['musetalk_avatar1', LiveTalkingStudio.avatarId].filter(Boolean));
-  try {
-    const payload = await fetch(`${endpoint}/api/avatar/tasks`).then(r => r.json());
-    for (const task of payload.data?.tasks || []) {
-      if (task.status === 'completed' && task.avatar_id) ids.add(task.avatar_id);
+  const records = new Map();
+  const [workerResult, localResult, sessionResult] = await Promise.allSettled([
+    location.protocol === 'file:' ? Promise.resolve({ data: { tasks: [] } }) : fetch('/api/avatar/tasks').then(r => r.json()),
+    location.protocol === 'file:' ? Promise.resolve({ avatars: [] }) : fetch('/api/avatars/library').then(r => r.json()),
+    location.protocol === 'file:' ? Promise.resolve({ session: null }) : fetch('/api/avatars/session').then(r => r.json()),
+  ]);
+  if (workerResult.status === 'fulfilled') {
+    for (const task of workerResult.value.data?.tasks || []) {
+      if (task.status === 'completed' && task.avatar_id) {
+        records.set(task.avatar_id, { id: task.avatar_id, name: task.avatar_id, status: 'ready', trainedAt: task.completed_at || task.updated_at, source: 'worker' });
+      }
     }
-  } catch (err) {
-    logLiveTalkingTerminal(`⚠️ Chưa tải được danh sách avatar: ${err.message}`, 'warn');
+  } else {
+    logLiveTalkingTerminal(`Could not load avatars from the worker: ${workerResult.reason?.message || workerResult.reason}`, 'warn');
   }
-  select.replaceChildren(...[...ids].map(id => {
-    const option = document.createElement('option');
-    option.value = id;
-    option.textContent = id;
-    option.selected = id === LiveTalkingStudio.avatarId;
-    return option;
+  if (localResult.status === 'fulfilled') {
+    for (const avatar of localResult.value.avatars || []) {
+      const id = avatar.id || avatar.avatarId;
+      if (id) records.set(id, { ...records.get(id), ...avatar, id, status: avatar.status || 'ready', source: 'local' });
+    }
+  }
+  if (sessionResult.status === 'fulfilled' && sessionResult.value.session) {
+    AvatarSession.selected = [...new Set(sessionResult.value.session.selected || [])];
+    AvatarSession.random = Boolean(sessionResult.value.session.random);
+    localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
+    localStorage.setItem(STORAGE_KEYS.AVATAR_RANDOM, String(AvatarSession.random));
+  }
+  if (LiveTalkingStudio.isTrainedReady && LiveTalkingStudio.avatarId && !records.has(LiveTalkingStudio.avatarId)) {
+    records.set(LiveTalkingStudio.avatarId, { id: LiveTalkingStudio.avatarId, name: LiveTalkingStudio.videoFile?.name || LiveTalkingStudio.avatarId, status: 'ready', source: 'session' });
+  }
+  const avatars = [...records.values()];
+  if (select) {
+    select.replaceChildren(...avatars.map(avatar => {
+      const option = document.createElement('option');
+      option.value = avatar.id;
+      option.textContent = avatar.id;
+      option.selected = avatar.id === LiveTalkingStudio.avatarId;
+      return option;
+    }));
+  }
+  renderAvatarSessionPool(avatars.map(avatar => avatar.id));
+  renderAvatarLibrary(avatars);
+  return avatars;
+}
+
+function renderAvatarLibrary(avatars) {
+  const grid = $('avatar-library-grid');
+  if (!grid) return;
+  const valid = avatars.filter(avatar => avatar?.id);
+  AvatarSession.selected = AvatarSession.selected.filter(id => valid.some(avatar => avatar.id === id));
+  if ($('avatar-page-count')) $('avatar-page-count').textContent = `${valid.length} avatar${valid.length === 1 ? '' : 's'}`;
+  if ($('avatar-page-random-toggle')) $('avatar-page-random-toggle').checked = AvatarSession.random;
+
+  if (!valid.length) {
+    grid.innerHTML = `<article class="avatar-empty-card"><span class="material-symbols-rounded" aria-hidden="true">person_add</span><h2>No avatars yet</h2><p>Upload media and train your first avatar.</p><button type="button" data-create-avatar>Create Avatar</button></article>`;
+    return;
+  }
+
+  grid.replaceChildren(...valid.map(avatar => {
+    const card = document.createElement('article');
+    const selected = AvatarSession.selected.includes(avatar.id);
+    card.className = `avatar-library-card${selected ? ' selected' : ''}`;
+
+    const preview = document.createElement('div');
+    preview.className = 'avatar-card-preview';
+    preview.innerHTML = `<span class="avatar-card-status">Ready</span><span class="material-symbols-rounded" aria-hidden="true">person</span>`;
+
+    const body = document.createElement('div');
+    body.className = 'avatar-card-body';
+    const title = document.createElement('h3');
+    title.textContent = avatar.id;
+    const meta = document.createElement('p');
+    meta.textContent = `${avatar.modelType || 'MuseTalk'} · ${avatar.name || 'Trained avatar'}`;
+    const live = document.createElement('label');
+    live.className = 'avatar-live-check';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selected;
+    checkbox.setAttribute('aria-label', `Use ${avatar.id} in live session`);
+    const label = document.createElement('span');
+    label.textContent = 'Use in live session';
+    checkbox.addEventListener('change', async () => {
+      if (checkbox.checked) AvatarSession.selected = [...new Set([...AvatarSession.selected, avatar.id])];
+      else AvatarSession.selected = AvatarSession.selected.filter(id => id !== avatar.id);
+      card.classList.toggle('selected', checkbox.checked);
+      updateAvatarPoolCount();
+      await saveAvatarSession().catch(err => addLog(`Could not save avatar selection: ${err.message}`, 'warn'));
+    });
+    live.append(checkbox, label);
+    body.append(title, meta, live);
+    card.append(preview, body);
+    return card;
   }));
+}
+
+function renderAvatarSessionPool(ids) {
+  const list = $('lt-avatar-pool-list');
+  if (!list) return;
+  const validIds = [...new Set(ids.filter(Boolean))];
+  AvatarSession.selected = AvatarSession.selected.filter(id => validIds.includes(id));
+  if (!AvatarSession.selected.length && LiveTalkingStudio.avatarId && validIds.includes(LiveTalkingStudio.avatarId)) {
+    AvatarSession.selected = [LiveTalkingStudio.avatarId];
+  }
+  list.replaceChildren(...validIds.map(id => {
+    const label = document.createElement('label');
+    label.className = `avatar-pool-item${AvatarSession.selected.includes(id) ? ' active' : ''}`;
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = id;
+    input.checked = AvatarSession.selected.includes(id);
+    input.addEventListener('change', () => {
+      AvatarSession.selected = [...list.querySelectorAll('input:checked')].map(item => item.value);
+      label.classList.toggle('active', input.checked);
+      updateAvatarPoolCount();
+    });
+    const name = document.createElement('span');
+    name.textContent = id;
+    label.append(input, name);
+    return label;
+  }));
+  if (!validIds.length) {
+    const empty = document.createElement('span');
+    empty.className = 'avatar-pool-empty';
+    empty.textContent = 'No trained avatars yet.';
+    list.append(empty);
+  }
+  if ($('lt-random-avatar-toggle')) $('lt-random-avatar-toggle').checked = AvatarSession.random;
+  updateAvatarPoolCount();
+}
+
+function updateAvatarPoolCount() {
+  if ($('lt-avatar-pool-count')) $('lt-avatar-pool-count').textContent = `${AvatarSession.selected.length} avatars selected`;
+}
+
+async function saveAvatarSession() {
+  const randomControl = $('avatar-page-random-toggle') || $('lt-random-avatar-toggle');
+  if (randomControl) AvatarSession.random = Boolean(randomControl.checked);
+  if ($('avatar-page-random-toggle')) $('avatar-page-random-toggle').checked = AvatarSession.random;
+  if ($('lt-random-avatar-toggle')) $('lt-random-avatar-toggle').checked = AvatarSession.random;
+  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
+  localStorage.setItem(STORAGE_KEYS.AVATAR_RANDOM, String(AvatarSession.random));
+  if (location.protocol !== 'file:') {
+    await fetch('/api/avatars/session', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected: AvatarSession.selected, random: AvatarSession.random }),
+    });
+  }
+  addLog(`Saved avatar session: ${AvatarSession.selected.length} avatar${AvatarSession.random ? ' · random' : ''}`, 'ok');
+}
+
+async function selectAvatarForSpeech() {
+  if (!AvatarSession.selected.length) return LiveTalkingStudio.avatarId;
+  if (!AvatarSession.random || AvatarSession.selected.length < 2) {
+    const selectedId = AvatarSession.selected[0];
+    if (selectedId && selectedId !== LiveTalkingStudio.avatarId) await activateLiveTalkingAvatar(selectedId);
+    return selectedId || LiveTalkingStudio.avatarId;
+  }
+  const candidates = AvatarSession.selected.filter(id => id !== LiveTalkingStudio.avatarId);
+  const nextId = candidates[Math.floor(Math.random() * candidates.length)] || AvatarSession.selected[0];
+  if (nextId && nextId !== LiveTalkingStudio.avatarId) await activateLiveTalkingAvatar(nextId);
+  return nextId;
 }
 
 async function activateLiveTalkingAvatar(avatarId) {
   const id = String(avatarId || '').trim();
-  if (!id) throw new Error('Avatar ID không hợp lệ');
+  if (!id) throw new Error('Invalid avatar ID');
   LiveTalkingStudio.avatarId = id;
   LiveTalkingStudio.isTrainedReady = true;
   LiveTalkingStudio.trainProgress = 100;
@@ -2415,76 +2846,72 @@ async function activateLiveTalkingAvatar(avatarId) {
   const result = await LiveTalkingWebRTCClient.connect(App.talkingEngine.endpoint, id);
   updateLiveTalkingUI();
   loadPersistedSettings();
-  logLiveTalkingTerminal(`✅ Đã kích hoạt ${id} qua neural WebRTC (${result.sessionId || 'active'})`, 'ok');
-  addLog(`✅ Avatar MuseTalk đang dùng: ${id}`, 'ok');
+  logLiveTalkingTerminal(`✅ Activated ${id} through neural WebRTC (${result.sessionId || 'active'})`, 'ok');
+  addLog(`✅ Active MuseTalk avatar: ${id}`, 'ok');
   return result;
 }
 
 async function startLiveTalkingTraining() {
   const file = LiveTalkingStudio.videoFile;
   if (!file) {
-    alert('Vui lòng nạp ảnh hoặc video avatar trước!');
+    alert('Upload avatar media first.');
     return;
   }
   if (LiveTalkingStudio.isTraining) return;
 
-  const endpoint = (App.talkingEngine.endpoint || 'http://localhost:8011').replace(/\/$/, '');
   const model = $('lt-model-select')?.value || 'musetalk';
   const rawId = $('lt-avatar-id-input')?.value.trim() || `avatar_${Date.now()}`;
   const avatarId = rawId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const bboxShift = parseInt($('lt-bbox-shift-input')?.value || '0', 10);
-  const extraMargin = parseInt($('lt-extra-margin-input')?.value || '10', 10);
 
   LiveTalkingStudio.isTraining = true;
+  AvatarCreateFlow.status = 'training';
   LiveTalkingStudio.isTrainedReady = false;
   LiveTalkingStudio.trainProgress = 1;
   LiveTalkingStudio.avatarId = avatarId;
   LiveTalkingStudio.modelType = model;
   updateLiveTalkingUI();
-  logLiveTalkingTerminal(`⚡ Upload ${file.name} tới worker ${endpoint}...`, 'info');
+  logLiveTalkingTerminal(`Uploading ${file.name} to project storage...`, 'info');
 
   try {
-    const form = new FormData();
-    form.append('model', model);
-    form.append('avatar_id', avatarId);
-    form.append('video_file', file, file.name);
-    form.append('bbox_shift', String(Number.isFinite(bboxShift) ? bboxShift : 0));
-    form.append('extra_margin', String(Number.isFinite(extraMargin) ? extraMargin : 10));
-    form.append('parsing_mode', 'jaw');
-    form.append('version', 'v15');
-
-    const createdResponse = await fetch(`${endpoint}/api/avatar/task`, { method: 'POST', body: form });
+    const storedVideo = await persistProjectFile(file, 'avatars/source', avatarId);
+    if (!storedVideo?.path) throw new Error('Could not save the avatar source video');
+    const createdResponse = await fetch('/api/avatar/task', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, avatar_id: avatarId, video_path: storedVideo.path }),
+    });
     const created = await createdResponse.json();
     if (!createdResponse.ok || created.code !== 0 || !created.data?.task_id) {
-      throw new Error(created.msg || `Worker trả HTTP ${createdResponse.status}`);
+      throw new Error(created.msg || `Runtime returned HTTP ${createdResponse.status}`);
     }
 
     const taskId = created.data.task_id;
-    logLiveTalkingTerminal(`🧠 Task ${taskId.slice(0, 8)} đã tạo. Worker đang chạy Face Detection → VAE → Mask...`, 'info');
+    logLiveTalkingTerminal(`🧠 Task ${taskId.slice(0, 8)} created. Worker is running Face Detection → VAE → Mask...`, 'info');
     const deadline = Date.now() + 30 * 60 * 1000;
     let task;
     while (Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 1000));
-      const statusResponse = await fetch(`${endpoint}/api/avatar/task/${taskId}`);
+      const statusResponse = await fetch(`/api/avatar/task/${taskId}`);
       const statusPayload = await statusResponse.json();
-      if (!statusResponse.ok || statusPayload.code !== 0) throw new Error(statusPayload.msg || 'Không đọc được tiến độ');
+      if (!statusResponse.ok || statusPayload.code !== 0) throw new Error(statusPayload.msg || 'Could not read worker progress');
       task = statusPayload.data;
       LiveTalkingStudio.trainProgress = Math.max(1, Math.min(100, Number(task.progress) || 1));
       updateLiveTalkingUI();
       if (task.status === 'completed') break;
-      if (task.status === 'failed') throw new Error(task.error_msg || 'Worker tạo avatar thất bại');
+      if (task.status === 'failed') throw new Error(task.error_msg || 'Worker failed to create the avatar');
     }
-    if (!task || task.status !== 'completed') throw new Error('Quá thời gian chờ worker tạo avatar');
+    if (!task || task.status !== 'completed') throw new Error('Avatar creation timed out');
 
     LiveTalkingStudio.trainProgress = 100;
     LiveTalkingStudio.isTraining = false;
     LiveTalkingStudio.isTrainedReady = true;
+    AvatarCreateFlow.status = 'done';
     LiveTalkingStudio.trainedDataset = {
       id: avatarId,
       name: file.name,
       modelType: model,
       taskId,
-      neuralWorker: endpoint,
+      neuralWorker: 'runtime-managed',
       trainedAt: Date.now(),
     };
     await IdolDB.saveAvatar('livetalking_avatar', file, {
@@ -2497,14 +2924,27 @@ async function startLiveTalkingTraining() {
       neuralWorker: endpoint,
       trainedAt: Date.now(),
     });
+    await registerProjectAvatar({ id: avatarId, name: file.name, modelType: model, taskId, status: 'ready', trainedAt: Date.now() }).catch(() => {});
+    await persistProjectJson('models', 'training-result.json', LiveTalkingStudio.trainedDataset, avatarId).catch(() => {});
+    AvatarSession.selected = [...new Set([...AvatarSession.selected, avatarId])];
+    await saveAvatarSession().catch(() => {});
     updateLiveTalkingUI();
     await refreshLiveTalkingAvatarList();
-    logLiveTalkingTerminal(`✅ Worker đã tạo đủ coords.pkl, latents.pt và mask cho ${avatarId}.`, 'ok');
-    await activateLiveTalkingAvatar(avatarId);
+    logLiveTalkingTerminal(`✅ Worker created coords.pkl, latents.pt, and masks for ${avatarId}.`, 'ok');
+    try {
+      await activateLiveTalkingAvatar(avatarId);
+    } catch (activationError) {
+      LiveTalkingStudio.isTrainedReady = true;
+      AvatarCreateFlow.status = 'done';
+      updateLiveTalkingUI();
+      logLiveTalkingTerminal(`⚠️ Avatar saved, but the live WebRTC session is not connected yet: ${activationError.message}`, 'warn');
+      addLog(`Avatar ${avatarId} is saved. Connect the LiveTalking worker before going live.`, 'warn');
+    }
   } catch (err) {
     LiveTalkingStudio.isTraining = false;
+    AvatarCreateFlow.status = 'config';
     updateLiveTalkingUI();
-    logLiveTalkingTerminal(`❌ Tạo avatar neural thất bại: ${err.message}`, 'err');
+    logLiveTalkingTerminal(`❌ Neural avatar creation failed: ${err.message}`, 'err');
     addLog(`❌ LiveTalking avatar: ${err.message}`, 'warn');
   }
 }
@@ -2587,7 +3027,7 @@ function renderLiveTalkingStep1Preview(ctx, width, height) {
         ctx.fillRect(tagX, tagY - 20, 240, 18);
         ctx.fillStyle = '#6ee7b7';
         ctx.font = 'bold 8.5px sans-serif';
-        ctx.fillText(`🎭 MuseTalk Native Pipeline · 25 FPS [READY]`, tagX + 6, tagY - 7);
+        ctx.fillText(`MuseTalk Native Pipeline · 25 FPS [READY]`, tagX + 6, tagY - 7);
       }
 
       // ── DEBUG INDEX & TELEMETRY HUD ──
@@ -2617,7 +3057,7 @@ function renderLiveTalkingStep1Preview(ctx, width, height) {
 
         ctx.fillStyle = '#38bdf8';
         ctx.font = 'bold 9.5px monospace';
-        ctx.fillText('📡 LIVETALKING / MUSETALK DEBUG', hudX + 8, hudY + 14);
+        ctx.fillText('LIVETALKING / MUSETALK DEBUG', hudX + 8, hudY + 14);
 
         ctx.font = '8.5px monospace';
         ctx.fillStyle = '#e2e8f0';
@@ -2665,6 +3105,21 @@ function renderLiveTalkingLipSync(ctx, width, height, isSpeaking, avatarData) {
     }
     const dx = (width - dw) / 2;
     const dy = (height - dh) / 2;
+
+    // A real LiveTalking MediaStream already contains the neural face result.
+    // Draw it once and never run the legacy browser mouth-retargeting sampler
+    // against an infinite-duration WebRTC stream.
+    const isWorkerWebRtcStream = App.talkingEngine.provider === 'livetalking'
+      && Boolean(LiveTalkingWebRTCClient.sessionId)
+      && vid === LiveTalkingWebRTCClient.videoEl;
+    if (isWorkerWebRtcStream) {
+      if (vid.paused) vid.play().catch(() => {});
+      ctx.drawImage(vid, dx, dy, dw, dh);
+      MuseTalkRealtimeEngine.outputSource = (isSpeaking || App.isAiSpeaking || App.currentState === 'TALKING')
+        ? 'MUSETALK_FRAME'
+        : 'IDLE_FRAME';
+      return;
+    }
 
     // 1. Lockstep Synchronized MuseTalk Dataset
     const dataset = LiveTalkingStudio.museTalkDataset || avatarData?.museTalkDataset || {
@@ -2768,7 +3223,7 @@ function renderLiveTalkingLipSync(ctx, width, height, isSpeaking, avatarData) {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#00e5ff';
   ctx.font = 'bold 12px sans-serif';
-  ctx.fillText('🎬 LiveTalking + MuseTalk Native Pipeline', width / 2, height / 2 - 10);
+  ctx.fillText('LiveTalking + MuseTalk Native Pipeline', width / 2, height / 2 - 10);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
   ctx.font = '10px sans-serif';
   ctx.fillText('Upstream Parity · Lockstep Frame Synchronization · 25 FPS', width / 2, height / 2 + 10);
@@ -2808,12 +3263,10 @@ function initAvatarCanvas() {
       const isTrained = (LiveTalkingStudio.isTrainedReady || App.avatar.videoEl);
 
       if (isTalkingActive && isTrained) {
-        monW2lCanvas.style.display = 'block';
-        if (monBadge) monBadge.style.display = 'flex';
         renderLiveTalkingLipSync(monCtx, monW2lCanvas.width, monW2lCanvas.height, App.isAiSpeaking, App.avatar);
-      } else {
-        monW2lCanvas.style.display = 'none';
-        if (monBadge) monBadge.style.display = 'none';
+        monW2lCanvas.classList.add('is-visible');
+        if (monBadge) monBadge.classList.add('is-visible');
+        setMonitorBackgroundVisible(false);
       }
     }
 
@@ -2848,12 +3301,12 @@ function updateVoiceStatusUI(status, label = '', progressPct = 0) {
 
   if (status === 'generating') {
     if (dot) dot.className = 'vstatus-pulse-dot generating';
-    if (title) title.textContent = label || 'Đang tổng hợp giọng nói AI...';
+    if (title) title.textContent = label || 'Generating AI voice...';
     if (fill) fill.style.width = `${progressPct || 40}%`;
     if (voiceViz) voiceViz.classList.remove('speaking');
   } else if (status === 'speaking') {
     if (dot) dot.className = 'vstatus-pulse-dot speaking';
-    if (title) title.textContent = `Đang phát Livestream (${label || 'AI Idol'})`;
+    if (title) title.textContent = `Live playback (${label || 'AI Idol'})`;
     if (fill) fill.style.width = '100%';
     if (voiceViz) voiceViz.classList.add('speaking');
   } else if (status === 'error') {
@@ -2864,7 +3317,7 @@ function updateVoiceStatusUI(status, label = '', progressPct = 0) {
   } else {
     if (dot) dot.className = 'vstatus-pulse-dot';
     const activeV = $('quick-voice-id-input')?.value || App.voice.elevenLabsVoiceId;
-    if (title) title.textContent = `AI Voice: Sẵn sàng Tiếng Việt (${activeV ? activeV.slice(0, 8) : 'WebSpeech'}...)`;
+    if (title) title.textContent = `AI voice: Ready (${activeV ? activeV.slice(0, 8) : 'WebSpeech'}...)`;
     if (fill) fill.style.width = '0%';
     if (voiceViz) voiceViz.classList.remove('speaking');
   }
@@ -2879,11 +3332,8 @@ function stopLiveSpeech() {
     App.audioElement.pause();
     App.audioElement.currentTime = 0;
   }
-  if (App.talkingEngine.provider === 'livetalking' && App.talkingEngine.endpoint) {
-    fetch(`${App.talkingEngine.endpoint}/interrupt`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionid: LiveTalkingWebRTCClient.sessionId })
-    }).catch(() => {});
+  if (App.talkingEngine.provider === 'livetalking' && location.protocol !== 'file:') {
+    fetch('/api/speech/interrupt', { method: 'POST' }).catch(() => {});
   }
   LiveLipSyncEngine.stopSpeech();
   MuseTalkRealtimeEngine.stopAudio();
@@ -2895,7 +3345,81 @@ function stopLiveSpeech() {
   const subBox = $('mon-subtitles');
   if (subBox) subBox.classList.remove('visible');
   
-  addLog('⏹ Đã dừng giọng nói AI.', 'hi');
+  addLog('⏹ AI voice stopped.', 'hi');
+}
+
+async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
+  if (!LiveTalkingWebRTCClient.sessionId) throw new Error('Activate a LiveTalking avatar first');
+  const runId = ++liveTalkingSpeechRun;
+  const runtimeProvider = ['webspeech', 'elevenlabs', 'openai'].includes(provider) ? provider : 'webspeech';
+  const normalizedEmotion = ['neutral', 'happy', 'excited', 'surprised', 'sad', 'angry', 'playful', 'focused', 'grateful', 'laughing'].includes(emotion)
+    ? emotion
+    : 'happy';
+
+  await fetch('/api/settings/voice', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      provider: runtimeProvider,
+      voiceId: App.voice.elevenLabsVoiceId,
+      speed,
+      languageCode: App.voice.language || 'vi',
+    }),
+  }).then(async (response) => {
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || 'Could not apply server voice settings');
+    }
+  });
+
+  const commandResponse = await fetch('/api/speech/commands', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, emotion: normalizedEmotion, speed }),
+  });
+  const command = await commandResponse.json().catch(() => ({}));
+  if (!commandResponse.ok || !command.commandId) throw new Error(command.error || 'Could not start speech');
+
+  let playbackStarted = false;
+  const startedAt = Date.now();
+  while (runId === liveTalkingSpeechRun) {
+    const statusResponse = await fetch('/api/speech/status');
+    const payload = await statusResponse.json().catch(() => ({}));
+    const speech = payload.speech || {};
+    if (speech.commandId !== command.commandId) {
+      if (Date.now() - startedAt > 30_000) throw new Error('Speech command did not enter the runtime queue');
+      await new Promise(resolve => setTimeout(resolve, 150));
+      continue;
+    }
+    if (speech.state === 'GENERATING') {
+      updateVoiceStatusUI('generating', 'Generating voice and neural frames…', 45);
+    } else if (speech.state === 'SPEAKING') {
+      if (!playbackStarted) {
+        playbackStarted = true;
+        App.isAiSpeaking = true;
+        await LiveTalkingWebRTCClient.ensureAudioPlayback();
+        setVisualState('TALKING', 3, 'runtime-speech-started', true);
+        const subBox = $('mon-subtitles');
+        const subTxt = $('mon-sub-text');
+        if (subBox && subTxt) { subTxt.textContent = text; subBox.classList.add('visible'); }
+        addLog('LiveTalking WebRTC audio and lipsync started.', 'ok');
+      }
+      updateVoiceStatusUI('speaking', runtimeProvider, 100);
+    } else if (speech.state === 'IDLE' && playbackStarted) {
+      App.isAiSpeaking = false;
+      updateVoiceStatusUI('idle');
+      $('mon-subtitles')?.classList.remove('visible');
+      if (App.currentState === 'TALKING' && App.autoMix) {
+        requestStateTransition('GAMEPLAY_IDLE', 7, 'runtime-speech-ended', App.globalRandom, false);
+      }
+      if (App.pendingChatBatch?.length) setTimeout(() => processPendingChatBatch(), 800);
+      return;
+    } else if (speech.state === 'ERROR') {
+      throw new Error(speech.error || 'Runtime speech failed');
+    }
+    if (Date.now() - startedAt > 120_000) throw new Error('Runtime speech timed out');
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
 }
 
 async function speakAI(text, emotion = 'happy') {
@@ -2907,21 +3431,33 @@ async function speakAI(text, emotion = 'happy') {
   const prov = $('lt-voice-provider-select')?.value || App.voice.provider || 'webspeech';
   const speed = (parseFloat($('lt-voice-speed-slider')?.value || '105') / 100) || App.voice.speed || 1.05;
 
-  updateVoiceStatusUI('generating', `🎙️ Đang tổng hợp giọng (${prov.toUpperCase()})...`, 30);
-  addLog(`🎙️ Đang tổng hợp giọng & Live LipSync cho: "${text.slice(0, 40)}..."`, 'hi');
+  if (App.talkingEngine.provider === 'livetalking') {
+    await selectAvatarForSpeech();
+  }
+
+  updateVoiceStatusUI('generating', `🎙️ Generating voice (${prov.toUpperCase()})...`, 30);
+  addLog(`🎙️ Generating voice and Live LipSync for: "${text.slice(0, 40)}..."`, 'hi');
   if ($('v-last')) $('v-last').textContent = `"${text.slice(0, 50)}${text.length > 50 ? '…' : ''}"`;
+
+  if (App.talkingEngine.provider === 'livetalking') {
+    try {
+      return await submitRuntimeSpeechCommand(text, emotion, speed, prov);
+    } catch (error) {
+      App.isAiSpeaking = false;
+      updateVoiceStatusUI('error', error.message);
+      addLog(`Speech failed: ${error.message}`, 'err');
+      throw error;
+    }
+  }
 
   if (prov === 'elevenlabs') {
     const voiceSelectVal = $('lt-eleven-voice-select')?.value || App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
     const voiceId = (voiceSelectVal === 'custom' ? $('lt-eleven-custom-voice-id')?.value.trim() : voiceSelectVal) || App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
     const modelId = $('lt-eleven-model-select')?.value || 'eleven_turbo_v2_5';
-    const apiKey = ($('lt-eleven-apikey-input')?.value || $('quick-voice-apikey')?.value || App.voice.elevenLabsKey || DEFAULT_ELEVENLABS_KEY).trim();
-
-    return await speakWithElevenLabs(text, emotion, voiceId, modelId, apiKey, speed);
+    return await speakWithElevenLabs(text, emotion, voiceId, modelId, speed);
   } else if (prov === 'openai') {
     const voice = $('lt-openai-voice-select')?.value || 'nova';
-    const apiKey = ($('lt-openai-apikey-input')?.value || '').trim();
-    return await speakWithOpenAI(text, emotion, voice, apiKey, speed);
+    return await speakWithOpenAI(text, emotion, voice, speed);
   } else {
     const voiceURI = $('lt-webspeech-voice-select')?.value || '';
     if (App.talkingEngine.provider === 'livetalking') {
@@ -2941,7 +3477,7 @@ async function getLiveTalkingSpeaking(endpoint, sessionid) {
     body: JSON.stringify({ sessionid }),
   });
   const result = await response.json();
-  if (!response.ok || result.code !== 0) throw new Error(result.msg || 'Không đọc được trạng thái LiveTalking');
+  if (!response.ok || result.code !== 0) throw new Error(result.msg || 'Could not read LiveTalking status');
   return Boolean(result.data);
 }
 
@@ -2956,12 +3492,12 @@ async function waitForLiveTalkingPlayback(text, voiceLabel, runId) {
       started = true;
       App.isAiSpeaking = true;
       setVisualState('TALKING', 3, 'livetalking-webrtc-started', true);
-      updateVoiceStatusUI('playing', `Đang phát [${voiceLabel}] qua LiveTalking WebRTC...`, 35);
+      updateVoiceStatusUI('playing', `Playing [${voiceLabel}] through LiveTalking WebRTC...`, 35);
       const subBox = $('mon-subtitles');
       const subTxt = $('mon-sub-text');
       if (subBox && subTxt) { subTxt.textContent = text; subBox.classList.add('visible'); }
       if ($('talking-live-badge')) $('talking-live-badge').style.display = 'flex';
-      addLog(`🔊 LiveTalking bắt đầu phát [${voiceLabel}] — 1 luồng WebRTC.`, 'ok');
+      addLog(`🔊 LiveTalking started [${voiceLabel}] — one WebRTC stream.`, 'ok');
     } else if (started && !speaking) {
       App.isAiSpeaking = false;
       updateVoiceStatusUI('idle');
@@ -2972,7 +3508,7 @@ async function waitForLiveTalkingPlayback(text, voiceLabel, runId) {
       if (App.pendingChatBatch?.length) setTimeout(() => processPendingChatBatch(), 800);
       return;
     }
-    if (!started && Date.now() - startedAt > 30000) throw new Error('LiveTalking tạo voice/lipsync quá 30 giây');
+    if (!started && Date.now() - startedAt > 30000) throw new Error('LiveTalking voice and LipSync timed out after 30 seconds');
     await new Promise(resolve => setTimeout(resolve, 150));
   }
 }
@@ -2980,11 +3516,11 @@ async function waitForLiveTalkingPlayback(text, voiceLabel, runId) {
 async function submitLiveTalkingSpeech({ text, emotion, voiceLabel, blob = null, voice = '', speed = 1.05 }) {
   const endpoint = String(App.talkingEngine.endpoint || 'http://localhost:8011').replace(/\/$/, '');
   const sessionid = LiveTalkingWebRTCClient.sessionId;
-  if (!sessionid) throw new Error('Chưa có phiên WebRTC LiveTalking. Hãy kích hoạt avatar trước.');
+  if (!sessionid) throw new Error('No LiveTalking WebRTC session. Activate an avatar first.');
   const runId = ++liveTalkingSpeechRun;
   App.isAiSpeaking = false;
-  updateVoiceStatusUI('generating', `⏳ Chờ LiveTalking sinh voice & lipsync [${voiceLabel}]...`, 20);
-  logLiveTalkingTerminal('⏳ Đã gửi voice; chờ neural frame LiveTalking sẵn sàng...', 'info');
+  updateVoiceStatusUI('generating', `⏳ Waiting for LiveTalking voice and LipSync [${voiceLabel}]...`, 20);
+  logLiveTalkingTerminal('⏳ Voice submitted. Waiting for neural frames...', 'info');
   let response;
   if (blob) {
     const form = new FormData();
@@ -3035,69 +3571,46 @@ async function startSynchronizedPlayback(audioElement, text, emotion, voiceLabel
   }
 }
 
-async function speakWithElevenLabs(text, emotion = 'happy', customVoiceId = null, customModelId = null, customApiKey = null, customSpeed = null) {
+async function requestProviderAudio({ provider, text, emotion, voiceId, modelId, speed }) {
+  if (location.protocol === 'file:') throw new Error('Open the dashboard through the runtime server');
+  const response = await fetch('/api/speech/synthesize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      commandId: `speech_${Date.now()}`,
+      provider,
+      text,
+      emotion,
+      voiceId,
+      modelId,
+      speed,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.success || !payload.audioBase64) {
+    throw new Error(payload.error || `Runtime TTS failed with HTTP ${response.status}`);
+  }
+  const binary = atob(payload.audioBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: payload.mediaType || 'audio/mpeg' });
+}
+
+async function speakWithElevenLabs(text, emotion = 'happy', customVoiceId = null, customModelId = null, customSpeed = null) {
   const voiceId = customVoiceId || ($('quick-voice-id-input')?.value || App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL').trim();
-  const apiKey = customApiKey || ($('quick-voice-apikey')?.value || App.voice.elevenLabsKey || DEFAULT_ELEVENLABS_KEY).trim();
   const modelId = customModelId || 'eleven_turbo_v2_5';
   const speed = customSpeed || App.voice.speed || 1.05;
-  const langCode = App.voice.language === 'auto' ? undefined : (App.voice.language || 'vi');
 
-  updateVoiceStatusUI('generating', `Đang gọi [${voiceId.slice(0, 8)}] (${modelId})...`, 30);
-  addLog(`🎙️ ElevenLabs: Đang gọi [${voiceId.slice(0, 8)}] (${modelId} · Speed: ${speed}x)...`, 'hi');
+  updateVoiceStatusUI('generating', `Runtime TTS [${voiceId.slice(0, 8)}]...`, 30);
+  addLog(`Runtime is generating ElevenLabs voice [${voiceId.slice(0, 8)}].`, 'hi');
 
   try {
-    const payload = {
-      text: text,
-      model_id: modelId,
-      voice_settings: {
-        stability: 0.5,
-        similarity_boost: 0.8,
-        use_speaker_boost: true,
-      },
-    };
-
-    if (langCode) payload.language_code = langCode;
-
-    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
-      method: 'POST',
-      headers: {
-        'xi-api-key': apiKey,
-        'Content-Type': 'application/json',
-        'Accept': 'audio/mpeg',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => null);
-      if (errJson && errJson.detail) {
-        if (res.status === 400 || res.status === 422) {
-          payload.model_id = 'eleven_flash_v2_5';
-          const retryRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
-            method: 'POST',
-            headers: {
-              'xi-api-key': apiKey,
-              'Content-Type': 'application/json',
-              'Accept': 'audio/mpeg',
-            },
-            body: JSON.stringify(payload),
-          });
-          if (!retryRes.ok) {
-            const retryErr = await retryRes.text().catch(() => '');
-            throw new Error(`HTTP ${retryRes.status}: ${retryErr}`);
-          }
-          return handleAudioResponse(retryRes, text, emotion, `ElevenLabs-${voiceId.slice(0, 6)}`);
-        }
-        throw new Error(errJson.detail.message || JSON.stringify(errJson.detail));
-      }
-      throw new Error(`HTTP ${res.status}: Lỗi kết nối ElevenLabs`);
-    }
-
-    await handleAudioResponse(res, text, emotion, `ElevenLabs-${voiceId.slice(0, 6)}`);
-
+    const blob = await requestProviderAudio({ provider: 'elevenlabs', text, emotion, voiceId, modelId, speed });
+    App.voice.providerConfigured = true;
+    await handleAudioResponse(new Response(blob, { headers: { 'Content-Type': blob.type } }), text, emotion, `ElevenLabs-${voiceId.slice(0, 6)}`);
   } catch (err) {
-    console.error('[ElevenLabs API Error]:', err);
-    addLog(`⚠️ ElevenLabs: ${err.message}. Chuyển sang Web Speech API.`, 'err');
+    console.error('[Runtime TTS Error]:', err);
+    addLog(`ElevenLabs unavailable: ${err.message}. Using the LiveTalking voice fallback.`, 'err');
     updateVoiceStatusUI('error', err.message);
     if (App.talkingEngine.provider === 'livetalking') {
       return speakWithLiveTalkingText(text, emotion, '', speed);
@@ -3106,42 +3619,17 @@ async function speakWithElevenLabs(text, emotion = 'happy', customVoiceId = null
   }
 }
 
-async function speakWithOpenAI(text, emotion = 'happy', voice = 'nova', apiKey = '', speed = 1.05) {
-  if (!apiKey) {
-    addLog('⚠️ Chưa nhập OpenAI API Key! Chuyển sang Web Speech API...', 'warn');
-    if (App.talkingEngine.provider === 'livetalking') {
-      return speakWithLiveTalkingText(text, emotion, '', speed);
-    }
-    return speakWithWebSpeech(text, emotion, '', speed);
-  }
-
-  updateVoiceStatusUI('generating', `Đang gọi OpenAI TTS [${voice}]...`, 30);
-  addLog(`🎙️ OpenAI TTS: Đang gọi [${voice}] (Speed: ${speed}x)...`, 'hi');
+async function speakWithOpenAI(text, emotion = 'happy', voice = 'nova', speed = 1.05) {
+  updateVoiceStatusUI('generating', `Runtime TTS [${voice}]...`, 30);
+  addLog(`Runtime is generating OpenAI voice [${voice}].`, 'hi');
 
   try {
-    const res = await fetch('https://api.openai.com/v1/audio/speech', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'tts-1',
-        voice: voice,
-        input: text,
-        speed: speed,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.text().catch(() => '');
-      throw new Error(`OpenAI HTTP ${res.status}: ${err}`);
-    }
-
-    await handleAudioResponse(res, text, emotion, `OpenAI-${voice}`);
+    const blob = await requestProviderAudio({ provider: 'openai', text, emotion, voiceId: voice, modelId: 'tts-1', speed });
+    App.voice.providerConfigured = true;
+    await handleAudioResponse(new Response(blob, { headers: { 'Content-Type': blob.type } }), text, emotion, `OpenAI-${voice}`);
   } catch (err) {
-    console.error('[OpenAI TTS Error]:', err);
-    addLog(`⚠️ Lỗi OpenAI TTS: ${err.message}. Dùng Web Speech thay thế.`, 'err');
+    console.error('[Runtime OpenAI TTS Error]:', err);
+    addLog(`OpenAI voice unavailable: ${err.message}. Using the LiveTalking voice fallback.`, 'err');
     if (App.talkingEngine.provider === 'livetalking') {
       return speakWithLiveTalkingText(text, emotion, '', speed);
     }
@@ -3167,7 +3655,7 @@ async function handleAudioResponse(res, text, emotion, voiceLabel) {
   App.audioElement.ontimeupdate = () => {
     if (App.audioElement.duration) {
       const pct = (App.audioElement.currentTime / App.audioElement.duration) * 100;
-      updateVoiceStatusUI('playing', `Đang phát [${voiceLabel}] (${msToMMSS(App.audioElement.currentTime * 1000)} / ${msToMMSS(App.audioElement.duration * 1000)})`, pct);
+      updateVoiceStatusUI('playing', `Playing [${voiceLabel}] (${msToMMSS(App.audioElement.currentTime * 1000)} / ${msToMMSS(App.audioElement.duration * 1000)})`, pct);
     }
   };
 
@@ -3183,7 +3671,7 @@ async function handleAudioResponse(res, text, emotion, voiceLabel) {
       setTimeout(() => {
         if (App.currentState === 'TALKING' && !App.isAiSpeaking) {
           requestStateTransition('GAMEPLAY_IDLE', 7, 'speech-ended-return', App.globalRandom, false);
-          addLog('🗣️ Hoàn thành câu trả lời -> Quay lại GAMEPLAY_IDLE', 'ok');
+          addLog('🗣️ Reply complete → returning to GAMEPLAY_IDLE', 'ok');
           if (App.pendingChatBatch && App.pendingChatBatch.length > 0) {
             setTimeout(() => processPendingChatBatch(), 800);
           }
@@ -3208,16 +3696,16 @@ async function handleAudioResponse(res, text, emotion, voiceLabel) {
     blobUrl: audioUrl,
     onPlaybackStart: async () => {
       await startSynchronizedPlayback(App.audioElement, text, emotion, voiceLabel, estDurMs);
-      updateVoiceStatusUI('playing', `Đang phát [${voiceLabel}] (${App.voice.speed}x)...`, 15);
-      addLog(`🔊 Đang phát giọng [${voiceLabel}] (${blob.size} bytes)...`, 'ok');
+      updateVoiceStatusUI('playing', `Playing [${voiceLabel}] (${App.voice.speed}x)...`, 15);
+      addLog(`🔊 Playing voice [${voiceLabel}] (${blob.size} bytes)...`, 'ok');
     },
   });
 }
 
 function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', customSpeed = null) {
   if (!('speechSynthesis' in window)) {
-    addLog('Trình duyệt không hỗ trợ Web Speech API', 'err');
-    updateVoiceStatusUI('error', 'Trình duyệt không hỗ trợ Web Speech');
+    addLog('This browser does not support Web Speech API', 'err');
+    updateVoiceStatusUI('error', 'Web Speech is not supported');
     App.isAiSpeaking = false;
     return;
   }
@@ -3273,8 +3761,8 @@ function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', custom
     };
 
     u.onstart = () => {
-      updateVoiceStatusUI('playing', `Đang phát WebSpeech Tiếng Việt (${App.voice.speed}x)...`, 20);
-      addLog(`🔊 Đang phát giọng nói Web Speech (${u.voice?.name || 'Default'})...`, 'ok');
+      updateVoiceStatusUI('playing', `Playing Web Speech (${App.voice.speed}x)...`, 20);
+      addLog(`🔊 Playing Web Speech voice (${u.voice?.name || 'Default'})...`, 'ok');
     };
 
     const progressTimer = setInterval(() => {
@@ -3284,7 +3772,7 @@ function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', custom
       }
       elapsedSec += 0.2;
       const pct = Math.min(95, (elapsedSec / estSec) * 100);
-      updateVoiceStatusUI('playing', `Đang phát WebSpeech (${Math.round(elapsedSec)}s / ${Math.round(estSec)}s)`, pct);
+      updateVoiceStatusUI('playing', `Playing Web Speech (${Math.round(elapsedSec)}s / ${Math.round(estSec)}s)`, pct);
     }, 200);
 
     let safetyWatchdog = setTimeout(() => {
@@ -3317,7 +3805,7 @@ function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', custom
         setTimeout(() => {
           if (App.currentState === 'TALKING' && !App.isAiSpeaking) {
             requestStateTransition('GAMEPLAY_IDLE', 7, 'speech-ended-return', App.globalRandom, false);
-            addLog('🗣️ Hoàn thành câu trả lời -> Quay lại GAMEPLAY_IDLE', 'ok');
+            addLog('🗣️ Reply complete → returning to GAMEPLAY_IDLE', 'ok');
             if (App.pendingChatBatch && App.pendingChatBatch.length > 0) {
               setTimeout(() => processPendingChatBatch(), 800);
             }
@@ -3342,7 +3830,7 @@ function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', custom
     };
   } catch (err) {
     App.isAiSpeaking = false;
-    updateVoiceStatusUI('error', 'Lỗi phát giọng nói Web Speech');
+    updateVoiceStatusUI('error', 'Web Speech playback error');
   }
 }
 
@@ -3354,7 +3842,7 @@ function renderSavedVoicesList() {
   const customList = App.voice.customVoices || [];
 
   if (customList.length === 0) {
-    optgroup.innerHTML = '<option disabled>Chưa có voice tùy chỉnh</option>';
+    optgroup.innerHTML = '<option disabled>No custom voices</option>';
     return;
   }
 
@@ -3407,7 +3895,7 @@ function pickClipForState(state, forceRandom = false) {
   const isGrpRandom = (App.groupRandom && App.groupRandom[grp] !== false);
   const isRandomActive = forceRandom || App.globalRandom || isGrpRandom;
 
-  // Logic ưu tiên bộ trộn: Random > Loop > 1 time
+  // Mixer priority: Random > Loop > Play once
   // 1. Priority 1: RANDOM
   if (isRandomActive) {
     const candidates = activeClips.filter(c => !App.currentClip || c.id !== App.currentClip.id);
@@ -3441,7 +3929,8 @@ function renderStateHistory() {
   if (!track) return;
   track.innerHTML = App.stateHistory.slice(-8).map((h, i, arr) => {
     const isCurrent = (i === arr.length - 1);
-    return `<span class="hist-chip ${isCurrent ? 'current' : ''}" style="color:${h.color};">${h.state}</span>`;
+    const stateColor = STATE_COLOR[h.state] || h.color || '#94a3b8';
+    return `<span class="hist-chip ${isCurrent ? 'current' : ''}" data-state="${h.state}" style="--history-color:${stateColor};">${h.state}</span>`;
   }).join('');
 }
 
@@ -3459,7 +3948,7 @@ function renderLibraryUI() {
   if ($('cnt-group-gameplay')) $('cnt-group-gameplay').textContent = gameplayClips.length;
   if (groupGameplay) {
     groupGameplay.innerHTML = gameplayClips.length === 0 
-      ? '<div class="lib-empty-notice" data-target-group="GAMEPLAY_IDLE">Chưa có video. Bấm <b>＋ Thêm</b> để upload.</div>'
+      ? '<div class="lib-empty-notice" data-target-group="GAMEPLAY_IDLE">No clips. Select <b>＋</b> to upload.</div>'
       : gameplayClips.map(clip => renderClipCardHTML(clip, clip.state || 'GAMEPLAY_IDLE')).join('');
   }
 
@@ -3469,7 +3958,7 @@ function renderLibraryUI() {
   if ($('cnt-group-talking')) $('cnt-group-talking').textContent = talkingClips.length;
   if (groupTalking) {
     groupTalking.innerHTML = talkingClips.length === 0
-      ? '<div class="lib-empty-notice" data-target-group="TALKING">Chưa có video. Bấm <b>＋ Thêm</b> để upload clip trò chuyện.</div>'
+      ? '<div class="lib-empty-notice" data-target-group="TALKING">No Talking clips. Select <b>＋</b> to upload.</div>'
       : talkingClips.map(clip => renderClipCardHTML(clip, 'TALKING')).join('');
   }
 
@@ -3486,7 +3975,7 @@ function renderLibraryUI() {
   if ($('cnt-group-reaction')) $('cnt-group-reaction').textContent = reactionClips.length;
   if (groupReaction) {
     groupReaction.innerHTML = reactionClips.length === 0
-      ? '<div class="lib-empty-notice" data-target-group="BIG_WIN">Chưa có video. Bấm <b>＋ Thêm</b> để upload.</div>'
+      ? '<div class="lib-empty-notice" data-target-group="BIG_WIN">No clips. Select <b>＋</b> to upload.</div>'
       : reactionClips.map(clip => renderClipCardHTML(clip, clip.state || 'BIG_WIN')).join('');
   }
 
@@ -3500,11 +3989,13 @@ function renderLibraryUI() {
   if ($('cnt-group-cta')) $('cnt-group-cta').textContent = ctaClips.length;
   if (groupCta) {
     groupCta.innerHTML = ctaClips.length === 0
-      ? '<div class="lib-empty-notice" data-target-group="CTA">Chưa có video. Bấm <b>＋ Thêm</b> để upload.</div>'
+      ? '<div class="lib-empty-notice" data-target-group="CTA">No clips. Select <b>＋</b> to upload.</div>'
       : ctaClips.map(clip => renderClipCardHTML(clip, clip.state || 'CTA')).join('');
   }
 
   if ($('lib-total-count')) $('lib-total-count').textContent = `${totalCount} clips`;
+
+  initLibraryThumbnails();
 
   // Update Group Random button UI states
   document.querySelectorAll('.btn-group-random').forEach(btn => {
@@ -3512,8 +4003,8 @@ function renderLibraryUI() {
     const isAct = (App.groupRandom && App.groupRandom[grp] !== false);
     btn.classList.toggle('is-active', isAct);
     btn.classList.toggle('is-inactive', !isAct);
-    btn.textContent = '🔀';
-    btn.title = isAct ? 'Random: ĐANG BẬT (Bấm để Tắt)' : 'Random: ĐANG TẮT (Bấm để Bật)';
+    btn.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">shuffle</span>';
+    btn.title = isAct ? 'Random: ON' : 'Random: OFF';
   });
 
   const filter = App.activeFilter || 'all';
@@ -3523,26 +4014,42 @@ function renderLibraryUI() {
   });
 }
 
+function initLibraryThumbnails() {
+  document.querySelectorAll('.clip-thumb-media').forEach(video => {
+    const seekToPreviewFrame = () => {
+      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      video.currentTime = duration > 0 ? Math.min(0.12, duration / 2) : 0.01;
+    };
+
+    if (video.readyState >= 1) seekToPreviewFrame();
+    else video.addEventListener('loadedmetadata', seekToPreviewFrame, { once: true });
+  });
+}
+
 function renderClipCardHTML(clip, state) {
   const isPlaying = App.currentClip && App.currentClip.id === clip.id;
   const mode = clip.mode || (clip.loop ? 'loop' : 'once');
   const durSec = clip.dur ? `${(clip.dur / 1000).toFixed(1)}s` : 'video';
   const isOff = (mode === 'off');
+  const thumbnail = clip.blobUrl
+    ? `<video class="clip-thumb-media" src="${clip.blobUrl}" muted preload="metadata" playsinline aria-hidden="true"></video>`
+    : '';
 
   let modeBtnHtml = '';
   if (mode === 'loop') {
-    modeBtnHtml = `<button class="btn-clip-mode mode-loop" data-mode-clip="${clip.id}" data-mode-state="${state}" title="Chế độ: Loop (Lặp lại) - Bấm để chuyển 1-Time / OFF">🔁</button>`;
+    modeBtnHtml = `<button class="btn-clip-mode mode-loop" data-mode-clip="${clip.id}" data-mode-state="${state}" title="Mode: Loop. Select to change."><span class="material-symbols-rounded" aria-hidden="true">repeat</span></button>`;
   } else if (mode === 'once') {
-    modeBtnHtml = `<button class="btn-clip-mode mode-once" data-mode-clip="${clip.id}" data-mode-state="${state}" title="Chế độ: 1-Time (Phát 1 lần) - Bấm để chuyển OFF / Loop">1️⃣</button>`;
+    modeBtnHtml = `<button class="btn-clip-mode mode-once" data-mode-clip="${clip.id}" data-mode-state="${state}" title="Mode: Play once. Select to change."><span class="material-symbols-rounded" aria-hidden="true">looks_one</span></button>`;
   } else {
-    modeBtnHtml = `<button class="btn-clip-mode mode-off" data-mode-clip="${clip.id}" data-mode-state="${state}" title="Chế độ: OFF (Tắt trộn) - Bấm để chuyển Loop / 1x">⛔</button>`;
+    modeBtnHtml = `<button class="btn-clip-mode mode-off" data-mode-clip="${clip.id}" data-mode-state="${state}" title="Mode: Off. Select to change."><span class="material-symbols-rounded" aria-hidden="true">block</span></button>`;
   }
 
   return `
     <div class="clip-card ${isPlaying ? 'active playing' : ''} ${isOff ? 'is-off' : ''}" data-clip-id="${clip.id}" data-state="${state}">
       <div class="clip-thumb" style="background:#131b26;">
+        ${thumbnail}
         <span class="clip-lbl">MP4</span>
-        <span class="clip-play">▶</span>
+        <span class="clip-play material-symbols-rounded" aria-hidden="true">play_arrow</span>
       </div>
       <div class="clip-meta">
         <span class="clip-n">${clip.label || clip.id}</span>
@@ -3551,7 +4058,7 @@ function renderClipCardHTML(clip, state) {
       <div class="clip-actions">
         ${modeBtnHtml}
         <div class="now-badge" style="display:${isPlaying ? 'block' : 'none'};">NOW</div>
-        <button class="btn-delete-clip" data-del-id="${clip.id}" data-del-state="${state}" title="Xóa clip này">✕</button>
+        <button class="btn-delete-clip" data-del-id="${clip.id}" data-del-state="${state}" title="Delete clip"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
       </div>
     </div>
   `;
@@ -3572,15 +4079,17 @@ function cycleStateClip(direction = 1) {
     App.clipElapsedMs = 0;
     updateMonitorScreen(App.currentState, targetClip);
     renderLibraryUI();
-    addLog(`Đổi clip: [${targetClip.label}] (${nextIdx + 1}/${clips.length})`, 'ok');
+    addLog(`Changed clip: [${targetClip.label}] (${nextIdx + 1}/${clips.length})`, 'ok');
   }
 }
 
 let autoReturnTimer = null;
 
-// Rule: Khi đổi / add video / thêm state , phải chờ hết video đang chạy
+// State changes wait for the current video to finish
 function requestStateTransition(targetState, priority = 5, reason = '', forceRandom = false, immediate = false) {
-  const videoEl = $('monitor-video');
+  const videoEl = currentVideoSlot === 'a'
+    ? ($('monitor-video-a') || $('monitor-video'))
+    : ($('monitor-video-b') || $('monitor-video'));
   const isPlaying = videoEl && !videoEl.paused && videoEl.duration > 0 && (videoEl.duration - videoEl.currentTime > 0.4);
 
   if (isPlaying && !immediate && App.currentState !== targetState) {
@@ -3591,7 +4100,7 @@ function requestStateTransition(targetState, priority = 5, reason = '', forceRan
       targetLabel.textContent = targetState;
       banner.style.display = 'flex';
     }
-    addLog(`⏳ Đang đợi video hiện tại chạy xong... Sắp chuyển sang: ${targetState} (${reason || 'yêu cầu'})`, 'ok');
+    addLog(`⏳ Waiting for the current clip. Next: ${targetState} (${reason || 'request'})`, 'ok');
     return;
   }
 
@@ -3611,7 +4120,7 @@ function setVisualState(state, priority = 5, reason = '', forceRandom = false) {
   App.stateHistory.push({
     state: state,
     time: Date.now(),
-    color: STATE_COLOR[state] || '#30d158'
+    color: STATE_COLOR[state] || '#d8d8da'
   });
   if (App.stateHistory.length > 20) App.stateHistory.shift();
   renderStateHistory();
@@ -3646,8 +4155,30 @@ function setVisualState(state, priority = 5, reason = '', forceRandom = false) {
 }
 
 let currentVideoSlot = 'a';
+let monitorSwitchToken = 0;
+
+function setMonitorVideoLayer(videoEl, isActive) {
+  if (!videoEl) return;
+  videoEl.classList.toggle('active-layer', isActive);
+  videoEl.classList.toggle('standby-layer', !isActive);
+}
+
+function setMonitorCanvasVisible(isVisible) {
+  $('monitor-w2l-canvas')?.classList.toggle('is-visible', isVisible);
+  $('mon-w2l-badge')?.classList.toggle('is-visible', isVisible);
+}
+
+function setMonitorBackgroundVisible(isVisible) {
+  $('monitor-bg')?.classList.toggle('is-hidden', !isVisible);
+}
+
+function isSameMediaSource(videoEl, source) {
+  if (!videoEl || !source) return false;
+  return videoEl.getAttribute('src') === source || videoEl.currentSrc === source || videoEl.src === source;
+}
 
 function updateMonitorScreen(state, clip) {
+  const switchToken = ++monitorSwitchToken;
   const color = STATE_COLOR[state] || 'var(--green)';
   const videoA = $('monitor-video-a');
   const videoB = $('monitor-video-b');
@@ -3683,25 +4214,11 @@ function updateMonitorScreen(state, clip) {
 
   const isCanvasTrained = (LiveTalkingStudio.isTrainedReady || App.avatar.videoEl);
   if ((state === 'TALKING' || App.isAiSpeaking) && isCanvasTrained) {
-    if ($('monitor-w2l-canvas')) $('monitor-w2l-canvas').style.display = 'block';
-    if ($('mon-w2l-badge')) $('mon-w2l-badge').style.display = 'flex';
-    if (videoA) videoA.style.display = 'none';
-    if (videoB) videoB.style.display = 'none';
-    if (singleVideo) singleVideo.style.display = 'none';
-    if (bgEl) bgEl.style.display = 'none';
     return;
   }
 
-  if ($('monitor-w2l-canvas')) $('monitor-w2l-canvas').style.display = 'none';
-  if ($('mon-w2l-badge')) $('mon-w2l-badge').style.display = 'none';
-
   if (clip && clip.blobUrl && (videoA || singleVideo)) {
-    if (bgEl) bgEl.style.display = 'none';
-
     if (videoA && videoB) {
-      videoA.style.display = 'block';
-      videoB.style.display = 'block';
-
       const activeEl = currentVideoSlot === 'a' ? videoA : videoB;
       const standbyEl = currentVideoSlot === 'a' ? videoB : videoA;
 
@@ -3737,7 +4254,7 @@ function updateMonitorScreen(state, clip) {
               App.clipElapsedMs = 0;
               updateMonitorScreen(App.currentState, nextClip);
               renderLibraryUI();
-              addLog(`🔀 Bộ trộn State: Chuyển clip [${nextClip.label}] trong ${App.currentState}`, 'ok');
+              addLog(`🔀 State mixer: switched clip [${nextClip.label}] trong ${App.currentState}`, 'ok');
               return;
             }
           }
@@ -3754,35 +4271,59 @@ function updateMonitorScreen(state, clip) {
       setupEndHandler(standbyEl);
 
       // If active video already playing this exact clip
-      if (activeEl.src === clip.blobUrl && !activeEl.paused && activeEl.currentTime > 0) {
-        activeEl.classList.add('active-layer');
-        activeEl.classList.remove('standby-layer');
-        standbyEl.classList.remove('active-layer');
-        standbyEl.classList.add('standby-layer');
+      if (isSameMediaSource(activeEl, clip.blobUrl) && !activeEl.paused && activeEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+        setMonitorVideoLayer(activeEl, true);
+        setMonitorVideoLayer(standbyEl, false);
+        setMonitorCanvasVisible(false);
+        setMonitorBackgroundVisible(false);
         return;
       }
 
-      // Seamless buffer switch: load new clip on standby element
+      // Preload the next clip offscreen. Crossfade only after canplay confirms
+      // that the browser has enough buffered media to avoid a blank frame.
       standbyEl.loop = false;
-      standbyEl.src = clip.blobUrl;
-      standbyEl.currentTime = 0;
-      standbyEl.classList.remove('active-layer');
-      standbyEl.classList.add('standby-layer');
+      standbyEl.muted = true;
+      standbyEl.preload = 'auto';
+      setMonitorVideoLayer(standbyEl, false);
 
-      const onFrameReady = () => {
-        standbyEl.removeEventListener('playing', onFrameReady);
-        standbyEl.removeEventListener('loadeddata', onFrameReady);
-        standbyEl.classList.remove('standby-layer');
-        standbyEl.classList.add('active-layer');
-        activeEl.classList.remove('active-layer');
-        activeEl.classList.add('standby-layer');
-        setTimeout(() => { activeEl.pause(); }, 60);
+      if (!isSameMediaSource(standbyEl, clip.blobUrl)) {
+        standbyEl.setAttribute('src', clip.blobUrl);
+        standbyEl.load();
+      } else {
+        try { standbyEl.currentTime = 0; } catch (_) {}
+      }
+
+      let didCommit = false;
+      const commitSwap = async () => {
+        if (didCommit || switchToken !== monitorSwitchToken) return;
+        didCommit = true;
+        standbyEl.removeEventListener('canplay', commitSwap);
+        try {
+          await standbyEl.play();
+        } catch (_) {
+          didCommit = false;
+          return;
+        }
+        if (switchToken !== monitorSwitchToken) {
+          standbyEl.pause();
+          return;
+        }
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (switchToken !== monitorSwitchToken) return;
+          setMonitorVideoLayer(standbyEl, true);
+          setMonitorVideoLayer(activeEl, false);
+          setMonitorCanvasVisible(false);
+          setMonitorBackgroundVisible(false);
+        }));
+        setTimeout(() => { activeEl.pause(); }, 220);
         currentVideoSlot = currentVideoSlot === 'a' ? 'b' : 'a';
       };
 
-      standbyEl.addEventListener('playing', onFrameReady, { once: true });
-      standbyEl.addEventListener('loadeddata', onFrameReady, { once: true });
-      standbyEl.play().catch(() => {});
+      if (standbyEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+        commitSwap();
+      } else {
+        standbyEl.addEventListener('canplay', commitSwap, { once: true });
+      }
 
       standbyEl.onloadedmetadata = () => {
         if (standbyEl.duration && !isNaN(standbyEl.duration) && standbyEl.duration > 0) {
@@ -3795,18 +4336,27 @@ function updateMonitorScreen(state, clip) {
       };
 
     } else if (singleVideo) {
-      singleVideo.style.display = 'block';
-      if (singleVideo.src !== clip.blobUrl) {
-        singleVideo.src = clip.blobUrl;
+      singleVideo.preload = 'auto';
+      if (!isSameMediaSource(singleVideo, clip.blobUrl)) {
+        singleVideo.setAttribute('src', clip.blobUrl);
+        singleVideo.load();
       }
-      singleVideo.currentTime = 0;
-      singleVideo.play().catch(() => {});
+      const showSingleVideo = async () => {
+        if (switchToken !== monitorSwitchToken) return;
+        try { await singleVideo.play(); } catch (_) { return; }
+        setMonitorVideoLayer(singleVideo, true);
+        setMonitorCanvasVisible(false);
+        setMonitorBackgroundVisible(false);
+      };
+      if (singleVideo.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) showSingleVideo();
+      else singleVideo.addEventListener('canplay', showSingleVideo, { once: true });
     }
   } else {
-    if (videoA) videoA.style.display = 'none';
-    if (videoB) videoB.style.display = 'none';
-    if (singleVideo) singleVideo.style.display = 'none';
-    if (bgEl) bgEl.style.display = 'flex';
+    setMonitorCanvasVisible(false);
+    setMonitorVideoLayer(videoA, false);
+    setMonitorVideoLayer(videoB, false);
+    setMonitorVideoLayer(singleVideo, false);
+    setMonitorBackgroundVisible(true);
   }
 }
 
@@ -3824,6 +4374,9 @@ function handleVideoUpload(files, targetState = 'GAMEPLAY_IDLE', playMode = 'loo
   if (!files || files.length === 0) return;
 
   Array.from(files).forEach((file) => {
+    persistProjectFile(file, 'uploads')
+      .then(saved => saved && addLog(`Saved project file: ${saved.filename}`, 'ok'))
+      .catch(err => addLog(`Could not save project file: ${err.message}`, 'warn'));
     const blobUrl = URL.createObjectURL(file);
     const cleanId = file.name.replace(/\.[^/.]+$/, "").toLowerCase().replace(/[^a-z0-9_]/g, '_');
     
@@ -3857,7 +4410,7 @@ function handleVideoUpload(files, targetState = 'GAMEPLAY_IDLE', playMode = 'loo
     if (!CLIP_LIBRARY[targetState]) CLIP_LIBRARY[targetState] = [];
     CLIP_LIBRARY[targetState].unshift(newClip);
 
-    addLog(`Đã tải lên video: ${file.name} vào nhóm ${targetState} (${playMode.toUpperCase()})`, 'ok');
+    addLog(`Uploaded video: ${file.name} to state ${targetState} (${playMode.toUpperCase()})`, 'ok');
   });
 
   // Reset filter to 'all' so that uploaded clips in any group are immediately visible in the UI
@@ -3876,118 +4429,63 @@ function handleVideoUpload(files, targetState = 'GAMEPLAY_IDLE', playMode = 'loo
 
 function generateContextualChatReply(viewerName, messageText, streamContext, chatHistory) {
   const raw = messageText.toLowerCase().trim();
-  const state = App.currentState || 'GAMEPLAY_IDLE';
   const name = viewerName || 'bạn';
+  const pick = replies => replies[Math.floor(Math.random() * replies.length)];
 
-  // 1. Check Questions about Game / How to play / Where to download
-  if (raw.includes('game gì') || raw.includes('tên gì') || raw.includes('game nào') || raw.includes('tải') || raw.includes('chơi sao') || raw.includes('luật') || raw.includes('chơi như nào') || raw.includes('ở đâu')) {
-    const gameReplies = [
-      `Dạ bạn ${name} ơi, game này là Nổ Hũ Thần Tài cực hot nè! Luật chơi đơn giản lắm, bạn bấm vào link bio để tải về chơi cùng Mimi nha!`,
-      `Chào ${name} nè! Mimi đang chơi slot game Nổ Hũ Đổi Thưởng nha, quay dễ trúng thưởng lớn lắm, bạn vào link ở góc màn hình để tham gia nhé!`,
-      `Bạn ${name} hỏi đúng lúc ghê! Game này có nhiều phòng chơi vui lắm, bạn tải theo link trên bio là vào được ngay phòng của Mimi nè!`,
-    ];
-    return {
-      text: gameReplies[Math.floor(Math.random() * gameReplies.length)],
-      emotion: 'happy',
-      topic: 'game_inquiry'
-    };
+  if (['game gì', 'tên gì', 'game nào', 'tải', 'chơi sao', 'luật', 'ở đâu', 'what game', 'how to play'].some(term => raw.includes(term))) {
+    return { text: pick([
+      `${name} ơi, Mimi đang chơi game nổ hũ trực tiếp nè. Bạn xem link trên màn hình để tham gia nhé!`,
+      `Game này chơi đơn giản lắm ${name} ơi, mở link trong phần mô tả rồi chọn phòng của Mimi nha!`,
+    ]), emotion: 'happy', topic: 'game_inquiry' };
   }
 
-  // 2. Check Co-op / Join Game / Play Together Requests
-  if (raw.includes('chơi chung') || raw.includes('chơi cùng') || raw.includes('vào phòng') || raw.includes('kéo em') || raw.includes('cho chơi với') || raw.includes('slot') || raw.includes('room')) {
-    const coopReplies = [
-      `Được luôn bạn ${name} ơi! Mimi đang ở phòng VIP số 8 nè, bạn vào nhanh rồi anh em mình cùng hợp sức nổ hũ nha!`,
-      `Hoan nghênh ${name} vào chơi chung với Mimi nha! Link vào phòng Mimi để sẵn dưới phần mô tả rồi nè, vào ngay cho nóng!`,
-      `Ôi có ${name} vào chơi cùng là Mimi tự tin hẳn luôn! Vào phòng quay chung lấy lộc đầu ngày nào bạn ơi!`,
-    ];
-    return {
-      text: coopReplies[Math.floor(Math.random() * coopReplies.length)],
-      emotion: 'excited',
-      topic: 'coop_request'
-    };
+  if (['chơi chung', 'chơi cùng', 'vào phòng', 'cho chơi với', 'room', 'join'].some(term => raw.includes(term))) {
+    return { text: pick([
+      `Vào chơi cùng Mimi nha ${name}, link phòng đang ở phần mô tả đó!`,
+      `Hoan nghênh ${name} vào phòng, cùng Mimi săn jackpot nào!`,
+    ]), emotion: 'excited', topic: 'coop_request' };
   }
 
-  // 3. Check Strategic Advice / Betting Advice / Room Suggestions
-  if (raw.includes('tăng cược') || raw.includes('giảm cược') || raw.includes('đổi phòng') || raw.includes('quay mức') || raw.includes('mức cược') || raw.includes('đặt cược') || raw.includes('đổi qua') || raw.includes('nhân') || raw.includes('tất tay') || raw.includes('all in')) {
-    const adviceReplies = [
-      `Nghe lời khuyên của bạn ${name} nè! Để Mimi thử tăng mức cược lên xem phong thủy ván này có nổ hũ rực rỡ không nha!`,
-      `Ý kiến của ${name} hay quá ta! Để Mimi đổi chiến thuật theo gợi ý của bạn liền nè, chuẩn bị tinh thần lụm tiền nha!`,
-      `Bạn ${name} phán chuẩn ghê! Để Mimi thử theo chiến thuật này của bạn, nếu nổ hũ là có công lớn của bạn đó nha!`,
-    ];
-    return {
-      text: adviceReplies[Math.floor(Math.random() * adviceReplies.length)],
-      emotion: 'excited',
-      topic: 'strategy_advice'
-    };
+  if (['tăng cược', 'giảm cược', 'đổi phòng', 'mức cược', 'chiến thuật', 'tất tay', 'all in'].some(term => raw.includes(term))) {
+    return { text: pick([
+      `Ý kiến hay đó ${name}, Mimi thử chiến thuật này ở ván tiếp theo nha!`,
+      `Mimi ghi nhận gợi ý của ${name}, mình đổi chiến thuật xem vận may thế nào nhé!`,
+    ]), emotion: 'excited', topic: 'strategy_advice' };
   }
 
-  // 4. Check Win / Loss / Luck / Empathy
-  if (raw.includes('đen') || raw.includes('thua') || raw.includes('tiếc') || raw.includes('sao không nổ') || raw.includes('gỡ') || raw.includes('cháy')) {
-    const lossReplies = [
-      `Công nhận bạn ${name} nói đúng, ván vừa rồi trượt xíu tiếc hùi hụi luôn á! Nhưng không sao, Mimi cảm thấy cầu may mắn đang quay trở lại rồi nè!`,
-      `Hu hu bạn ${name} đồng cảm với Mimi ghê! Vừa nãy suýt trúng Jackpot mà bị hụt một nhịp, ván này Mimi quyết tâm phục thù nổ to cho coi!`,
-      `Đúng rồi đó ${name} ơi, cờ bạc ăn nhau về sáng mà, thua keo này Mimi bày keo khác, cùng cổ vũ cho Mimi nổ hũ nha!`,
-    ];
-    return {
-      text: lossReplies[Math.floor(Math.random() * lossReplies.length)],
-      emotion: 'neutral',
-      topic: 'loss_empathy'
-    };
+  if (['đen', 'thua', 'tiếc', 'không nổ', 'gỡ', 'cháy', 'unlucky', 'lose'].some(term => raw.includes(term))) {
+    return { text: pick([
+      `Tiếc thật đó ${name}, nhưng ván sau Mimi sẽ gỡ lại nha!`,
+      `Suýt trúng rồi ${name} ơi, cùng chờ một màn trở lại thật đẹp nhé!`,
+    ]), emotion: 'neutral', topic: 'loss_empathy' };
   }
 
-  if (raw.includes('thắng') || raw.includes('nổ hũ') || raw.includes('jackpot') || raw.includes('chúc mừng') || raw.includes('đỉnh') || raw.includes('giàu to') || raw.includes('ăn đậm')) {
-    const winReplies = [
-      `Cảm ơn lời chúc của bạn ${name} nha! Nhờ có vía may mắn của mọi người mà Mimi vừa nổ to rực rỡ luôn nè!`,
-      `Ahihi bạn ${name} thấy Mimi đỉnh chóp chưa! Ván vừa rồi nổ hũ tưng bừng luôn, cùng chia sẻ may mắn với cả nhà nè!`,
-      `Cảm ơn ${name} đã luôn cổ vũ nhiệt tình nha! Hôm nay lộc về ngập tràn luôn mọi người ơi!`,
-    ];
-    return {
-      text: winReplies[Math.floor(Math.random() * winReplies.length)],
-      emotion: 'excited',
-      topic: 'win_celebrate'
-    };
+  if (['thắng', 'nổ hũ', 'jackpot', 'chúc mừng', 'đỉnh', 'ăn đậm', 'win'].some(term => raw.includes(term))) {
+    return { text: pick([
+      `Cảm ơn ${name} nha, ván vừa rồi thắng quá đẹp luôn!`,
+      `Jackpot rực rỡ quá ${name} ơi, mình giữ đà may mắn này nhé!`,
+    ]), emotion: 'excited', topic: 'win_celebrate' };
   }
 
-  // 5. Check Greetings / Stream Schedule
-  if (raw.includes('chào') || raw.includes('hi') || raw.includes('hello') || raw.includes('hé lô') || raw.includes('mimi ơi') || raw.includes('live đến') || raw.includes('mấy giờ')) {
-    const greetReplies = [
-      `Mimi chào bạn ${name} nha! Chúc bạn có một buổi xem livestream thật nhiều niềm vui và may mắn cùng Mimi nè!`,
-      `Hé lô bạn ${name} dễ thương! Rất vui vì bạn đã ghé thăm phòng live của Mimi hôm nay, cùng ở lại chơi và săn hũ nha!`,
-      `Chào ${name} nè! Mimi livestream đều đặn mỗi ngày đó, bạn nhớ bấm follow để không bỏ lỡ những pha nổ hũ đỉnh cao nha!`,
-    ];
-    return {
-      text: greetReplies[Math.floor(Math.random() * greetReplies.length)],
-      emotion: 'happy',
-      topic: 'greeting'
-    };
+  if (['chào', 'mimi ơi', 'hé lô', 'hi', 'hello', 'mấy giờ', 'lịch live'].some(term => raw.includes(term))) {
+    return { text: pick([
+      `Mimi chào ${name} nha, cảm ơn bạn đã ghé livestream!`,
+      `Chào ${name}, ở lại xem ván tiếp theo cùng Mimi nhé!`,
+    ]), emotion: 'happy', topic: 'greeting' };
   }
 
-  // 6. Check Compliments / Flirting / Playful / VTuber Character
-  if (raw.includes('xinh') || raw.includes('dễ thương') || raw.includes('đẹp') || raw.includes('cute') || raw.includes('hát') || raw.includes('yêu') || raw.includes('người yêu') || raw.includes('tuổi')) {
-    const complimentReplies = [
-      `Ôi bạn ${name} khen làm Mimi ngại muốn xỉu luôn nè! Cảm ơn bạn nhiều nha, Mimi thả tim cho bạn nè!`,
-      `Ahihi bạn ${name} khéo miệng ghê ta! Được khen xinh thế này là lát nữa Mimi quay hũ nổ tung màn hình luôn cho xem!`,
-      `Cảm ơn ${name} đã dành lời khen ngọt ngào cho Mimi nha! Mãi là fan cứng ủng hộ Mimi nha bạn ơi!`,
-    ];
-    return {
-      text: complimentReplies[Math.floor(Math.random() * complimentReplies.length)],
-      emotion: 'happy',
-      topic: 'compliment'
-    };
+  if (['xinh', 'dễ thương', 'đẹp', 'cute', 'hát', 'yêu', 'tuổi'].some(term => raw.includes(term))) {
+    return { text: pick([
+      `Cảm ơn ${name} nha, bạn khen làm Mimi ngại quá!`,
+      `${name} dễ thương quá, Mimi gửi bạn một trái tim nè!`,
+    ]), emotion: 'happy', topic: 'compliment' };
   }
 
-  // 7. Contextual Fallback referencing the user's specific comment
-  const cleanSnippet = messageText.length > 25 ? messageText.slice(0, 22) + '…' : messageText;
-  const contextReplies = [
-    `Mimi vừa đọc được bình luận "${cleanSnippet}" của bạn ${name} nè! Đồng quan điểm với bạn luôn, cùng xem tiếp diễn biến ván này nha!`,
-    `Bạn ${name} nói về "${cleanSnippet}" nghe thú vị ghê á! Để Mimi tập trung xử lý ván này rồi tâm sự tiếp với bạn nha!`,
-    `Mimi ghi nhận ý kiến "${cleanSnippet}" của ${name} nha! Cảm ơn bạn đã luôn tương tác nhiệt tình với kênh nè!`,
-  ];
-  return {
-    text: contextReplies[Math.floor(Math.random() * contextReplies.length)],
-    emotion: 'happy',
-    topic: 'general_context'
-  };
+  const cleanSnippet = messageText.length > 25 ? `${messageText.slice(0, 22)}…` : messageText;
+  return { text: pick([
+    `Mimi vừa đọc bình luận “${cleanSnippet}” của ${name} nè, cảm ơn bạn đã tương tác nha!`,
+    `Ý kiến của ${name} về “${cleanSnippet}” thú vị đó, mình cùng xem tiếp ván này nhé!`,
+  ]), emotion: 'happy', topic: 'general_context' };
 }
 
 function processPendingChatBatch() {
@@ -4005,29 +4503,29 @@ function processPendingChatBatch() {
   const { viewerName, messageText, isGift, giftIcon } = currentItem;
 
   if (isGift) {
-    updateVoiceStatusUI('generating', `🎁 Nhận quà từ [${viewerName}]: Đang cảm ơn...`, 30);
+    updateVoiceStatusUI('generating', `🎁 Gift from [${viewerName}]: Preparing a thank-you...`, 30);
     setTimeout(() => {
       setVisualState('THANK_DONATION', 2, 'gift', true);
-      const giftResponse = `Ôi cảm ơn bạn ${viewerName} rất nhiều vì đã tặng ${giftIcon}! Mimi yêu bạn nhiều nha!`;
+      const giftResponse = `Cảm ơn ${viewerName} rất nhiều vì món quà ${giftIcon} nha!`;
       speakAI(giftResponse, 'excited');
     }, 600);
     return;
   }
 
   // Phase 1: Natural Reading Pause (Streamer eyes reading the chat)
-  updateVoiceStatusUI('generating', `👀 Mimi đang đọc chat của [${viewerName}]...`, 15);
-  addLog(`💬 AI đang đọc chat từ ${viewerName}: "${messageText.slice(0, 30)}..."`, 'hi');
+  updateVoiceStatusUI('generating', `👀 Mimi is reading chat from [${viewerName}]...`, 15);
+  addLog(`💬 AI is reading chat from ${viewerName}: "${messageText.slice(0, 30)}..."`, 'hi');
 
   setTimeout(() => {
     // Phase 2: Context Analysis & Thinking Pause
-    updateVoiceStatusUI('generating', `🧠 Đang phân tích ngữ cảnh & soạn câu trả lời...`, 45);
+    updateVoiceStatusUI('generating', `🧠 Analyzing context and drafting a reply...`, 45);
 
     setTimeout(() => {
       // Phase 3: Generate Context-Aware Reply
       const reply = generateContextualChatReply(viewerName, messageText, App.streamContext, App.chatHistory);
 
       // Phase 4: Speak AI (Generates audio & LipSync, synchronizes subtitle and speech)
-      addLog(`🗣️ Mimi chuẩn bị trả lời [${viewerName}]: "${reply.text}"`, 'ok');
+      addLog(`🗣️ Mimi is preparing a reply for [${viewerName}]: "${reply.text}"`, 'ok');
       speakAI(reply.text, reply.emotion);
 
     }, 400); // 400ms context analysis
@@ -4069,7 +4567,7 @@ function addChatMessage(viewerName, messageText, isGift = false, giftIcon = '') 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        platform: 'dashboard',
+        platform: 'mock',
         viewerId: 'usr_' + viewerName.toLowerCase().replace(/[^a-z0-9]/g, ''),
         viewerName: viewerName,
         message: messageText,
@@ -4079,8 +4577,9 @@ function addChatMessage(viewerName, messageText, isGift = false, giftIcon = '') 
     }).catch(() => {});
   } catch {}
 
-  // Push to Pending Queue and schedule natural streamer response
-  if (!App.isPaused) {
+  // The production LiveTalking path is server-owned: chat → Qwen → TTS →
+  // MuseTalk. Keep the local canned responder only for the offline file demo.
+  if (!App.isPaused && (location.protocol === 'file:' || App.talkingEngine.provider !== 'livetalking')) {
     App.pendingChatBatch.push({ viewerName, messageText, isGift, giftIcon });
 
     if (App.chatProcessTimer) clearTimeout(App.chatProcessTimer);
@@ -4095,28 +4594,28 @@ function addChatMessage(viewerName, messageText, isGift = false, giftIcon = '') 
 // ──────────────────────────────────────────────────────────
 
 function injectJackpot() {
-  App.streamContext.lastGameEvent = 'Trúng Jackpot 500x';
+  App.streamContext.lastGameEvent = 'Hit a 500x jackpot';
   App.streamContext.totalWins++;
   setVisualState('JACKPOT', 1, 'jackpot', true);
-  speakAI('Trời ơi, trúng JACKPOT thật rồi mọi người ơi! Đỉnh chóp luôn!', 'excited');
+  speakAI('Trúng jackpot rồi cả nhà ơi! Đỉnh quá đi mất!', 'excited');
 }
 
 function injectDonation() {
   setVisualState('THANK_DONATION', 2, 'donation', true);
-  speakAI('Cảm ơn bạn rất nhiều vì đã donate ủng hộ Mimi nha! Mãi yêu!', 'grateful');
+  speakAI('Cảm ơn bạn rất nhiều vì đã ủng hộ livestream của Mimi nha!', 'grateful');
 }
 
 function injectWin() {
-  App.streamContext.lastGameEvent = 'Thắng lớn Mega Win';
+  App.streamContext.lastGameEvent = 'Hit a Mega Win';
   App.streamContext.totalWins++;
   setVisualState('BIG_WIN', 4, 'win', true);
-  speakAI('Thắng lớn rồi nha cả nhà ơi! Quá đã luôn!', 'happy');
+  speakAI('Thắng lớn rồi mọi người ơi! Tuyệt vời quá!', 'happy');
 }
 
 function injectGoal() {
   setVisualState('INVITE_PLAY', 5, 'goal', true);
   if ($('b-goal')) $('b-goal').textContent = 'invite_viewers';
-  speakAI('Mọi người ơi, nhanh tay bấm vào link bio để vào chơi cùng Mimi nha!', 'happy');
+  speakAI('Mọi người vào link trong phần mô tả để chơi cùng Mimi nha!', 'happy');
   App.lastCtaAt = Date.now();
   setTimeout(() => { if ($('b-goal')) $('b-goal').textContent = '—'; }, 6000);
 }
@@ -4128,10 +4627,10 @@ function simSlotSpin() {
   } else if (roll < 0.45) {
     injectWin();
   } else {
-    App.streamContext.lastGameEvent = 'Vừa quay trượt, đang đợi phục thù';
+    App.streamContext.lastGameEvent = 'Missed the last spin; ready for the next round';
     App.streamContext.totalLosses++;
     setVisualState('LOSE', 4, 'spin-lose', true);
-    speakAI('Tiếc quá, ván này suýt nữa là trúng rồi! Thử lại phát nữa nha!', 'neutral');
+    speakAI('Tiếc quá, suýt trúng rồi! Mình thử lại ván tiếp theo nha!', 'neutral');
   }
 }
 
@@ -4160,9 +4659,6 @@ function loadPersistedSettings() {
     if (App.talkingEngine.provider === 'livetalking') {
       ltBadge.textContent = `LiveTalking (${App.talkingEngine.model.toUpperCase()})`;
       ltBadge.style.color = 'var(--green)';
-    } else if (App.talkingEngine.provider === 'neural_mesh') {
-      ltBadge.textContent = 'TALKING Video Active';
-      ltBadge.style.color = 'var(--accent)';
     } else if (App.talkingEngine.provider === 'off') {
       ltBadge.textContent = 'Disabled';
       ltBadge.style.color = 'var(--t3)';
@@ -4171,9 +4667,6 @@ function loadPersistedSettings() {
       ltBadge.style.color = 'var(--green)';
     }
   }
-
-  const quickKey = $('quick-voice-apikey');
-  if (quickKey) quickKey.value = App.voice.elevenLabsKey;
 
   const apikeyGroup = $('group-quick-apikey');
   const isEleven = App.voice.provider === 'elevenlabs';
@@ -4234,8 +4727,7 @@ function loadPersistedSettings() {
       const obsCfg = JSON.parse(obsCfgStr);
       if ($('cfg-obs-host')) $('cfg-obs-host').value = obsCfg.host || 'localhost';
       if ($('cfg-obs-port')) $('cfg-obs-port').value = obsCfg.port || '4455';
-      if ($('cfg-obs-pass')) $('cfg-obs-pass').value = obsCfg.password || '';
-      if ($('chk-obs-autoconnect')) $('chk-obs-autoconnect').checked = Boolean(obsCfg.autoConnect);
+      if ($('cfg-obs-autoconnect')) $('cfg-obs-autoconnect').checked = Boolean(obsCfg.autoConnect);
     } catch {}
   }
 }
@@ -4248,9 +4740,7 @@ function saveVoiceSettings(newSettings = {}) {
   if (newSettings.language !== undefined) {
     localStorage.setItem(STORAGE_KEYS.VOICE_LANG, App.voice.language);
   }
-  if (newSettings.elevenLabsKey !== undefined) {
-    localStorage.setItem(STORAGE_KEYS.ELEVENLABS_KEY, App.voice.elevenLabsKey);
-  }
+  delete newSettings.elevenLabsKey;
   if (newSettings.elevenLabsVoiceId !== undefined) {
     localStorage.setItem(STORAGE_KEYS.ELEVENLABS_VOICE, App.voice.elevenLabsVoiceId);
   }
@@ -4338,7 +4828,7 @@ function openUploadModalForTargetState(targetState = 'GAMEPLAY_IDLE') {
 // ── Event Listeners ───────────────────────────────────────
 function bindEventListeners() {
   // Topbar Modals
-  $('btn-modal-obs')?.addEventListener('click', () => openModal('modal-obs'));
+  $('btn-modal-obs')?.addEventListener('click', () => window.navigateAppView?.('settings'));
   $('close-modal-obs')?.addEventListener('click', () => closeModal('modal-obs'));
   $('cancel-modal-obs')?.addEventListener('click', () => closeModal('modal-obs'));
 
@@ -4346,15 +4836,24 @@ function bindEventListeners() {
   $('cancel-modal-upload')?.addEventListener('click', () => closeModal('modal-upload-clip'));
 
   // OBS Settings Inputs Persistence
-  ['cfg-obs-host', 'cfg-obs-port', 'cfg-obs-pass', 'chk-obs-autoconnect'].forEach(id => {
+  ['cfg-obs-host', 'cfg-obs-port', 'cfg-obs-autoconnect'].forEach(id => {
     $(id)?.addEventListener('input', () => {
       localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify({
         host: $('cfg-obs-host')?.value || 'localhost',
         port: $('cfg-obs-port')?.value || '4455',
-        password: $('cfg-obs-pass')?.value || '',
-        autoConnect: $('chk-obs-autoconnect')?.checked || false,
+        autoConnect: $('cfg-obs-autoconnect')?.checked || false,
       }));
     });
+  });
+  $('save-modal-obs')?.addEventListener('click', () => {
+    localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify({
+      host: $('cfg-obs-host')?.value || 'localhost',
+      port: $('cfg-obs-port')?.value || '4455',
+      autoConnect: $('cfg-obs-autoconnect')?.checked || false,
+    }));
+    const banner = $('obs-status-banner');
+    if (banner) banner.textContent = '● OBS settings saved';
+    addLog('OBS output settings saved.', 'ok');
   });
 
   // Video Mixer Controls
@@ -4366,22 +4865,22 @@ function bindEventListeners() {
   $('chk-global-random')?.addEventListener('change', (e) => {
     App.globalRandom = e.target.checked;
     localStorage.setItem(STORAGE_KEYS.GLOBAL_RANDOM, String(App.globalRandom));
-    addLog(`Random Toàn Cục: ${App.globalRandom ? 'Bật' : 'Tắt'}`, 'ok');
+    addLog(`Global random: ${App.globalRandom ? 'On' : 'Off'}`, 'ok');
   });
 
   // Monitor Random Button
   $('btn-random-clip-now')?.addEventListener('click', () => {
     requestStateTransition(App.currentState, 0, 'random-shuffle-now', true);
-    addLog('🔀 Đã đổi ngẫu nhiên sang clip khác trong State!', 'ok');
+    addLog('🔀 Selected another random clip.', 'ok');
   });
 
-  // Queued Transition Skip Button (Chuyển ngay)
+  // Queued transition skip button
   $('btn-skip-queue')?.addEventListener('click', () => {
     if (App.queuedTransition) {
       const q = App.queuedTransition;
       clearQueuedTransition();
       setVisualState(q.state, q.priority, q.reason || 'skip-queue-now', q.forceRandom);
-      addLog(`⏭️ Đã chuyển ngay sang [${q.state}] (bỏ qua chờ)`, 'ok');
+      addLog(`⏭️ Switched immediately to [${q.state}] (queue skipped)`, 'ok');
     }
   });
 
@@ -4393,7 +4892,7 @@ function bindEventListeners() {
     cycleStateClip(1);
   });
 
-  // Group Random Buttons (Bật / Tắt trạng thái Random video trong State)
+  // Per-group random toggles
   document.querySelectorAll('.btn-group-random').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -4403,7 +4902,7 @@ function bindEventListeners() {
       App.groupRandom[groupCat] = !(App.groupRandom[groupCat] !== false);
       localStorage.setItem(STORAGE_KEYS.GROUP_RANDOM, JSON.stringify(App.groupRandom));
       renderLibraryUI();
-      addLog(`🔀 Đã ${App.groupRandom[groupCat] ? 'BẬT' : 'TẮT'} random video cho nhóm ${groupCat.toUpperCase()}`, 'ok');
+      addLog(`🔀 Random video ${App.groupRandom[groupCat] ? 'ON' : 'OFF'} for ${groupCat.toUpperCase()}`, 'ok');
     });
   });
 
@@ -4429,7 +4928,7 @@ function bindEventListeners() {
     });
   });
 
-  // 2. Per-Group Upload Buttons (`＋ Thêm`)
+  // Per-group upload buttons
   document.querySelectorAll('.btn-group-upload').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -4482,6 +4981,48 @@ function bindEventListeners() {
   $('close-modal-avatar')?.addEventListener('click', () => closeModal('modal-avatar'));
   $('cancel-modal-avatar')?.addEventListener('click', () => closeModal('modal-avatar'));
 
+  // Simplified Web App avatar creation flow
+  $('btn-create-avatar')?.addEventListener('click', openAvatarCreateModal);
+  $('avatar-library-grid')?.addEventListener('click', event => {
+    if (event.target.closest('[data-create-avatar]')) openAvatarCreateModal();
+  });
+  $('close-avatar-create')?.addEventListener('click', closeAvatarCreateModal);
+  $('cancel-avatar-create')?.addEventListener('click', closeAvatarCreateModal);
+  $('modal-avatar-create')?.addEventListener('click', event => {
+    if (event.target === $('modal-avatar-create')) closeAvatarCreateModal();
+  });
+  $('btn-avatar-create-upload')?.addEventListener('click', () => $('input-avatar-create-file')?.click());
+  $('input-avatar-create-file')?.addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    await loadAvatarTrainingFile(file);
+  });
+  $('avatar-create-id')?.addEventListener('input', event => {
+    const cleanId = event.target.value.replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (cleanId !== event.target.value) event.target.value = cleanId;
+    if ($('lt-avatar-id-input')) $('lt-avatar-id-input').value = cleanId;
+    LiveTalkingStudio.avatarId = cleanId;
+  });
+  $('btn-avatar-create-train')?.addEventListener('click', async () => {
+    if (AvatarCreateFlow.status === 'done') {
+      closeAvatarCreateModal();
+      window.navigateAppView?.('avatar');
+      await refreshLiveTalkingAvatarList();
+      return;
+    }
+    const avatarId = $('avatar-create-id')?.value.trim();
+    if (!AvatarCreateFlow.file) return alert('Upload avatar media first.');
+    if (!avatarId) return alert('Enter an Avatar ID.');
+    if ($('lt-avatar-id-input')) $('lt-avatar-id-input').value = avatarId;
+    LiveTalkingStudio.avatarId = avatarId;
+    await startLiveTalkingTraining();
+    updateAvatarCreateUI();
+  });
+  $('avatar-page-random-toggle')?.addEventListener('change', event => {
+    AvatarSession.random = event.target.checked;
+    saveAvatarSession().catch(err => addLog(`Could not save avatar session: ${err.message}`, 'warn'));
+  });
+
   // ── Step 1: Training Video Upload & Training Workflow ──────
   $('btn-upload-train-video')?.addEventListener('click', () => {
     $('input-train-video-file')?.click();
@@ -4490,42 +5031,8 @@ function bindEventListeners() {
   $('input-train-video-file')?.addEventListener('change', async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    LiveTalkingStudio.videoFile = file;
-    LiveTalkingStudio.videoBlobUrl = URL.createObjectURL(file);
-    LiveTalkingStudio.isTrainedReady = false;
-    LiveTalkingStudio.trainProgress = 0;
-
-    // Reset sampler whenever a new video is loaded
-    VideoLipSyncRetargeter.reset();
-
-    if (file.type.startsWith('image/')) {
-      const img = new Image();
-      img.src = LiveTalkingStudio.videoBlobUrl;
-      await img.decode();
-      LiveTalkingStudio.videoEl = img;
-    } else {
-      const vid = document.createElement('video');
-      vid.src = LiveTalkingStudio.videoBlobUrl;
-      vid.loop = true;
-      vid.muted = true;
-      vid.playsInline = true;
-      vid.autoplay = true;
-      vid.play().catch(() => {});
-      LiveTalkingStudio.videoEl = vid;
-    }
-
-    // Persist blob to IndexedDB
-    await IdolDB.saveAvatar('livetalking_avatar', file, {
-      fileName: file.name,
-      fileSize: file.size,
-      isTrainedReady: false,
-      uploadedAt: Date.now()
-    });
-
-    updateLiveTalkingUI();
-    logLiveTalkingTerminal(`📁 Đã nạp ${file.type.startsWith('image/') ? 'ảnh' : 'video'}: ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB).`, 'info');
-    addLog(`📁 Đã nạp nguồn avatar LiveTalking: ${file.name}`, 'ok');
+    await loadAvatarTrainingFile(file);
+    logLiveTalkingTerminal(`📁 Loaded ${file.type.startsWith('image/') ? 'image' : 'video'}: ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB).`, 'info');
   });
 
   $('btn-clear-train-video')?.addEventListener('click', async () => {
@@ -4538,8 +5045,8 @@ function bindEventListeners() {
     if ($('input-train-video-file')) $('input-train-video-file').value = '';
     await IdolDB.deleteAvatar('livetalking_avatar');
     updateLiveTalkingUI();
-    logLiveTalkingTerminal('🗑️ Đã xóa video hiện tại.', 'warn');
-    addLog('🗑️ Đã xóa video LiveTalking', 'ok');
+    logLiveTalkingTerminal('🗑️ Removed current media.', 'warn');
+    addLog('🗑️ Removed LiveTalking media', 'ok');
   });
 
   $('btn-start-training-video')?.addEventListener('click', () => {
@@ -4552,14 +5059,21 @@ function bindEventListeners() {
     try {
       await activateLiveTalkingAvatar(avatarId);
     } catch (err) {
-      logLiveTalkingTerminal(`❌ Không thể dùng avatar ${avatarId}: ${err.message}`, 'err');
+      logLiveTalkingTerminal(`❌ Could not activate avatar ${avatarId}: ${err.message}`, 'err');
     }
+  });
+
+  $('lt-random-avatar-toggle')?.addEventListener('change', (event) => {
+    AvatarSession.random = event.target.checked;
+  });
+  $('btn-save-avatar-pool')?.addEventListener('click', () => {
+    saveAvatarSession().catch(err => addLog(`Could not save avatar session: ${err.message}`, 'warn'));
   });
 
   // ── LiveTalking Model Selection & Config ──────────────────
   $('lt-model-select')?.addEventListener('change', (e) => {
     LiveTalkingStudio.modelType = e.target.value;
-    logLiveTalkingTerminal(`ℹ️ Đã chọn mô hình: ${e.target.value.toUpperCase()}`, 'info');
+    logLiveTalkingTerminal(`ℹ️ Selected model: ${e.target.value.toUpperCase()}`, 'info');
   });
 
   $('lt-avatar-id-input')?.addEventListener('input', (e) => {
@@ -4687,7 +5201,7 @@ function bindEventListeners() {
       App.avatar.mouthBox = LiveTalkingStudio.mouthBox;
     }
     syncRegionControlUI();
-    logLiveTalkingTerminal(`🎯 Đã quét lại tự động: Mặt (${Math.round(faceCx*100)}%, ${Math.round(faceCy*100)}%), Miệng (${Math.round(LiveTalkingStudio.mouthBox.cx*100)}%, ${Math.round(LiveTalkingStudio.mouthBox.cy*100)}%)`, 'ok');
+    logLiveTalkingTerminal(`🎯 Auto-detected: Face (${Math.round(faceCx*100)}%, ${Math.round(faceCy*100)}%), Mouth (${Math.round(LiveTalkingStudio.mouthBox.cx*100)}%, ${Math.round(LiveTalkingStudio.mouthBox.cy*100)}%)`, 'ok');
   });
 
   $('btn-quick-reset-default')?.addEventListener('click', () => {
@@ -4698,7 +5212,7 @@ function bindEventListeners() {
       App.avatar.mouthBox = LiveTalkingStudio.mouthBox;
     }
     syncRegionControlUI();
-    logLiveTalkingTerminal('🔄 Đã khôi phục tọa độ chuẩn 16:9 cho Mặt & Miệng', 'ok');
+    logLiveTalkingTerminal('🔄 Restored default 16:9 face and mouth regions', 'ok');
   });
 
   // ── MediaPipe Mask Controls ───────────────────────────────
@@ -4820,14 +5334,14 @@ function bindEventListeners() {
         LiveTalkingStudio.dragState.isDragging = false;
         const target = LiveTalkingStudio.dragState.target;
         const box = target === 'mouth' ? LiveTalkingStudio.mouthBox : LiveTalkingStudio.faceBox;
-        logLiveTalkingTerminal(`🎯 Đã cập nhật vị trí ${target === 'mouth' ? 'Vùng Miệng' : 'Khuôn Mặt'}: X=${Math.round(box.cx*100)}%, Y=${Math.round(box.cy*100)}%`, 'ok');
+        logLiveTalkingTerminal(`🎯 Updated ${target === 'mouth' ? 'Mouth' : 'Face'}: X=${Math.round(box.cx*100)}%, Y=${Math.round(box.cy*100)}%`, 'ok');
       }
     });
   }
 
   $('btn-clear-train-logs')?.addEventListener('click', () => {
     const terminal = $('lt-terminal-logs-body');
-    if (terminal) terminal.innerHTML = '<div class="log-line ok">[System] Sẵn sàng nhận lệnh...</div>';
+    if (terminal) terminal.innerHTML = '<div class="log-line ok">[System] Ready for commands...</div>';
   });
 
   // ── Step 2: Voice & Realtime LipSync Stream Controls ──────
@@ -4836,7 +5350,7 @@ function bindEventListeners() {
     App.voice.provider = e.target.value;
     updateLiveTalkingVoiceUI();
     saveVoiceSettings({ provider: e.target.value });
-    addLog(`🎙️ Đã đổi Voice Provider cho LiveTalking: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
+    addLog(`🎙️ Changed LiveTalking voice provider: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
   });
 
   $('lt-eleven-voice-select')?.addEventListener('change', (e) => {
@@ -4855,24 +5369,6 @@ function bindEventListeners() {
     }
   });
 
-  $('lt-eleven-apikey-input')?.addEventListener('input', (e) => {
-    const val = e.target.value.trim();
-    if (val) {
-      App.voice.elevenLabsKey = val;
-      saveVoiceSettings({ elevenLabsKey: val });
-    }
-  });
-
-  $('lt-btn-toggle-apikey')?.addEventListener('click', () => {
-    const input = $('lt-eleven-apikey-input');
-    const btn = $('lt-btn-toggle-apikey');
-    if (input) {
-      const isPwd = input.type === 'password';
-      input.type = isPwd ? 'text' : 'password';
-      if (btn) btn.textContent = isPwd ? '🙈 Ẩn Key' : '👁️ Hiện Key';
-    }
-  });
-
   $('lt-voice-speed-slider')?.addEventListener('input', (e) => {
     const spd = parseInt(e.target.value, 10) / 100;
     LiveTalkingStudio.voiceSpeed = spd;
@@ -4885,26 +5381,26 @@ function bindEventListeners() {
   });
 
   $('btn-reset-sample-text')?.addEventListener('click', () => {
-    if ($('lt-test-speech-input')) $('lt-test-speech-input').value = 'Chào cả nhà, mình là AI Idol Livestream!';
+    if ($('lt-test-speech-input')) $('lt-test-speech-input').value = 'Chào cả nhà, Mimi đã sẵn sàng livestream rồi nè!';
   });
 
   // Realtime LipSync Speech Test
   $('btn-test-lipsync-speak')?.addEventListener('click', async () => {
     if (!LiveTalkingStudio.isTrainedReady || !LiveTalkingWebRTCClient.sessionId) {
-      alert('Vui lòng chọn/kích hoạt Avatar LiveTalking và chờ WebRTC kết nối trước khi nói!');
+      alert('Select an avatar and wait for the LiveTalking WebRTC connection.');
       return;
     }
 
     unlockAudio();
-    const text = $('lt-test-speech-input')?.value.trim() || 'Chào cả nhà, mình là AI Idol Livestream!';
+    const text = $('lt-test-speech-input')?.value.trim() || 'Chào cả nhà, Mimi đã sẵn sàng livestream rồi nè!';
     const provider = $('lt-voice-provider-select')?.value || App.voice.provider || 'elevenlabs';
 
-    logLiveTalkingTerminal(`🎙️ Đang tổng hợp giọng nói (${provider.toUpperCase()}) & phát Live LipSync...`, 'info');
-    addLog(`🎙️ Thử giọng nói LiveTalking (${provider.toUpperCase()})...`, 'ok');
+    logLiveTalkingTerminal(`🎙️ Generating voice (${provider.toUpperCase()}) and Live LipSync...`, 'info');
+    addLog(`🎙️ Testing LiveTalking voice (${provider.toUpperCase()})...`, 'ok');
 
     const button = $('btn-test-lipsync-speak');
     const originalLabel = button?.textContent;
-    if (button) { button.disabled = true; button.textContent = '⏳ Đang sinh Voice & LipSync...'; }
+    if (button) { button.disabled = true; button.textContent = '⏳ Generating voice and LipSync...'; }
     try {
       await speakAI(text, 'happy');
     } catch (error) {
@@ -4912,14 +5408,14 @@ function bindEventListeners() {
       logLiveTalkingTerminal(`❌ ${error.message}`, 'error');
       addLog(`❌ LiveTalking: ${error.message}`, 'err');
     } finally {
-      if (button) { button.disabled = false; button.textContent = originalLabel || '🗣️ Thử Nói & LipSync'; }
+      if (button) { button.disabled = false; button.textContent = originalLabel || '🗣️ Test voice and LipSync'; }
     }
   });
 
   // Test Audio WAV LipSync Directly (No TTS needed)
   $('btn-test-audio-wav')?.addEventListener('click', async () => {
     if (!LiveTalkingStudio.videoBlobUrl && !App.avatar.videoUrl) {
-      alert('Vui lòng nạp video trước khi test Audio WAV!');
+      alert('Upload avatar media before testing WAV audio.');
       return;
     }
 
@@ -4927,9 +5423,9 @@ function bindEventListeners() {
     stopLiveSpeech();
 
     const sampleDurationMs = 2800;
-    logLiveTalkingTerminal('🎵 Chuẩn bị audio test.wav & MuseTalk inference buffer...', 'info');
-    addLog('🎵 Test Audio WAV -> Đợi MuseTalk buffer...', 'ok');
-    updateVoiceStatusUI('generating', 'Đang nạp MuseTalk frame buffer (4 frames)...', 30);
+    logLiveTalkingTerminal('🎵 Preparing test.wav and MuseTalk inference buffer...', 'info');
+    addLog('🎵 WAV test → waiting for MuseTalk buffer...', 'ok');
+    updateVoiceStatusUI('generating', 'Loading MuseTalk frame buffer (4 frames)...', 30);
 
     const t0 = Date.now();
     MuseTalkRealtimeEngine.ingestAudio({
@@ -4941,7 +5437,7 @@ function bindEventListeners() {
       onPlaybackStart: () => {
         // START AUDIO + VIDEO AT THE EXACT SAME INSTANT WHEN FIRST VALID FRAME IS READY
         App.isAiSpeaking = true;
-        updateVoiceStatusUI('speaking', 'Đang phát Audio WAV & MuseTalk Realtime Frame...', 80);
+        updateVoiceStatusUI('speaking', 'Playing WAV audio with MuseTalk realtime frames...', 80);
 
         try {
           const actx = new (window.AudioContext || window.webkitAudioContext)();
@@ -4970,7 +5466,7 @@ function bindEventListeners() {
             MuseTalkRealtimeEngine.stopAudio();
             App.isAiSpeaking = false;
             updateVoiceStatusUI('idle');
-            logLiveTalkingTerminal('✅ Hoàn tất test Audio WAV -> Quay lại IDLE', 'ok');
+            logLiveTalkingTerminal('✅ WAV test complete → returning to IDLE', 'ok');
           }
         }, sampleDurationMs);
       }
@@ -4985,13 +5481,13 @@ function bindEventListeners() {
     if (vuFill) vuFill.style.width = '0%';
     const vuText = $('lbl-vu-val');
     if (vuText) vuText.textContent = '0 dB';
-    logLiveTalkingTerminal('⏹️ Đã dừng phát giọng nói và lipsync stream.', 'warn');
-    addLog('⏹️ Đã dừng phát LiveTalking', 'ok');
+    logLiveTalkingTerminal('⏹️ Stopped voice and LipSync stream.', 'warn');
+    addLog('⏹️ Stopped LiveTalking playback', 'ok');
   });
 
-  // ── Xóa Toàn Bộ Avatar (Full Clean Delete) ────────────────
+  // ── Full avatar reset ──────────────────────────────────────
   $('btn-delete-full-avatar')?.addEventListener('click', async () => {
-    if (!confirm('Bạn có chắc chắn muốn xóa toàn bộ Avatar và reset về trạng thái ban đầu?')) return;
+    if (!confirm('Delete all avatar data and restore defaults?')) return;
 
     LiveTalkingStudio.videoFile = null;
     LiveTalkingStudio.videoBlobUrl = null;
@@ -5009,7 +5505,7 @@ function bindEventListeners() {
 
     if ($('input-train-video-file')) $('input-train-video-file').value = '';
     const terminal = $('lt-terminal-logs-body');
-    if (terminal) terminal.innerHTML = '<div class="log-line ok">[System] Đã xóa toàn bộ dữ liệu avatar. Vui lòng nạp video mới để bắt đầu.</div>';
+    if (terminal) terminal.innerHTML = '<div class="log-line ok">[System] All avatar data removed. Upload new media to begin.</div>';
 
     localStorage.removeItem('livetalking_avatar_dataset');
     localStorage.removeItem(STORAGE_KEYS.AVATAR_IMAGE);
@@ -5023,7 +5519,7 @@ function bindEventListeners() {
 
     updateLiveTalkingUI();
     updateMonitorScreen(App.currentState, App.currentClip);
-    addLog('🗑️ Đã xóa toàn bộ Avatar và đặt lại về mặc định!', 'ok');
+    addLog('🗑️ Avatar data reset to defaults.', 'ok');
   });
 
   // ── Apply & Save to Live Monitor ──────────────────────────
@@ -5057,14 +5553,13 @@ function bindEventListeners() {
 
     closeModal('modal-avatar');
     updateMonitorScreen(App.currentState, App.currentClip);
-    addLog('💾 Đã áp dụng LiveTalking Avatar lên Livestream Monitor!', 'ok');
+    addLog('💾 Applied the LiveTalking avatar to the live monitor.', 'ok');
   });
 
   // ── Voice & Persona Modal ─────────────────────────────────
   $('btn-modal-voice')?.addEventListener('click', () => {
     // Populate modal inputs from App.voice
     if ($('cfg-voice-provider')) $('cfg-voice-provider').value = App.voice.provider || 'elevenlabs';
-    if ($('cfg-voice-apikey')) $('cfg-voice-apikey').value = App.voice.elevenLabsKey || '';
     if ($('cfg-voice-id')) $('cfg-voice-id').value = App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
     if ($('cfg-voice-speed')) $('cfg-voice-speed').value = App.voice.speed || 1.0;
     if ($('val-voice-speed')) $('val-voice-speed').textContent = `${(App.voice.speed || 1.0).toFixed(2)}x`;
@@ -5075,7 +5570,7 @@ function bindEventListeners() {
     const apikeyGrp = $('group-voice-apikey');
     if (apikeyGrp) apikeyGrp.style.display = (App.voice.provider === 'elevenlabs' || App.voice.provider === 'openai') ? 'block' : 'none';
 
-    openModal('modal-voice');
+    window.navigateAppView?.('settings');
   });
 
   $('close-modal-voice')?.addEventListener('click', () => closeModal('modal-voice'));
@@ -5085,13 +5580,6 @@ function bindEventListeners() {
     const val = e.target.value;
     const apikeyGrp = $('group-voice-apikey');
     if (apikeyGrp) apikeyGrp.style.display = (val === 'elevenlabs' || val === 'openai') ? 'block' : 'none';
-  });
-
-  $('btn-clear-voice-key')?.addEventListener('click', () => {
-    if ($('cfg-voice-apikey')) $('cfg-voice-apikey').value = '';
-  });
-  $('btn-clear-apikey-input')?.addEventListener('click', () => {
-    if ($('cfg-voice-apikey')) $('cfg-voice-apikey').value = '';
   });
 
   $('btn-reset-voice-id')?.addEventListener('click', () => {
@@ -5124,7 +5612,7 @@ function bindEventListeners() {
   });
 
   $('btn-rst-persona-prompt')?.addEventListener('click', () => {
-    if ($('cfg-persona-prompt')) $('cfg-persona-prompt').value = 'Bạn là Mimi, một AI Idol streamer người Việt Nam cực kỳ vui tính, năng động và lôi cuốn. Bạn luôn trả lời ngắn gọn (1-2 câu), dùng từ ngữ tự nhiên và thân thiện.';
+    if ($('cfg-persona-prompt')) $('cfg-persona-prompt').value = 'Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu.';
   });
   $('btn-clear-persona-prompt')?.addEventListener('click', () => {
     if ($('cfg-persona-prompt')) $('cfg-persona-prompt').value = '';
@@ -5141,27 +5629,24 @@ function bindEventListeners() {
     unlockAudio();
     const text = $('cfg-test-voice-text')?.value.trim() || 'Chào bạn nha! Cảm ơn bạn đã xem livestream của Mimi!';
     const provider = $('cfg-voice-provider')?.value || App.voice.provider;
-    const apiKey = $('cfg-voice-apikey')?.value.trim() || App.voice.elevenLabsKey;
     const voiceId = $('cfg-voice-id')?.value.trim() || App.voice.elevenLabsVoiceId;
     const speed = parseFloat($('cfg-voice-speed')?.value || App.voice.speed || 1.0);
 
-    saveVoiceSettings({ provider, elevenLabsKey: apiKey, elevenLabsVoiceId: voiceId, speed });
+    saveVoiceSettings({ provider, elevenLabsVoiceId: voiceId, speed });
     speakAI(text, 'happy');
   });
 
   $('save-modal-voice')?.addEventListener('click', () => {
     const provider = $('cfg-voice-provider')?.value || App.voice.provider;
-    const apiKey = $('cfg-voice-apikey')?.value.trim() || App.voice.elevenLabsKey;
     const voiceId = $('cfg-voice-id')?.value.trim() || App.voice.elevenLabsVoiceId;
     const speed = parseFloat($('cfg-voice-speed')?.value || App.voice.speed || 1.0);
     const personaName = $('cfg-persona-name')?.value.trim() || App.voice.personaName;
     const personaPrompt = $('cfg-persona-prompt')?.value.trim() || App.voice.personaPrompt;
 
-    saveVoiceSettings({ provider, elevenLabsKey: apiKey, elevenLabsVoiceId: voiceId, speed, personaName, personaPrompt });
+    saveVoiceSettings({ provider, elevenLabsVoiceId: voiceId, speed, personaName, personaPrompt });
 
     // Sync to quick panel
     if ($('quick-voice-provider')) $('quick-voice-provider').value = provider;
-    if ($('quick-voice-apikey')) $('quick-voice-apikey').value = apiKey;
     if ($('quick-voice-id-input')) $('quick-voice-id-input').value = voiceId;
     if ($('quick-voice-speed')) $('quick-voice-speed').value = speed;
     if ($('quick-voice-speed-val')) $('quick-voice-speed-val').textContent = `${speed.toFixed(2)}x`;
@@ -5174,18 +5659,18 @@ function bindEventListeners() {
     fetch('/api/settings/voice', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, elevenLabsKey: apiKey, elevenLabsVoiceId: voiceId, speed })
+      body: JSON.stringify({ provider, voiceId, speed, languageCode: App.voice.language === 'auto' ? 'vi' : App.voice.language })
     }).catch(() => {});
 
     fetch('/api/settings/persona', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ personaName, personaPrompt })
+      body: JSON.stringify({ name: personaName, systemPrompt: personaPrompt })
     }).catch(() => {});
 
     closeModal('modal-voice');
     loadPersistedSettings();
-    addLog(`💾 Đã lưu cấu hình Voice & Persona thành công!`, 'ok');
+    addLog(`💾 Voice and persona settings saved.`, 'ok');
   });
 
   // Talking Engine Provider Selector
@@ -5196,10 +5681,10 @@ function bindEventListeners() {
       $('sys-talking-engine').textContent = e.target.value === 'off' ? 'Talking: Off' : 'Stream: Active';
     }
     loadPersistedSettings();
-    addLog(`Đã đổi Talking Video Engine: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
+    addLog(`Changed talking video engine: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
     if (e.target.value === 'livetalking') {
       LiveTalkingWebRTCClient.connect(App.talkingEngine.endpoint, LiveTalkingStudio.avatarId)
-        .then(({ sessionId }) => addLog(`✅ LiveTalking neural WebRTC đã kết nối (${sessionId || 'session active'})`, 'ok'))
+        .then(({ sessionId }) => addLog(`✅ LiveTalking neural WebRTC connected (${sessionId || 'session active'})`, 'ok'))
         .catch(err => addLog(`⚠️ LiveTalking worker: ${err.message}`, 'hi'));
     } else {
       LiveTalkingWebRTCClient.disconnect();
@@ -5221,7 +5706,12 @@ function bindEventListeners() {
   // Language Code Change
   $('quick-voice-lang')?.addEventListener('change', (e) => {
     saveVoiceSettings({ language: e.target.value });
-    addLog(`Ngôn ngữ phát âm: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
+    fetch('/api/settings/voice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ languageCode: e.target.value === 'auto' ? 'vi' : e.target.value })
+    }).catch(() => {});
+    addLog(`Speech language: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
   });
 
   // Voice Presets Selection
@@ -5231,7 +5721,7 @@ function bindEventListeners() {
       const input = $('quick-voice-id-input');
       if (input) input.value = selectedVoiceId;
       saveVoiceSettings({ elevenLabsVoiceId: selectedVoiceId });
-      addLog(`Đã chọn giọng: ${e.target.options[e.target.selectedIndex]?.text.split('—')[0]} (${selectedVoiceId})`, 'ok');
+      addLog(`Selected voice: ${e.target.options[e.target.selectedIndex]?.text.split('—')[0]} (${selectedVoiceId})`, 'ok');
     }
   });
 
@@ -5251,18 +5741,18 @@ function bindEventListeners() {
     const vId = $('quick-voice-id-input')?.value || App.voice.elevenLabsVoiceId;
     if (navigator.clipboard) {
       navigator.clipboard.writeText(vId);
-      addLog(`📋 Đã copy Voice ID: ${vId}`, 'ok');
-      alert(`Đã copy Voice ID vào Clipboard: ${vId}`);
+      addLog(`📋 Copied Voice ID: ${vId}`, 'ok');
+      alert(`Copied Voice ID: ${vId}`);
     }
   });
 
   $('btn-save-custom-voice')?.addEventListener('click', () => {
     const vId = $('quick-voice-id-input')?.value?.trim();
     if (!vId) {
-      alert('Vui lòng nhập Voice ID trước khi lưu!');
+      alert('Enter a Voice ID first.');
       return;
     }
-    const voiceName = prompt('Nhập tên gợi nhớ cho Voice ID này:', `Giọng ${vId.slice(0, 6)}`);
+    const voiceName = prompt('Name this Voice ID:', `Voice ${vId.slice(0, 6)}`);
     if (!voiceName) return;
 
     if (!App.voice.customVoices) App.voice.customVoices = [];
@@ -5270,14 +5760,14 @@ function bindEventListeners() {
     localStorage.setItem(STORAGE_KEYS.CUSTOM_VOICES, JSON.stringify(App.voice.customVoices));
     renderSavedVoicesList();
 
-    addLog(`💾 Đã lưu Voice ID: ${voiceName} (${vId})`, 'ok');
-    alert(`Đã lưu "${voiceName}" vào danh sách giọng tùy chỉnh của bạn!`);
+    addLog(`💾 Saved Voice ID: ${voiceName} (${vId})`, 'ok');
+    alert(`Saved "${voiceName}" to custom voices.`);
   });
 
   // Test Sound & Controls
   $('btn-test-sound')?.addEventListener('click', () => {
     unlockAudio();
-    speakAI('Chào bạn nha! Âm thanh livestream AI Idol đã sẵn sàng phát sóng nè!', 'happy');
+    speakAI('Chào bạn nha! Âm thanh livestream của Mimi đã sẵn sàng rồi nè!', 'happy');
   });
   $('btn-stop-voice')?.addEventListener('click', stopLiveSpeech);
 
@@ -5298,28 +5788,9 @@ function bindEventListeners() {
     addLog(App.isMuted ? '🔇 Voice Muted' : '🔊 Voice Unmuted', 'hi');
   });
 
-  $('btn-kill')?.addEventListener('click', () => {
-    if (confirm('Execute Kill Switch? Toàn bộ hoạt động sẽ dừng ngay lập tức.')) {
-      App.isPaused = true;
-      App.isMuted = true;
-      stopLiveSpeech();
-      setVisualState('GAMEPLAY_IDLE', 0, 'kill-switch');
-      addLog('⛔ KILL SWITCH ACTIVATED', 'err');
-    }
-  });
-
   $('quick-voice-provider')?.addEventListener('change', (e) => {
     saveVoiceSettings({ provider: e.target.value });
-    addLog(`Đã chuyển sang ${e.target.value.toUpperCase()}`, 'ok');
-  });
-
-  $('quick-voice-apikey')?.addEventListener('input', (e) => {
-    saveVoiceSettings({ elevenLabsKey: e.target.value.trim() });
-  });
-
-  $('btn-toggle-eye')?.addEventListener('click', () => {
-    const input = $('quick-voice-apikey');
-    if (input) input.type = input.type === 'password' ? 'text' : 'password';
+    addLog(`Switched to ${e.target.value.toUpperCase()}`, 'ok');
   });
 
   $('btn-quick-voice-speak')?.addEventListener('click', () => {
@@ -5332,7 +5803,7 @@ function bindEventListeners() {
   $('btn-confirm-upload')?.addEventListener('click', () => {
     const fileInput = $('state-upload-file-input');
     if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-      alert('Vui lòng chọn ít nhất 1 file video!');
+      alert('Select at least one video file.');
       return;
     }
     const targetStateEl = document.querySelector('input[name="uploadTargetState"]:checked');
@@ -5375,7 +5846,7 @@ function bindEventListeners() {
         clip.mode = nextMode;
         clip.loop = (nextMode === 'loop');
         renderLibraryUI();
-        addLog(`Đổi chế độ [${clip.label}]: ${nextMode.toUpperCase()}`, 'ok');
+        addLog(`Changed mode [${clip.label}]: ${nextMode.toUpperCase()}`, 'ok');
       }
       return;
     }
@@ -5389,7 +5860,7 @@ function bindEventListeners() {
       if (CLIP_LIBRARY[state]) {
         CLIP_LIBRARY[state] = CLIP_LIBRARY[state].filter(c => c.id !== clipId);
         renderLibraryUI();
-        addLog(`Đã xóa clip ${clipId} khỏi ${state}`, 'hi');
+        addLog(`Deleted clip ${clipId} from ${state}`, 'hi');
       }
       return;
     }
@@ -5407,12 +5878,12 @@ function bindEventListeners() {
         App.clipStartedAt = Date.now();
         updateMonitorScreen(state, clip);
         renderLibraryUI();
-        addLog(`Phát clip: ${clip.label} (${state})`, 'ok');
+        addLog(`Playing clip: ${clip.label} (${state})`, 'ok');
       }
     }
   });
 
-  // State Chips (Rule: Chờ hết video đang chạy)
+  // State chips wait for the current video to finish
   $('state-chips')?.addEventListener('click', (e) => {
     const chip = e.target.closest('.sc');
     if (!chip) return;
@@ -5431,16 +5902,16 @@ function bindEventListeners() {
 
   // Gifts
   $('btn-gift-rose')?.addEventListener('click', () => {
-    addChatMessage('Fan_Cung_99', 'đã gửi tặng 10 Hoa Hồng 🌹!', true, '🌹');
+    addChatMessage('Fan_Cung_99', 'sent 10 Roses 🌹!', true, '🌹');
   });
   $('btn-gift-lion')?.addEventListener('click', () => {
-    addChatMessage('DaiGia_VN', 'đã gửi tặng Sư Tử Hoàng Gia 🦁!', true, '🦁');
+    addChatMessage('DaiGia_VN', 'sent a Royal Lion 🦁!', true, '🦁');
   });
 
   $('btn-clear-chat')?.addEventListener('click', () => {
     const list = $('chat-queue');
-    if (list) list.innerHTML = '<li class="ev-empty">Chưa có tin nhắn nào...</li>';
-    addLog('Đã xóa danh sách Live Chat.');
+    if (list) list.innerHTML = '<li class="ev-empty">No messages yet</li>';
+    addLog('Cleared live chat.');
   });
 
   // Injections
@@ -5455,7 +5926,7 @@ function bindEventListeners() {
   $('btn-force-mega')?.addEventListener('click', injectWin);
   $('btn-force-nearmiss')?.addEventListener('click', () => {
     requestStateTransition('SURPRISED', 3, 'teaser', true);
-    speakAI('Ôi suýt trúng Jackpot rồi mọi người ơi! Tim đập thình thịch luôn!', 'surprised');
+    speakAI('Suýt chút nữa là trúng jackpot rồi! Tiếc quá đi!', 'surprised');
   });
 
   $('btn-clear-log')?.addEventListener('click', () => {
@@ -5465,12 +5936,207 @@ function bindEventListeners() {
   $('btn-cta-toggle')?.addEventListener('click', () => {
     App.ctaEnabled = !App.ctaEnabled;
     $('btn-cta-toggle').textContent = App.ctaEnabled ? 'CTA On' : 'CTA Off';
-    addLog(`CTA đã ${App.ctaEnabled ? 'Bật' : 'Tắt'}`);
+    addLog(`CTA is ${App.ctaEnabled ? 'On' : 'Off'}`);
   });
 }
 
 // ── Initialization ────────────────────────────────────────
+function setupMonitorFirstStudio() {
+  const appBody = document.querySelector('#view-studio .app-body');
+  if (!appBody || appBody.classList.contains('monitor-first-layout')) return;
+
+  const monitor = appBody.querySelector('.monitor-box');
+  const voiceStatus = appBody.querySelector('.voice-status-panel');
+  const chat = appBody.querySelector('.chat-panel');
+  const library = appBody.querySelector('.library-panel');
+  const game = appBody.querySelector('.game-panel');
+  const goals = appBody.querySelector('.goals-panel');
+  const states = appBody.querySelector('.state-chips-panel');
+  if (!monitor || !chat || !library || !game || !goals || !states) return;
+
+  const stage = document.createElement('section');
+  stage.className = 'monitor-first-stage';
+  stage.appendChild(monitor);
+  if (voiceStatus) stage.appendChild(voiceStatus);
+
+  const director = document.createElement('section');
+  director.className = 'monitor-first-director';
+  director.innerHTML = `
+    <div class="monitor-first-director-head">
+      <span class="sec-label">Director</span>
+      <div class="monitor-first-tabs" role="tablist" aria-label="Director tools">
+        <button type="button" class="active" role="tab" aria-selected="true" data-director-tab="actions">Actions</button>
+        <button type="button" role="tab" aria-selected="false" data-director-tab="script">Live Script</button>
+      </div>
+    </div>
+    <div class="monitor-first-director-body">
+      <div class="monitor-first-director-pane active" data-director-pane="actions"></div>
+      <div class="monitor-first-director-pane" data-director-pane="script"></div>
+    </div>`;
+  director.querySelector('[data-director-pane="actions"]').append(game, states);
+  director.querySelector('[data-director-pane="script"]').appendChild(goals);
+
+  const bottom = document.createElement('section');
+  bottom.className = 'monitor-first-bottom';
+  bottom.append(chat, library, director);
+
+  appBody.replaceChildren(stage, bottom);
+  appBody.classList.add('monitor-first-layout');
+
+  director.querySelectorAll('[data-director-tab]').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const name = tab.dataset.directorTab;
+      director.querySelectorAll('[data-director-tab]').forEach(item => {
+        const active = item === tab;
+        item.classList.toggle('active', active);
+        item.setAttribute('aria-selected', String(active));
+      });
+      director.querySelectorAll('[data-director-pane]').forEach(pane => pane.classList.toggle('active', pane.dataset.directorPane === name));
+    });
+  });
+}
+
+function setupStudioShell() {
+  const providerSlot = $('web-settings-provider-slot') || $('settings-provider-slot');
+  const providerPanel = document.querySelector('.voice-config-panel');
+
+  // Preserve the existing provider controls and event IDs, but move the whole
+  // configuration surface out of the live control rail into Settings.
+  if (providerSlot && providerPanel && !providerPanel.classList.contains('settings-mounted')) {
+    providerSlot.appendChild(providerPanel);
+    providerPanel.classList.add('settings-mounted');
+  }
+
+  // Keep every setting on the same page. Existing form IDs and save handlers
+  // are preserved by moving the modal contents into aligned bento cards.
+  const mountSettingsForm = (modalId, contentSlotId, actionsSlotId, primaryActionId) => {
+    const modal = $(modalId);
+    const contentSlot = $(contentSlotId);
+    const actionsSlot = $(actionsSlotId);
+    if (!modal || !contentSlot || !actionsSlot) return;
+    const body = modal.querySelector('.modal-body');
+    const primaryAction = $(primaryActionId);
+    if (body) contentSlot.appendChild(body);
+    if (primaryAction) actionsSlot.appendChild(primaryAction);
+    modal.remove();
+  };
+  mountSettingsForm('modal-voice', 'web-settings-voice-slot', 'web-settings-voice-actions', 'save-modal-voice');
+  mountSettingsForm('modal-obs', 'web-settings-obs-slot', 'web-settings-obs-actions', 'save-modal-obs');
+  setupMonitorFirstStudio();
+
+  const navigateAppView = (name = 'studio', updateHash = true) => {
+    if (!['studio', 'avatar', 'settings'].includes(name)) name = 'studio';
+    document.querySelectorAll('.web-app-view').forEach(view => view.classList.toggle('active', view.dataset.view === name));
+    document.querySelectorAll('.web-nav-item').forEach(item => item.classList.toggle('active', item.dataset.appView === name));
+    const quickButton = $('btn-quick-settings');
+    if (quickButton) quickButton.hidden = name !== 'studio';
+    if (name !== 'studio') {
+      $('quick-settings-panel')?.classList.remove('open');
+      $('quick-settings-panel')?.setAttribute('aria-hidden', 'true');
+      quickButton?.setAttribute('aria-expanded', 'false');
+    }
+    if (updateHash && location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
+    if (name === 'avatar') refreshLiveTalkingAvatarList();
+    if (name === 'settings') {
+      loadProjectStorageConfig();
+      loadPersistedSettings();
+      refreshLocalAiStatus();
+    }
+  };
+  document.querySelectorAll('.web-nav-item').forEach(item => item.addEventListener('click', () => navigateAppView(item.dataset.appView)));
+  window.addEventListener('hashchange', () => navigateAppView(location.hash.slice(1) || 'studio', false));
+  window.navigateAppView = navigateAppView;
+  navigateAppView(location.hash.slice(1) || 'studio', false);
+
+  const setActiveNav = (id) => {
+    document.querySelectorAll('.studio-nav-item').forEach(item => item.classList.toggle('active', item.id === id));
+  };
+  const focusPanel = (selector, navId) => {
+    setActiveNav(navId);
+    const panel = document.querySelector(selector);
+    panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    panel?.animate?.([
+      { boxShadow: '0 0 0 1px rgba(164,255,74,.48), 0 0 38px rgba(37,232,117,.12)' },
+      { boxShadow: '0 12px 34px rgba(0,0,0,.12)' },
+    ], { duration: 900, easing: 'ease-out' });
+  };
+  const openSettingsCenter = () => navigateAppView('settings');
+
+  $('nav-overview')?.addEventListener('click', () => focusPanel('.monitor-box', 'nav-overview'));
+  $('nav-avatar-studio')?.addEventListener('click', () => { setActiveNav('nav-avatar-studio'); $('btn-modal-avatar')?.click(); });
+  $('nav-asset-library')?.addEventListener('click', () => focusPanel('.library-panel', 'nav-asset-library'));
+  $('nav-live-session')?.addEventListener('click', () => focusPanel('.monitor-box', 'nav-live-session'));
+  $('nav-ai-director')?.addEventListener('click', () => focusPanel('.goals-panel', 'nav-ai-director'));
+  $('nav-live-chat')?.addEventListener('click', () => focusPanel('.chat-panel', 'nav-live-chat'));
+  $('nav-obs-output')?.addEventListener('click', () => openSettingsCenter('output'));
+  $('nav-settings')?.addEventListener('click', () => openSettingsCenter('providers'));
+  $('btn-settings-top')?.addEventListener('click', () => openSettingsCenter('providers'));
+  $('btn-open-library-hero')?.addEventListener('click', () => focusPanel('.library-panel', 'nav-asset-library'));
+  $('btn-go-live-hero')?.addEventListener('click', () => {
+    if (App.isPaused) $('btn-pause')?.click();
+    focusPanel('.monitor-box', 'nav-live-session');
+    addLog('✦ Livestream workspace is ready.', 'ok');
+  });
+
+  const quickPanel = $('quick-settings-panel');
+  const quickButton = $('btn-quick-settings');
+  const setQuickPanelOpen = (open) => {
+    quickPanel?.classList.toggle('open', open);
+    quickPanel?.setAttribute('aria-hidden', String(!open));
+    quickButton?.setAttribute('aria-expanded', String(open));
+  };
+  quickButton?.addEventListener('click', event => {
+    event.stopPropagation();
+    setQuickPanelOpen(!quickPanel?.classList.contains('open'));
+  });
+  $('close-quick-settings')?.addEventListener('click', () => setQuickPanelOpen(false));
+  quickPanel?.addEventListener('click', event => event.stopPropagation());
+  document.addEventListener('click', () => setQuickPanelOpen(false));
+  $('quick-open-full-settings')?.addEventListener('click', () => {
+    setQuickPanelOpen(false);
+    navigateAppView('settings');
+  });
+
+  const bindSessionToggle = (quickId, sourceId) => {
+    const quick = $(quickId);
+    const source = $(sourceId);
+    if (!quick || !source) return;
+    quick.checked = source.checked;
+    quick.addEventListener('change', () => {
+      source.checked = quick.checked;
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    source.addEventListener('change', () => { quick.checked = source.checked; });
+  };
+  bindSessionToggle('quick-session-auto-mix', 'chk-auto-mix');
+  bindSessionToggle('quick-session-random', 'chk-global-random');
+  $('quick-session-captions')?.addEventListener('change', event => {
+    $('monitor-screen')?.classList.toggle('captions-disabled', !event.target.checked);
+  });
+
+  $('settings-open-avatar')?.addEventListener('click', () => navigateAppView('avatar'));
+  $('save-project-storage')?.addEventListener('click', () => {
+    saveProjectStorageConfig().catch(err => {
+      if ($('project-storage-status')) $('project-storage-status').textContent = `Error: ${err.message}`;
+    });
+  });
+  $('select-project-storage-folder')?.addEventListener('click', selectProjectStorageFolder);
+  $('install-local-ai-model')?.addEventListener('click', () => {
+    installLocalAiModel().catch(error => {
+      if ($('local-ai-install-progress')) $('local-ai-install-progress').textContent = error.message;
+    });
+  });
+
+  window.openStudioSettings = openSettingsCenter;
+}
+
 function init() {
+  try {
+    setupStudioShell();
+  } catch (e) {
+    console.warn('setupStudioShell error:', e);
+  }
+
   try {
     loadPersistedAvatar();
   } catch (e) {
@@ -5482,6 +6148,8 @@ function init() {
   } catch (e) {
     console.warn('loadPersistedSettings error:', e);
   }
+
+  loadProjectStorageConfig();
 
   try {
     renderLibraryUI();
@@ -5507,11 +6175,16 @@ function init() {
     console.warn('bindEventListeners error:', e);
   }
 
-  if (App.talkingEngine.provider === 'livetalking') {
-    LiveTalkingWebRTCClient.connect(App.talkingEngine.endpoint, LiveTalkingStudio.avatarId)
-      .then(({ sessionId }) => addLog(`✅ LiveTalking tự kết nối: ${LiveTalkingStudio.avatarId} (${sessionId || 'active'})`, 'ok'))
-      .catch(err => addLog(`⚠️ Không tự kết nối được LiveTalking: ${err.message}`, 'hi'));
-  }
+  localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, App.talkingEngine.provider);
+  refreshLiveTalkingAvatarList().then(async avatars => {
+    if (App.talkingEngine.provider !== 'livetalking') return;
+    const preferredAvatar = AvatarSession.selected[0] || LiveTalkingStudio.avatarId || avatars[0]?.id;
+    if (!preferredAvatar) {
+      addLog('No trained LiveTalking avatar is available yet.', 'hi');
+      return;
+    }
+    await activateLiveTalkingAvatar(preferredAvatar);
+  }).catch(err => addLog(`LiveTalking auto-connect failed: ${err.message}`, 'hi'));
   
   try {
     setVisualState('GAMEPLAY_IDLE', 7, 'boot');
@@ -5519,7 +6192,7 @@ function init() {
     console.warn('setVisualState error:', e);
   }
 
-  addLog('AI Idol Operator Dashboard khởi động thành công.', 'ok');
+  addLog('AI Idol Operator Dashboard started.', 'ok');
   addLog('Level 3 Talking Video: Realtime Live Video Pipeline Active', 'ok');
 
   tick();

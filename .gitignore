@@ -27,3 +27,11 @@ secrets/
 
 # Generated archives
 *.zip
+
+# User-selected local project storage and machine-local path config
+local-projects/
+runtime-data/project-storage.json
+runtime-data/*.sqlite
+runtime-data/*.sqlite-shm
+runtime-data/*.sqlite-wal
+**/runtime-data/

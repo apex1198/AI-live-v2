@@ -36,42 +36,42 @@ const CURATED_LINES = {
         'Hay quá, tiếp tục đà này thôi nào!',
     ],
     react_loss: [
-        'Huhu xui xẻo một chút thôi, ván sau Mimi gỡ lại liền!',
-        'Ái chà, suýt chút nữa là ăn rồi, không sao ván sau làm lại!',
-        'Cay cú thật sự, mọi người buff may mắn cho Mimi đi!',
+        'Hơi xui một chút thôi, ván sau Mimi gỡ lại liền!',
+        'Suýt chút nữa là ăn rồi, không sao ván sau làm lại!',
+        'Mọi người gửi may mắn cho Mimi đi nào!',
     ],
     thank_donation: [
-        'Cảm ơn món quà siêu đáng yêu của bạn nha, yêu thương nhiều!',
-        'Woa, Mimi cảm ơn bạn rất nhiều vì đã ủng hộ buổi live!',
-        'Nhận được quà Mimi có thêm 200% năng lượng chiến tiếp luôn nè!',
+        'Cảm ơn món quà siêu đáng yêu của bạn nha!',
+        'Mimi cảm ơn bạn rất nhiều vì đã ủng hộ buổi live!',
+        'Nhận được quà Mimi có thêm năng lượng chiến tiếp luôn nè!',
     ],
     goal_invite_play: [
-        'Mọi người ơi, vào game chơi chung với Mimi cho vui nè, phòng còn chỗ đó!',
-        'Ai đang xem thì bấm link vào phòng quẩy cùng Mimi một ván nha!',
+        'Mọi người vào game chơi chung với Mimi cho vui nè!',
+        'Bấm link vào phòng chơi cùng Mimi một ván nha!',
     ],
     goal_follow: [
-        'Cả nhà đừng quên bấm follow và thả tim để nhận thông báo live của Mimi nhé!',
-        'Thả cho Mimi một tim để lấy may mắn trúng hũ trận này nào!',
+        'Cả nhà đừng quên bấm follow và thả tim cho Mimi nhé!',
+        'Thả cho Mimi một tim để lấy may mắn trúng hũ nào!',
     ],
     goal_explain_game: [
-        'Game này luật chơi siêu đơn giản mà thưởng thì cực to luôn, để Mimi chỉ cho nha!',
+        'Game này luật chơi đơn giản lắm, để Mimi chỉ cho nha!',
     ],
     goal_ask_chat_question: [
-        'Mọi người hôm nay ăn tối chưa nè? Đang xem live ở đâu điểm danh Mimi xem!',
-        'Dự đoán trận này Mimi ăn hay thua đây mọi người ơi, bình luận xem nào!',
+        'Mọi người hôm nay ăn tối chưa nè? Đang xem live ở đâu vậy?',
+        'Dự đoán ván này Mimi thắng hay thua nào mọi người ơi?',
     ],
     goal_cta: [
-        'Cơ hội nhận quà tân thủ đang mở, anh em nhấp link dưới để nhận ngay nhé!',
-        'Đừng bỏ lỡ sự kiện hôm nay nha, vào ngay link ở màn hình để cùng chơi nè!',
+        'Quà tân thủ đang mở, mọi người nhấp link dưới để nhận nhé!',
+        'Đừng bỏ lỡ sự kiện hôm nay, vào link trên màn hình để tham gia nha!',
     ],
     reply_to_chat: [
         'Mimi thấy bình luận của bạn rồi nha, chuẩn luôn đó!',
-        'Cảm ơn bạn đã trò chuyện cùng Mimi nè, vui quá đi!',
-        'Haha câu hỏi hay quá nè, Mimi đồng ý 100% luôn!',
+        'Cảm ơn bạn đã trò chuyện cùng Mimi nè!',
+        'Câu hỏi hay quá, Mimi đồng ý luôn!',
     ],
     default: [
-        'Chào mừng tất cả mọi người đang xem livestream của Mimi nha!',
-        'Trận đấu đang rất kịch tính nè, cùng theo dõi với Mimi nhé!',
+        'Chào mừng mọi người đến với livestream của Mimi nha!',
+        'Ván này đang rất kịch tính, cùng theo dõi với Mimi nhé!',
     ],
 };
 // ─────────────────────────────────────────────────────────

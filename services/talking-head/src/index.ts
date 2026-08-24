@@ -10,7 +10,6 @@
  */
 
 import {
-  LipSyncEngine,
   type FacePoseFrame,
   type VisemeName,
   LipMeshTransformer,
@@ -57,6 +56,7 @@ import {
   MuseTalkRealtimeEngine,
   MuseTalkBatchPipeline,
 } from '@idol/lipsync-engine';
+import { z } from 'zod';
 
 export {
   LipMeshTransformer,
@@ -125,6 +125,7 @@ export interface VideoFrame {
 export interface TalkingOptions {
   emotion?: 'happy' | 'excited' | 'surprised' | 'neutral' | 'grateful' | undefined;
   speed?: number | undefined;
+  voice?: string | undefined;
   vietnameseAcousticMode?: boolean | undefined;
   text?: string | undefined;
   durationMs?: number | undefined;
@@ -184,9 +185,12 @@ export interface LiveTalkingConfig {
   endpointUrl: string;
   model: 'livetalking-wav2lip' | 'livetalking-musetalk' | 'livetalking-ernerf' | string;
   avatarPath?: string | undefined;
+  authToken?: string | undefined;
   cachedFrames: number;
   fps: number;
   timeoutMs: number;
+  trainingTimeoutMs: number;
+  maxRetries: number;
   useWebRTC: boolean;
 }
 
@@ -194,18 +198,17 @@ export interface LiveTalkingConfig {
 
 export class LiveTalkingProvider implements TalkingVideoProvider {
   private readonly _config: LiveTalkingConfig;
-  private _isHealthy = true;
+  private _isHealthy = false;
   private _isSpeaking = false;
   private _trainingState: 'idle' | 'training' | 'ready' = 'idle';
   private _trainingProgress = 0;
   private _currentAvatar: AvatarSource | null = null;
-  private readonly _lipsyncEngine: LipSyncEngine;
+  private _sessionId: string | null = null;
   private _lastFrameTime = Date.now();
-  private _fps = 60;
+  private _fps = 0;
   private _outputQueue: VideoFrame[] = [];
 
   constructor(config: Partial<LiveTalkingConfig> | string = 'http://localhost:8010') {
-    this._lipsyncEngine = new LipSyncEngine();
     if (typeof config === 'string') {
       this._config = {
         endpointUrl: config,
@@ -213,17 +216,22 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
         cachedFrames: 300,
         fps: 60,
         timeoutMs: 3000,
+        trainingTimeoutMs: 30 * 60 * 1000,
+        maxRetries: 2,
         useWebRTC: true,
       };
     } else {
       this._config = {
         endpointUrl: config.endpointUrl ?? 'http://localhost:8010',
         model: config.model ?? 'livetalking-wav2lip',
-        avatarPath: config.avatarPath,
         cachedFrames: config.cachedFrames ?? 300,
         fps: config.fps ?? 60,
         timeoutMs: config.timeoutMs ?? 3000,
+        trainingTimeoutMs: config.trainingTimeoutMs ?? 30 * 60 * 1000,
+        maxRetries: config.maxRetries ?? 2,
         useWebRTC: config.useWebRTC ?? true,
+        ...(config.avatarPath ? { avatarPath: config.avatarPath } : {}),
+        ...(config.authToken ? { authToken: config.authToken } : {}),
       };
     }
   }
@@ -238,6 +246,44 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
 
   get trainingProgress(): number {
     return this._trainingProgress;
+  }
+
+  get sessionId(): string | null {
+    return this._sessionId;
+  }
+
+  setSession(sessionId: string | null): void {
+    this._sessionId = sessionId ? String(sessionId) : null;
+  }
+
+  private _workerModel(): 'musetalk' | 'wav2lip' {
+    return this._config.model.includes('musetalk') ? 'musetalk' : 'wav2lip';
+  }
+
+  private async _request(pathname: string, init: RequestInit = {}, retryable = false): Promise<any> {
+    const endpoint = this._config.endpointUrl.replace(/\/$/, '');
+    const attempts = retryable ? Math.max(1, this._config.maxRetries + 1) : 1;
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this._config.timeoutMs);
+      try {
+        const headers = new Headers(init.headers);
+        if (this._config.authToken) headers.set('Authorization', `Bearer ${this._config.authToken}`);
+        const response = await fetch(`${endpoint}${pathname}`, { ...init, headers, signal: controller.signal });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || (typeof payload.code === 'number' && payload.code !== 0)) {
+          throw new Error(payload.msg || payload.error || `LiveTalking HTTP ${response.status}`);
+        }
+        return payload;
+      } catch (error) {
+        lastError = error;
+        if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError || 'LiveTalking request failed'));
   }
 
   async initialize(source?: AvatarSource): Promise<void> {
@@ -256,54 +302,54 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
    */
   async trainAvatarVideo(
     videoPath: string,
-    onProgress?: (stage: number, message: string, progressPct: number) => void
+    onProgress?: (stage: number, message: string, progressPct: number) => void,
+    options: { avatarId?: string; savePath?: string } = {},
   ): Promise<LiveTalkingTrainResult> {
     this._trainingState = 'training';
     this._trainingProgress = 0;
-
-    const avatarId = 'avatar_' + Date.now().toString(36);
+    const avatarId = options.avatarId || this._currentAvatar?.id || `avatar_${Date.now().toString(36)}`;
     this._config.avatarPath = videoPath;
+    try {
+      onProgress?.(1, 'Submitting avatar preprocessing to LiveTalking...', 1);
+      const taskId = await this.createAvatarTask(videoPath, avatarId, options.savePath);
 
-    // Stage 1: Frame Extraction (25%)
-    onProgress?.(1, 'Extracting video frames and normalizing FPS (Stage 1/4)...', 25);
-    this._trainingProgress = 25;
-    await new Promise((r) => setTimeout(r, 600));
-
-    // Stage 2: Face Alignment & Detection (50%)
-    onProgress?.(2, 'Detecting facial bounding boxes and 3D mesh alignment (Stage 2/4)...', 50);
-    this._trainingProgress = 50;
-    await new Promise((r) => setTimeout(r, 600));
-
-    // Stage 3: Latent Feature Caching (75%)
-    onProgress?.(3, 'Precomputing audio-visual latent feature cache (aud.npy & latents) (Stage 3/4)...', 75);
-    this._trainingProgress = 75;
-    await new Promise((r) => setTimeout(r, 700));
-
-    // Stage 4: Compile Avatar Dataset (100%)
-    onProgress?.(4, 'Compiling LiveTalking avatar profile dataset package (Stage 4/4)...', 100);
-    this._trainingProgress = 100;
-    this._trainingState = 'ready';
-    await new Promise((r) => setTimeout(r, 400));
-
-    const result: LiveTalkingTrainResult = {
-      status: 'ok',
-      success: true,
-      avatarId,
-      avatarPath: videoPath || 'assets/default_avatar.mp4',
-      cachedFrames: 300,
-      fps: 60,
-      faceROI: { x: 45, y: 30, width: 130, height: 160 },
-      stages: {
-        stage1_frameExtraction: true,
-        stage2_faceAlignment: true,
-        stage3_latentFeatureCache: true,
-        stage4_avatarCompiled: true,
-      },
-      renderLatencyMs: 32,
-      message: '✅ Training video hoàn tất! Dataset LiveTalking đã sẵn sàng cho Bước 2 (Voice & LipSync).',
-    };
-
-    return result;
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < this._config.trainingTimeoutMs) {
+        const statusResponse = await this._request(`/api/avatar/task/${encodeURIComponent(taskId)}`, {}, true);
+        const task = statusResponse.data || {};
+        const progress = Math.max(0, Math.min(100, Number(task.progress || 0)));
+        this._trainingProgress = progress;
+        onProgress?.(Math.min(4, Math.max(1, Math.ceil(progress / 25))), `LiveTalking avatar task: ${task.status || 'running'}`, progress);
+        if (task.status === 'failed') throw new Error(task.error_msg || 'LiveTalking avatar preprocessing failed');
+        if (task.status === 'completed') {
+          this._trainingState = 'ready';
+          this._trainingProgress = 100;
+          return {
+            status: 'ok',
+            success: true,
+            avatarId,
+            avatarPath: videoPath,
+            cachedFrames: this._config.cachedFrames,
+            fps: this._config.fps,
+            faceROI: { x: 0, y: 0, width: 0, height: 0 },
+            stages: {
+              stage1_frameExtraction: true,
+              stage2_faceAlignment: true,
+              stage3_latentFeatureCache: true,
+              stage4_avatarCompiled: true,
+            },
+            renderLatencyMs: 0,
+            message: 'Avatar preprocessing completed by the LiveTalking worker.',
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      throw new Error('LiveTalking avatar preprocessing timed out');
+    } catch (error) {
+      this._trainingState = 'idle';
+      this._trainingProgress = 0;
+      throw error;
+    }
   }
 
   // Alias for backward compatibility
@@ -335,11 +381,98 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     options?: TalkingOptions
   ): Promise<void> {
     this._isSpeaking = true;
-    const text = typeof audio === 'string' ? audio : (options?.text ?? 'Chào cả nhà!');
-    const dur = options?.durationMs ?? 4000;
-    const emotion = options?.emotion ?? 'happy';
+    const text = typeof audio === 'string' ? audio : (options?.text ?? 'Hello everyone!');
+    try {
+      await this._request('/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          sessionid: this._sessionId || '',
+          emotion: options?.emotion ?? 'happy',
+          speed: options?.speed ?? 1,
+          ...(options?.voice ? { voice: options.voice } : {}),
+          interrupt: true,
+        }),
+      });
+    } catch (error) {
+      this._isSpeaking = false;
+      throw error;
+    }
+  }
 
-    this._lipsyncEngine.startSpeech(text, dur, emotion);
+  async createOffer(sdp: string, type: string = 'offer', avatarId?: string): Promise<{ sdp: string; type: string; sessionid: string }> {
+    const payload = await this._request('/offer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sdp, type, ...(avatarId ? { avatar: avatarId } : {}) }),
+    });
+    const parsed = z.object({ sdp: z.string().min(1), type: z.string().min(1), sessionid: z.string().min(1) }).parse(payload);
+    this._sessionId = parsed.sessionid;
+    return parsed;
+  }
+
+  async sendAudio(audio: Blob | ArrayBuffer | Uint8Array, sessionId: string | null = this._sessionId): Promise<void> {
+    if (!sessionId) throw new Error('No active LiveTalking session');
+    let blob: Blob;
+    if (audio instanceof Blob) {
+      blob = audio;
+    } else {
+      const source = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
+      const copy = new Uint8Array(source.byteLength);
+      copy.set(source);
+      blob = new Blob([copy.buffer], { type: 'audio/mpeg' });
+    }
+    const form = new FormData();
+    form.append('sessionid', sessionId);
+    form.append('file', blob, 'voice.mp3');
+    await this._request('/humanaudio', { method: 'POST', body: form });
+  }
+
+  async isSessionSpeaking(sessionId: string | null = this._sessionId): Promise<boolean> {
+    if (!sessionId) return false;
+    const payload = await this._request('/is_speaking', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionid: sessionId }),
+    }, true);
+    this._isSpeaking = Boolean(payload.data);
+    return this._isSpeaking;
+  }
+
+  async listAvatarTasks(): Promise<any[]> {
+    const payload = await this._request('/api/avatar/tasks', {}, true);
+    return Array.isArray(payload.data?.tasks) ? payload.data.tasks : [];
+  }
+
+  async listTrainedAvatars(): Promise<any[]> {
+    const payload = await this._request('/api/avatars', {}, true);
+    return Array.isArray(payload.data?.avatars) ? payload.data.avatars : [];
+  }
+
+  async getAvatarTask(taskId: string): Promise<any> {
+    const payload = await this._request(`/api/avatar/task/${encodeURIComponent(taskId)}`, {}, true);
+    return payload.data;
+  }
+
+  async createAvatarTask(videoPath: string, avatarId: string, savePath?: string): Promise<string> {
+    const created = await this._request('/api/avatar/task', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: this._workerModel(),
+        avatar_id: avatarId,
+        video_path: videoPath,
+        ...(savePath ? { save_path: savePath } : {}),
+      }),
+    });
+    const taskId = String(created.data?.task_id || '');
+    if (!taskId) throw new Error('LiveTalking did not return an avatar task ID');
+    return taskId;
+  }
+
+  async deleteAvatarTask(taskId: string): Promise<void> {
+    await this._request(`/api/avatar/task/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
   }
 
   async *outputFrames(): AsyncIterable<VideoFrame> {
@@ -350,9 +483,16 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
   }
 
   async interrupt(): Promise<void> {
-    this._isSpeaking = false;
-    this._lipsyncEngine.stopSpeech();
-    this._outputQueue = [];
+    try {
+      await this._request('/interrupt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionid: this._sessionId || '' }),
+      });
+    } finally {
+      this._isSpeaking = false;
+      this._outputQueue = [];
+    }
   }
 
   async stopSpeaking(): Promise<void> {
@@ -360,12 +500,18 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
   }
 
   async health(): Promise<ProviderHealth> {
+    try {
+      const payload = await this._request('/health', {}, true);
+      this._isHealthy = payload.code === 0 && payload.data?.status === 'healthy';
+    } catch {
+      this._isHealthy = false;
+    }
     return {
       providerName: 'LiveTalking Engine (lipku/livetalking)',
       healthy: this._isHealthy,
-      fps: this._fps || 60,
-      renderLatencyMs: 32,
-      avDriftMs: 8,
+      fps: this._fps,
+      renderLatencyMs: 0,
+      avDriftMs: 0,
       queueDepth: this._outputQueue.length,
       droppedFrames: 0,
       trainingState: this._trainingState,
@@ -375,6 +521,12 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
 
   async setModel(model: string): Promise<void> {
     this._config.model = model;
+  }
+
+  setEndpoint(endpointUrl: string): void {
+    this._config.endpointUrl = endpointUrl.replace(/\/$/, '');
+    this._isHealthy = false;
+    this._sessionId = null;
   }
 
   async dispose(): Promise<void> {
@@ -387,6 +539,22 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
 export class MockTalkingProvider extends LiveTalkingProvider {
   constructor() {
     super('http://localhost:8010');
+  }
+
+  override async trainAvatarVideo(videoPath: string, onProgress?: (stage: number, message: string, progressPct: number) => void): Promise<LiveTalkingTrainResult> {
+    onProgress?.(4, 'Mock avatar ready', 100);
+    return {
+      status: 'ok', success: true, avatarId: 'mock_avatar', avatarPath: videoPath,
+      cachedFrames: 1, fps: 30, faceROI: { x: 0, y: 0, width: 0, height: 0 },
+      stages: { stage1_frameExtraction: true, stage2_faceAlignment: true, stage3_latentFeatureCache: true, stage4_avatarCompiled: true },
+      renderLatencyMs: 0, message: 'Mock avatar ready',
+    };
+  }
+
+  override async startSpeaking(_audio: AsyncIterable<AudioChunk> | AudioChunk[] | string, _options?: TalkingOptions): Promise<void> {}
+  override async interrupt(): Promise<void> {}
+  override async health(): Promise<ProviderHealth> {
+    return { providerName: 'Mock Talking Provider', healthy: true, fps: 30, renderLatencyMs: 0, avDriftMs: 0, queueDepth: 0, droppedFrames: 0, trainingState: 'ready', trainingProgress: 100 };
   }
 }
 

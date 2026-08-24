@@ -32,6 +32,18 @@ def json_error(msg: str, code: int = -1):
 
 from server.session_manager import session_manager
 from server.avatar_routes import setup_avatar_routes
+from server.security import require_safe_id
+
+
+def validated_session_id(value):
+    return require_safe_id(value, "sessionid")
+
+
+def validated_text(value):
+    text = str(value or "").strip()
+    if not text or len(text) > 1000:
+        raise ValueError("text must contain 1 to 1000 characters")
+    return text
 
 def get_session(request, sessionid: str):
     """从 app 中获取 session 实例"""
@@ -55,7 +67,7 @@ async def human(request):
     try:
         params: dict = await request.json()
 
-        sessionid: str = params.get('sessionid', '')
+        sessionid: str = validated_session_id(params.get('sessionid', ''))
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
@@ -68,7 +80,7 @@ async def human(request):
             datainfo['tts'] = params.get('tts')
 
         if params['type'] == 'echo':
-            avatar_session.put_msg_txt(params['text'], datainfo)
+            avatar_session.put_msg_txt(validated_text(params.get('text')), datainfo)
         elif params['type'] == 'chat':
             llm_response = request.app.get("llm_response")
             if llm_response:
@@ -101,18 +113,24 @@ async def speak_compat(request):
     """Accept the existing dashboard /speak payload and drive a real RTC session."""
     try:
         params = await request.json()
-        avatar_session, sessionid = get_requested_or_first_session(request, params.get('sessionid', ''))
+        requested_session = params.get('sessionid', '')
+        if requested_session:
+            requested_session = validated_session_id(requested_session)
+        avatar_session, sessionid = get_requested_or_first_session(request, requested_session)
         if avatar_session is None:
             return json_error("no active WebRTC session; connect the LiveTalking video first")
         if params.get('interrupt', True):
             avatar_session.flush_talk()
-        tts_options = {"emotion": params.get("emotion", "happy")}
+        emotion = params.get("emotion", "happy")
+        if emotion not in ("neutral", "happy", "excited", "surprised", "grateful"):
+            emotion = "neutral"
+        tts_options = {"emotion": emotion}
         if params.get("voice"):
             tts_options["ref_file"] = params["voice"]
         if params.get("speed") is not None:
-            tts_options["speed"] = params["speed"]
+            tts_options["speed"] = max(0.5, min(2.0, float(params["speed"])))
         datainfo = {"tts": tts_options}
-        avatar_session.put_msg_txt(params.get('text', ''), datainfo)
+        avatar_session.put_msg_txt(validated_text(params.get('text')), datainfo)
         return json_ok(data={"sessionid": sessionid, "engine": "livetalking-neural"})
     except Exception as e:
         logger.exception('speak compatibility route exception:')
@@ -122,7 +140,10 @@ async def speak_compat(request):
 async def interrupt_compat(request):
     try:
         params = await request.json() if request.can_read_body else {}
-        avatar_session, sessionid = get_requested_or_first_session(request, params.get('sessionid', ''))
+        requested_session = params.get('sessionid', '')
+        if requested_session:
+            requested_session = validated_session_id(requested_session)
+        avatar_session, sessionid = get_requested_or_first_session(request, requested_session)
         if avatar_session is None:
             return json_error("no active WebRTC session")
         avatar_session.flush_talk()
@@ -136,7 +157,7 @@ async def interrupt_talk(request):
     """打断当前说话"""
     try:
         params = await request.json()
-        sessionid = params.get('sessionid', '')
+        sessionid = validated_session_id(params.get('sessionid', ''))
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
@@ -151,7 +172,7 @@ async def humanaudio(request):
     """上传音频文件"""
     try:
         form = await request.post()
-        sessionid = str(form.get('sessionid', ''))
+        sessionid = validated_session_id(form.get('sessionid', ''))
         fileobj = form["file"]
         filebytes = fileobj.file.read()
 
@@ -171,7 +192,7 @@ async def set_audiotype(request):
     """设置自定义状态（动作编排）"""
     try:
         params = await request.json()
-        sessionid = params.get('sessionid', '')
+        sessionid = validated_session_id(params.get('sessionid', ''))
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
@@ -186,7 +207,7 @@ async def record(request):
     """录制控制"""
     try:
         params = await request.json()
-        sessionid = params.get('sessionid', '')
+        sessionid = validated_session_id(params.get('sessionid', ''))
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
@@ -203,7 +224,7 @@ async def record(request):
 async def is_speaking(request):
     """查询是否正在说话"""
     params = await request.json()
-    sessionid = params.get('sessionid', '')
+    sessionid = validated_session_id(params.get('sessionid', ''))
     avatar_session = get_session(request, sessionid)
     if avatar_session is None:
         return json_error("session not found")
@@ -211,7 +232,7 @@ async def is_speaking(request):
 
 async def sse_handler(request):
     """SSE 事件流，推送服务器状态更新到客户端"""
-    sessionid = request.query.get('sessionid', '')
+    sessionid = validated_session_id(request.query.get('sessionid', ''))
     avatar_session = session_manager.get_session(sessionid)
     if avatar_session is None:
         return json_error("session not found")
@@ -223,7 +244,6 @@ async def sse_handler(request):
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
         }
     )
     await response.prepare(request)
@@ -253,7 +273,11 @@ async def admin_config(request):
     try:
         opt = request.app.get("opt")
         if opt:
-            return json_ok(data={"config": vars(opt)})
+            config = {
+                key: value for key, value in vars(opt).items()
+                if not any(secret in key.lower() for secret in ("key", "token", "secret", "password"))
+            }
+            return json_ok(data={"config": config})
         return json_error("Config not found")
     except Exception as e:
         logger.exception('admin_config exception:')

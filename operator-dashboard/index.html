@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI Idol — Operator Studio</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="design-system.css" />
+  <script src="material-icons.js"></script>
   <!-- MediaPipe Face Mesh for 468 Landmark Extraction -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
@@ -23,7 +25,7 @@
     <div class="tb-system">
       <div class="sys-item" id="sys-obs-item" title="OBS WebSocket connection">
         <span class="sys-dot ok" id="sys-obs-dot"></span>
-        <span class="sys-k" id="sys-obs-status">OBS: Sẵn sàng</span>
+        <span class="sys-k" id="sys-obs-status">OBS: Ready</span>
       </div>
       <div class="sys-item" title="TTS Engine Active">
         <span class="sys-dot ok" id="sys-tts-dot"></span>
@@ -43,15 +45,51 @@
     </div>
 
     <div class="tb-right">
-      <a href="clean_musetalk_test.html" target="_blank" class="btn-tb" style="background:linear-gradient(135deg, #0284c7, #0ea5e9); color:#fff; text-decoration:none; display:inline-flex; align-items:center; gap:6px; font-weight:700;">🧪 Clean MuseTalk Batch Test</a>
-      <button class="btn-tb" id="btn-modal-avatar" title="Cài đặt Avatar & LipSync">⚡ Avatar Studio</button>
-      <button class="btn-tb" id="btn-modal-voice" title="Cài đặt Giọng Nói TTS & Persona">🎙️ Voice & Persona</button>
-      <button class="btn-tb" id="btn-modal-obs" title="OBS Studio WebSocket Setup">🎥 OBS</button>
-      <button class="btn-tb" id="btn-pause" title="Tạm dừng / Tiếp tục AI">⏸️ Pause</button>
-      <button class="btn-tb" id="btn-mute" title="Tắt / Bật tiếng AI">🔇 Mute</button>
-      <button class="btn-kill" id="btn-kill" title="Dừng khẩn cấp toàn bộ hoạt động">⏹ Kill</button>
+      <button class="btn-tb session-quick-settings-button" id="btn-quick-settings" type="button" aria-expanded="false" aria-controls="quick-settings-panel">
+        <span class="material-symbols-rounded" aria-hidden="true">tune</span>Quick Settings
+      </button>
+      <button class="btn-tb" id="btn-pause" title="Pause or resume AI"><span class="material-symbols-rounded" aria-hidden="true">pause</span>Pause</button>
+      <button class="btn-tb" id="btn-mute" title="Mute or unmute AI">🔇 Mute</button>
     </div>
   </header>
+
+  <section class="session-quick-settings" id="quick-settings-panel" aria-hidden="true">
+    <div class="session-quick-head">
+      <div><span class="workspace-eyebrow">LIVE SESSION</span><strong>Quick Settings</strong></div>
+      <button type="button" class="btn-icon-hdr" id="close-quick-settings" aria-label="Close quick settings"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
+    </div>
+    <div class="session-quick-list">
+      <label><span><strong>Auto Mix</strong><small>Switch clips automatically</small></span><input type="checkbox" id="quick-session-auto-mix" checked /></label>
+      <label><span><strong>Random clips</strong><small>Randomize clips in each state</small></span><input type="checkbox" id="quick-session-random" checked /></label>
+      <label><span><strong>Live captions</strong><small>Show generated captions</small></span><input type="checkbox" id="quick-session-captions" checked /></label>
+    </div>
+    <button type="button" class="btn-secondary session-open-settings" id="quick-open-full-settings"><span class="material-symbols-rounded" aria-hidden="true">settings</span>Open full Settings</button>
+  </section>
+
+  <aside class="web-side-nav" aria-label="Main navigation">
+    <div class="web-side-brand">
+      <span class="material-symbols-rounded" aria-hidden="true">graphic_eq</span>
+      <div><strong>AI Idol</strong><small>Livestream</small></div>
+    </div>
+    <nav class="web-side-menu">
+      <button type="button" class="web-nav-item active" data-app-view="studio">
+        <span class="material-symbols-rounded" aria-hidden="true">space_dashboard</span><span>Live Studio</span>
+      </button>
+      <button type="button" class="web-nav-item" data-app-view="avatar">
+        <span class="material-symbols-rounded" aria-hidden="true">person</span><span>Avatar</span>
+      </button>
+      <button type="button" class="web-nav-item" data-app-view="settings">
+        <span class="material-symbols-rounded" aria-hidden="true">settings</span><span>Settings</span>
+      </button>
+    </nav>
+    <div class="web-side-footer">
+      <span class="web-health-dot"></span>
+      <div><strong>System ready</strong><small>Local workspace</small></div>
+    </div>
+  </aside>
+
+  <main class="web-app-main">
+  <section class="web-app-view active" id="view-studio" data-view="studio">
 
   <!-- ══ STREAM PHASE BAR (below header) ════════════════ -->
   <div class="phase-bar-global">
@@ -76,6 +114,18 @@
     </div>
   </div>
 
+  <section class="workspace-strip">
+    <div>
+      <span class="workspace-eyebrow">AI LIVESTREAM STUDIO</span>
+      <h1>Welcome, Creator</h1>
+      <p>Control avatars, voice, and audience in one workspace.</p>
+    </div>
+    <div class="workspace-actions">
+      <button class="workspace-secondary" id="btn-open-library-hero">▣ Library</button>
+      <button class="workspace-primary" id="btn-go-live-hero">✦ Go live</button>
+    </div>
+  </section>
+
   <!-- ══ MAIN BODY — 3 Columns: 25% | 50% | 25% ═══════════ -->
   <div class="app-body">
 
@@ -88,24 +138,24 @@
       <section class="panel-section chat-panel">
         <div class="panel-hdr">
           <div class="panel-title-box">
-            <span class="sec-label">Live Chat Stream</span>
+            <span class="sec-label">Live chat</span>
             <span class="plat-pill-sm"><span class="dot-amber"></span>TikTok / YT</span>
           </div>
           <div class="panel-hdr-actions">
-            <button class="btn-micro-gift" id="btn-gift-rose" title="Tặng 10 Hoa Hồng 🌹">🌹</button>
-            <button class="btn-micro-gift" id="btn-gift-lion" title="Tặng Sư Tử 🦁">🦁</button>
-            <button class="btn-icon-hdr" id="btn-clear-chat" title="Xóa toàn bộ tin nhắn chat">🗑️</button>
+            <button class="btn-micro-gift" id="btn-gift-rose" title="Send 10 Roses">🌹</button>
+            <button class="btn-micro-gift" id="btn-gift-lion" title="Send a Lion">🦁</button>
+            <button class="btn-icon-hdr" id="btn-clear-chat" title="Clear all chat messages">🗑️</button>
           </div>
         </div>
 
         <!-- Quick Chat Message Box -->
         <form id="form-chat-send" class="chat-input-form">
-          <input type="text" id="input-chat-msg" placeholder="Nhập tin nhắn test AI trả lời..." />
-          <button type="submit" class="btn-chat-submit">Gửi</button>
+          <input type="text" id="input-chat-msg" placeholder="Type a test message..." />
+          <button type="submit" class="btn-chat-submit">Send</button>
         </form>
 
         <ul class="chat-stream-list" id="chat-queue" aria-live="polite">
-          <li class="ev-empty">Chưa có tin nhắn nào...</li>
+          <li class="ev-empty">No messages yet</li>
         </ul>
       </section>
 
@@ -113,12 +163,12 @@
       <section class="panel-section library-panel">
         <div class="panel-hdr">
           <div class="panel-title-box">
-            <span class="sec-label">Bộ Trộn Video & Library</span>
+            <span class="sec-label">Video library</span>
             <span class="lib-count-badge" id="lib-total-count">0 clips</span>
           </div>
           <div class="panel-hdr-actions">
-            <button class="btn-upload-sm" id="btn-upload" title="Tải video mới lên thư viện">
-              <span>📤</span>
+            <button class="btn-upload-sm" id="btn-upload" title="Upload video">
+              <span class="material-symbols-rounded" aria-hidden="true">upload</span>
             </button>
           </div>
         </div>
@@ -126,11 +176,11 @@
         <!-- Video Mixer Controls Strip (Clean - No FX) -->
         <div class="video-mixer-strip">
           <div class="mixer-row-top">
-            <label class="mixer-auto-toggle" title="Tự động trộn clip khi có Event và tự quay về Gameplay">
+            <label class="mixer-auto-toggle" title="Automatically mix event clips and return to Gameplay">
               <input type="checkbox" id="chk-auto-mix" checked />
               <span>Auto Mix</span>
             </label>
-            <label class="mixer-random-toggle" title="Tự động chọn ngẫu nhiên clip trong State để tạo sự đa dạng">
+            <label class="mixer-random-toggle" title="Randomly select clips within each state">
               <input type="checkbox" id="chk-global-random" checked />
               <span>🔀 Random</span>
             </label>
@@ -138,14 +188,14 @@
 
           <!-- Mini State History Strip -->
           <div class="history-strip-box">
-            <span class="history-label">Lịch sử:</span>
+            <span class="history-label">Played</span>
             <div class="history-track" id="history-track"></div>
           </div>
         </div>
 
         <!-- Filter Tabs -->
         <div class="lib-filter-tabs">
-          <button class="lib-tab active" data-filter="all">Tất cả</button>
+          <button class="lib-tab active" data-filter="all">All</button>
           <button class="lib-tab" data-filter="gameplay">1. Gameplay</button>
           <button class="lib-tab" data-filter="talking">2. Talking</button>
           <button class="lib-tab" data-filter="reaction">3. Reactions</button>
@@ -161,12 +211,12 @@
               <span class="lib-gd" style="background:var(--green)"></span>
               <span class="lib-gn">1. Gameplay & Focus</span>
               <span class="lib-gc" id="cnt-group-gameplay">0</span>
-              <button class="btn-group-random is-active" data-rand-group="gameplay" title="Bật / Tắt Random video (Gameplay)">🔀</button>
-              <button class="btn-group-upload" data-upload-target="GAMEPLAY_IDLE" title="Upload video vào Gameplay">＋</button>
+              <button class="btn-group-random is-active" data-rand-group="gameplay" title="Toggle random video (Gameplay)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
+              <button class="btn-group-upload" data-upload-target="GAMEPLAY_IDLE" title="Upload a Gameplay clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
               <input type="file" class="group-file-input" data-group-target="GAMEPLAY_IDLE" accept="video/*" multiple style="display:none;" />
             </div>
             <div class="clip-list" id="list-group-gameplay" data-target-group="GAMEPLAY_IDLE">
-              <div class="lib-empty-notice" data-target-group="GAMEPLAY_IDLE">Chưa có video. Bấm <b>＋</b> để upload.</div>
+              <div class="lib-empty-notice" data-target-group="GAMEPLAY_IDLE">No clips. Select <b>＋</b> to upload.</div>
             </div>
           </div>
 
@@ -176,12 +226,12 @@
               <span class="lib-gd" style="background:var(--accent)"></span>
               <span class="lib-gn">2. Talking & Chat</span>
               <span class="lib-gc" id="cnt-group-talking">0</span>
-              <button class="btn-group-random is-active" data-rand-group="talking" title="Bật / Tắt Random video (Talking & Lipsync)">🔀</button>
-              <button class="btn-group-upload" data-upload-target="TALKING" title="Upload video vào nhóm Talking (Dùng làm video chính khi trả lời chat & lipsync)">＋</button>
+              <button class="btn-group-random is-active" data-rand-group="talking" title="Toggle random video (Talking & Lipsync)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
+              <button class="btn-group-upload" data-upload-target="TALKING" title="Upload the main Talking and LipSync clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
               <input type="file" class="group-file-input" data-group-target="TALKING" accept="video/*" multiple style="display:none;" />
             </div>
             <div class="clip-list" id="list-group-talking" data-target-group="TALKING">
-              <div class="lib-empty-notice" data-target-group="TALKING">Chưa có video. Bấm <b>＋</b> để upload clip trò chuyện.</div>
+              <div class="lib-empty-notice" data-target-group="TALKING">No Talking clips. Select <b>＋</b> to upload.</div>
             </div>
           </div>
 
@@ -191,12 +241,12 @@
               <span class="lib-gd" style="background:var(--amber)"></span>
               <span class="lib-gn">3. Win & Reactions</span>
               <span class="lib-gc" id="cnt-group-reaction">0</span>
-              <button class="btn-group-random is-active" data-rand-group="reaction" title="Bật / Tắt Random video (Reactions)">🔀</button>
-              <button class="btn-group-upload" data-upload-target="BIG_WIN" title="Upload video vào Reactions">＋</button>
+              <button class="btn-group-random is-active" data-rand-group="reaction" title="Toggle random video (Reactions)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
+              <button class="btn-group-upload" data-upload-target="BIG_WIN" title="Upload a Reaction clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
               <input type="file" class="group-file-input" data-group-target="BIG_WIN" accept="video/*" multiple style="display:none;" />
             </div>
             <div class="clip-list" id="list-group-reaction" data-target-group="BIG_WIN">
-              <div class="lib-empty-notice" data-target-group="BIG_WIN">Chưa có video. Bấm <b>＋</b> để upload.</div>
+              <div class="lib-empty-notice" data-target-group="BIG_WIN">No clips. Select <b>＋</b> to upload.</div>
             </div>
           </div>
 
@@ -206,12 +256,12 @@
               <span class="lib-gd" style="background:var(--purple)"></span>
               <span class="lib-gn">4. Goals & CTA</span>
               <span class="lib-gc" id="cnt-group-cta">0</span>
-              <button class="btn-group-random is-active" data-rand-group="cta" title="Bật / Tắt Random video (Goals & CTA)">🔀</button>
-              <button class="btn-group-upload" data-upload-target="CTA" title="Upload video vào Goals & CTA">＋</button>
+              <button class="btn-group-random is-active" data-rand-group="cta" title="Toggle random video (Goals & CTA)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
+              <button class="btn-group-upload" data-upload-target="CTA" title="Upload a Goals and CTA clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
               <input type="file" class="group-file-input" data-group-target="CTA" accept="video/*" multiple style="display:none;" />
             </div>
             <div class="clip-list" id="list-group-cta" data-target-group="CTA">
-              <div class="lib-empty-notice" data-target-group="CTA">Chưa có video. Bấm <b>＋</b> để upload.</div>
+              <div class="lib-empty-notice" data-target-group="CTA">No clips. Select <b>＋</b> to upload.</div>
             </div>
           </div>
 
@@ -228,7 +278,7 @@
           <!-- 16:9 Monitor Preview -->
           <section class="monitor-box">
             <div class="monitor-hdr">
-              <span class="sec-label">Monitor Preview (16:9)</span>
+              <span class="sec-label">Live monitor · 16:9</span>
               <div class="monitor-state-tag" id="monitor-state-tag">GAMEPLAY_IDLE</div>
               <span class="monitor-clip-name" id="monitor-clip-name">gameplay_idle.mp4</span>
               <div class="talking-live-badge" id="talking-live-badge" title="Live Video Stream Sync">
@@ -236,25 +286,25 @@
                 <span>Live: Sync</span>
               </div>
               <div class="monitor-btns">
-                <button class="btn-icon-sm" id="btn-prev" title="Clip trước đó trong State">‹</button>
-                <button class="btn-icon-sm" id="btn-random-clip-now" title="Đổi ngẫu nhiên clip khác trong State">🔀</button>
-                <button class="btn-icon-sm" id="btn-next" title="Clip tiếp theo trong State">›</button>
-                <button class="btn-icon-sm" id="btn-test-sound" title="Mở khóa âm thanh & Thử tiếng">🔊</button>
+                <button class="btn-icon-sm" id="btn-prev" title="Previous clip in this state">‹</button>
+                <button class="btn-icon-sm" id="btn-random-clip-now" title="Pick another random clip">🔀</button>
+                <button class="btn-icon-sm" id="btn-next" title="Next clip in this state">›</button>
+                <button class="btn-icon-sm" id="btn-test-sound" title="Enable and test audio" aria-label="Enable and test audio"><span class="material-symbols-rounded app-icon" aria-hidden="true">volume_up</span></button>
               </div>
             </div>
 
-            <!-- Queued Transition Banner (Rule: Chờ hết video đang chạy) -->
+            <!-- Queued transition banner: wait for the active clip -->
             <div class="queued-transition-banner" id="queued-transition-banner" style="display:none;">
               <span class="q-icon">⏳</span>
-              <span class="q-text">Đang đợi video hiện tại chạy xong... Sắp chuyển sang: <b id="queued-target-state">TALKING</b></span>
-              <button type="button" class="btn-skip-queue" id="btn-skip-queue" title="Bỏ qua chờ và chuyển ngay">Chuyển ngay ›</button>
+              <span class="q-text">Waiting for the current clip to finish. Next: <b id="queued-target-state">TALKING</b></span>
+              <button type="button" class="btn-skip-queue" id="btn-skip-queue" title="Skip the queue">Switch now ›</button>
             </div>
 
             <!-- Screen Container (Clean 16:9 Realtime Video Monitor with Seamless Dual-Video Buffer) -->
             <div class="monitor-screen-wrap" id="monitor-screen">
-              <video class="monitor-video monitor-video-a" id="monitor-video-a" playsinline muted autoplay style="display:none;"></video>
-              <video class="monitor-video monitor-video-b" id="monitor-video-b" playsinline muted autoplay style="display:none;"></video>
-              <canvas class="monitor-w2l-canvas" id="monitor-w2l-canvas" width="1280" height="720" style="display:none;"></canvas>
+              <video class="monitor-video monitor-video-a standby-layer" id="monitor-video-a" playsinline muted autoplay preload="auto"></video>
+              <video class="monitor-video monitor-video-b standby-layer" id="monitor-video-b" playsinline muted autoplay preload="auto"></video>
+              <canvas class="monitor-w2l-canvas" id="monitor-w2l-canvas" width="1280" height="720"></canvas>
               <audio id="live-voice-audio" playsinline preload="auto" style="display:none;"></audio>
               
               <div class="monitor-bg" id="monitor-bg">
@@ -271,7 +321,7 @@
               </div>
 
               <!-- Live Talking Indicator Badge -->
-              <div class="mon-w2l-badge" id="mon-w2l-badge" style="display:none;">
+              <div class="mon-w2l-badge" id="mon-w2l-badge">
                 <span class="rec-dot"></span>
                 <span>TALKING STATE</span>
               </div>
@@ -301,7 +351,7 @@
             <div class="vstatus-hdr">
               <div class="vstatus-title-box">
                 <span class="vstatus-pulse-dot" id="vstatus-dot"></span>
-                <span class="vstatus-title" id="vstatus-title">AI Voice: Sẵn sàng</span>
+                <span class="vstatus-title" id="vstatus-title">AI voice · Ready</span>
               </div>
               <span class="vstatus-engine-tag" id="vstatus-engine-tag">ElevenLabs Turbo v2.5 (VI · 1.05x)</span>
             </div>
@@ -321,15 +371,15 @@
                 <div class="vbar" style="--h:30%"></div>
               </div>
               <div class="vstatus-details">
-                <div class="vlast" id="v-last">Sẵn sàng phát biểu...</div>
+                <div class="vlast" id="v-last">Ready to speak</div>
               </div>
             </div>
           </section>
 
-          <!-- Quick Visual State Selector Chips (Rule: Chờ hết video đang chạy) -->
+          <!-- Quick visual state selector -->
           <section class="state-chips-panel">
             <div class="panel-hdr">
-              <span class="sec-label">Chuyển Trạng Thái (Manual State)</span>
+              <span class="sec-label">Avatar states</span>
               <span class="state-pill-mini" id="state-badge">
                 <span class="state-badge-dot"></span>
                 <span id="state-badge-text">GAMEPLAY_IDLE</span>
@@ -362,8 +412,8 @@
           <section class="panel-section voice-config-panel">
             <div class="panel-hdr">
               <div class="panel-title-box">
-                <span class="sec-label">AI Voice & Video Engine</span>
-                <span class="voice-session-tag" title="Key & thiết lập tự động lưu vào session">💾 Key Saved</span>
+                <span class="sec-label">AI voice and video</span>
+                <span class="voice-session-tag" title="Key and settings are saved for this session">💾 Key Saved</span>
               </div>
             </div>
 
@@ -371,17 +421,18 @@
               <!-- Engine & Language Selector -->
               <div class="form-row">
                 <div class="form-group" style="flex:1.4;">
-                  <label>TTS Engine</label>
+                  <label>AI voice</label>
                   <select class="form-select-sm" id="quick-voice-provider">
-                    <option value="elevenlabs" selected>ElevenLabs Turbo v2.5 (Chuẩn Tiếng Việt)</option>
+                    <option value="elevenlabs" selected>ElevenLabs Turbo v2.5</option>
                     <option value="webspeech">Web Speech API (Local / 0ms)</option>
                   </select>
                 </div>
                 <div class="form-group" style="flex:1;">
-                  <label>Ngôn Ngữ</label>
+                  <label>Language</label>
                   <select class="form-select-sm" id="quick-voice-lang">
-                    <option value="vi" selected>🇻🇳 Tiếng Việt</option>
-                    <option value="auto">🌐 Auto Detect</option>
+                    <option value="auto">🌐 Auto detect</option>
+                    <option value="en">🇺🇸 English</option>
+                    <option value="vi" selected>🇻🇳 Vietnamese</option>
                   </select>
                 </div>
               </div>
@@ -389,12 +440,11 @@
               <!-- Talking Video Provider Selector -->
               <div class="form-group">
                 <div class="label-with-action">
-                  <label>Talking Video Engine (Level 3):</label>
-                  <span id="talking-provider-status-badge" style="font-size:7.5px; color:var(--green); font-weight:700;">Live Ready</span>
+                  <label>Avatar engine</label>
+                  <span id="talking-provider-status-badge" style="font-size:11px; color:var(--green); font-weight:700;">Live Ready</span>
                 </div>
                 <select class="form-select-sm" id="quick-talking-provider">
-                  <option value="neural_mesh" selected>✨ Level 3: Realtime Talking Video Set (TALKING State)</option>
-                  <option value="livetalking">⚡ LiveTalking Digital Human</option>
+                  <option value="livetalking" selected>LiveTalking Digital Human</option>
                   <option value="off">Off (Voice Only)</option>
                 </select>
                 <div style="display:flex; gap:6px; margin-top:6px;">
@@ -406,37 +456,33 @@
                 </div>
               </div>
 
-              <!-- ElevenLabs Secret API Key Input -->
+              <!-- Provider credentials are server-side only -->
               <div class="form-group" id="group-quick-apikey">
                 <div class="label-with-action">
-                  <label>ElevenLabs Secret Key (sk_...):</label>
-                  <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" class="btn-text-action" title="Mở trang quản lý API Key ElevenLabs">🔑 Đổi Key</a>
+                  <label>Provider credentials</label>
                 </div>
-                <div class="apikey-input-wrap">
-                  <input type="password" class="form-input-sm" id="quick-voice-apikey" value="REMOVED_PROVIDER_SECRET" placeholder="sk_..." />
-                  <button type="button" class="btn-toggle-eye" id="btn-toggle-eye" title="Xem/Ẩn Key">👁️</button>
-                </div>
+                <div class="settings-note">Managed securely by the runtime server.</div>
               </div>
 
-              <!-- Built-in Voice Presets List (Giọng Tiếng Việt Tự Nhiên Nhất) -->
+              <!-- Built-in voice presets -->
               <div class="form-group" id="group-saved-voices">
-                <label>Chọn Giọng Streamer (Vietnamese Native Accent):</label>
+                <label>Voice</label>
                 <div class="saved-voice-select-wrap">
                   <select class="form-select-sm" id="quick-saved-voice-list">
-                    <optgroup label="🌟 Giọng Nữ Streamer (Đọc Tiếng Việt Ngọt Ngào & Tự Nhiên)">
-                      <option value="EXAVITQu4vr4xnSDxMaL" selected>Sarah / Bella — Ngọt ngào, truyền cảm, chuẩn Tiếng Việt</option>
-                      <option value="FGY2WhTYpPnrIDTdsKH5">Laura — Tươi vui, hoạt bát, giọng streamer chuẩn</option>
-                      <option value="cgSgspJ2msm6clMCkdW9">Jessica — Nhí nhảnh, cuốn hút, đọc tiếng Việt mượt</option>
-                      <option value="Xb7hH8MSUJpSbSDYk0k2">Alice — Phong cách Idol / MC livestream</option>
-                      <option value="pFZP5JQG7iQjIQuC4Bku">Lily — Trong trẻo, nữ tính, dễ thương</option>
-                      <option value="21m00Tcm4TlvDq8ikWAM">Rachel — Điềm đạm, ấm áp</option>
-                      <option value="AZnzlk1XvdvUeBnXmlld">Domi — Năng động, cá tính</option>
-                      <option value="MF3mGyEYCl7XYWbV9V6O">Elli — VTuber trẻ trung</option>
+                    <optgroup label="🌟 Female streamer voices">
+                      <option value="EXAVITQu4vr4xnSDxMaL" selected>Sarah / Bella — Warm and expressive</option>
+                      <option value="FGY2WhTYpPnrIDTdsKH5">Laura — Bright and energetic</option>
+                      <option value="cgSgspJ2msm6clMCkdW9">Jessica — Playful and engaging</option>
+                      <option value="Xb7hH8MSUJpSbSDYk0k2">Alice — Idol and live host style</option>
+                      <option value="pFZP5JQG7iQjIQuC4Bku">Lily — Clear, soft, and friendly</option>
+                      <option value="21m00Tcm4TlvDq8ikWAM">Rachel — Calm and warm</option>
+                      <option value="AZnzlk1XvdvUeBnXmlld">Domi — Energetic and bold</option>
+                      <option value="MF3mGyEYCl7XYWbV9V6O">Elli — Young VTuber style</option>
                     </optgroup>
-                    <optgroup label="🎙️ Giọng Nam (Đọc Tiếng Việt Rõ Ràng)">
-                      <option value="ErXwobaYiN019PkySvjV">Antoni — Trầm ấm, truyền cảm</option>
-                      <option value="VR6AewLTigWG4xSOukaG">Arnold — Mạnh mẽ, dứt khoát</option>
-                      <option value="pNInz6obpgDQGcFmaJgB">Adam — Hào hứng, lôi cuốn</option>
+                    <optgroup label="🎙️ Male voices">
+                      <option value="ErXwobaYiN019PkySvjV">Antoni — Deep and expressive</option>
+                      <option value="VR6AewLTigWG4xSOukaG">Arnold — Strong and direct</option>
+                      <option value="pNInz6obpgDQGcFmaJgB">Adam — Excited and engaging</option>
                     </optgroup>
                   </select>
                 </div>
@@ -447,18 +493,18 @@
                 <div class="label-with-action">
                   <label>Voice ID:</label>
                   <div class="voice-id-actions">
-                    <button type="button" class="btn-micro-action" id="btn-copy-voice-id" title="Copy Voice ID vào bộ nhớ tạm">📋 Copy</button>
-                    <button type="button" class="btn-micro-action" id="btn-save-custom-voice" title="Lưu Voice ID này vào danh sách cá nhân">💾 Lưu</button>
+                    <button type="button" class="btn-micro-action" id="btn-copy-voice-id" title="Copy Voice ID">📋 Copy</button>
+                    <button type="button" class="btn-micro-action" id="btn-save-custom-voice" title="Save this Voice ID">💾 Save</button>
                   </div>
                 </div>
-                <input type="text" class="form-input-sm" id="quick-voice-id-input" value="EXAVITQu4vr4xnSDxMaL" placeholder="Nhập Voice ID..." />
+                <input type="text" class="form-input-sm" id="quick-voice-id-input" value="EXAVITQu4vr4xnSDxMaL" placeholder="Enter Voice ID..." />
               </div>
 
               <!-- Voice Speed Slider -->
               <div class="form-group" style="margin-top:2px;">
                 <div class="label-with-action">
-                  <label>Tốc độ phát âm (Speed):</label>
-                  <span id="quick-voice-speed-val" style="font-size:9.5px; font-weight:700; color:var(--accent); font-family:var(--font-mono);">1.05x</span>
+                  <label>Speech rate</label>
+                  <span id="quick-voice-speed-val" style="font-size:11px; font-weight:700; color:var(--accent); font-family:var(--font-mono);">1.05x</span>
                 </div>
                 <div class="speed-slider-wrap">
                   <input type="range" class="form-range" id="quick-voice-speed" min="0.7" max="1.5" step="0.05" value="1.05" />
@@ -474,10 +520,10 @@
               <!-- Quick Voice Testing -->
               <div class="form-row" style="align-items:flex-end; gap:6px; margin-top:2px;">
                 <div class="form-group" style="flex:1;">
-                  <input type="text" class="form-input-sm" id="quick-test-voice-text" value="Chào bạn nha! Mimi là AI Idol người Việt Nam nè!" placeholder="Câu nói test giọng..." />
+                  <input type="text" class="form-input-sm" id="quick-test-voice-text" value="Chào bạn nha! Mimi là AI Idol livestream người Việt Nam nè!" placeholder="Enter a voice test line..." />
                 </div>
-                <button type="button" class="btn-secondary-sm" id="btn-quick-voice-speak">▶ Nói Thử</button>
-                <button type="button" class="btn-secondary-sm" id="btn-stop-voice" title="Dừng giọng nói ngay">⏹ Dừng</button>
+                <button type="button" class="btn-secondary-sm" id="btn-quick-voice-speak">▶ Test voice</button>
+                <button type="button" class="btn-secondary-sm" id="btn-stop-voice" title="Stop voice now"><span class="material-symbols-rounded" aria-hidden="true">stop</span>Stop</button>
               </div>
             </div>
           </section>
@@ -485,13 +531,13 @@
           <!-- 2. Game Telemetry & Event Ingestion Simulator -->
           <section class="panel-section game-panel">
             <div class="panel-hdr">
-              <span class="sec-label">Game Simulator & Telemetry</span>
+              <span class="sec-label">Game test</span>
               <button class="btn-xs" id="btn-spin-slot">🎰 Spin Slot</button>
             </div>
             <div class="game-actions-grid">
               <button class="btn-game-act btn-g-win" id="btn-inj-win">🎉 Big Win</button>
               <button class="btn-game-act btn-g-jp" id="btn-inj-jp">💥 Jackpot</button>
-              <button class="btn-game-act btn-g-lose" id="btn-inj-lose">😢 Thua ván</button>
+              <button class="btn-game-act btn-g-lose" id="btn-inj-lose">😢 Loss</button>
               <button class="btn-game-act btn-g-cta" id="btn-inj-cta">📣 Trigger CTA</button>
             </div>
           </section>
@@ -499,7 +545,7 @@
           <!-- 3. Stream Script & Goal Engine -->
           <section class="panel-section goals-panel">
             <div class="panel-hdr">
-              <span class="sec-label">Mục Tiêu & Kịch Bản Stream</span>
+              <span class="sec-label">Live script</span>
               <span class="lib-count-badge" id="active-goal-badge">P40</span>
             </div>
 
@@ -513,16 +559,16 @@
             <ul class="goal-list" id="goal-list">
               <li class="goal-item active">
                 <span class="gi">🎯</span>
-                <div class="gb"><div class="gn">invite_viewers</div><div class="gm">P40 · Kêu gọi vào phòng chơi cùng</div></div>
+                <div class="gb"><div class="gn">invite_viewers</div><div class="gm">P40 · Invite viewers to join</div></div>
                 <span class="gnext">next</span>
               </li>
               <li class="goal-item">
                 <span class="gi">💬</span>
-                <div class="gb"><div class="gn">ask_chat_question</div><div class="gm">P35 · Đặt câu hỏi tương tác người xem</div></div>
+                <div class="gb"><div class="gn">ask_chat_question</div><div class="gm">P35 · Ask an audience question</div></div>
               </li>
               <li class="goal-item">
                 <span class="gi">🙏</span>
-                <div class="gb"><div class="gn">thank_viewers</div><div class="gm">P30 · Cảm ơn lượt xem & follow</div></div>
+                <div class="gb"><div class="gn">thank_viewers</div><div class="gm">P30 · Thank viewers and followers</div></div>
               </li>
             </ul>
           </section>
@@ -530,8 +576,111 @@
         </aside>
 
       </div><!-- /app-body -->
+  </section>
+
+  <section class="web-app-view" id="view-avatar" data-view="avatar">
+    <header class="web-page-head">
+      <div>
+        <span class="workspace-eyebrow">AVATAR LIBRARY</span>
+        <h1>Avatar</h1>
+        <p>Create avatars once, then select which ones can join the live session.</p>
+      </div>
+      <button type="button" class="web-primary-action" id="btn-create-avatar">
+        <span class="material-symbols-rounded" aria-hidden="true">add</span>Create Avatar
+      </button>
+    </header>
+    <div class="avatar-page-toolbar">
+      <div><strong>Trained avatars</strong><small id="avatar-page-count">0 avatars</small></div>
+      <label class="avatar-page-random"><input type="checkbox" id="avatar-page-random-toggle" /> Random pick during live</label>
+    </div>
+    <div class="avatar-library-grid" id="avatar-library-grid">
+      <article class="avatar-empty-card">
+        <span class="material-symbols-rounded" aria-hidden="true">person_add</span>
+        <h2>No avatars yet</h2>
+        <p>Upload media and train your first avatar.</p>
+        <button type="button" data-create-avatar>Create Avatar</button>
+      </article>
+    </div>
+  </section>
+
+  <section class="web-app-view" id="view-settings" data-view="settings">
+    <header class="web-page-head">
+      <div>
+        <span class="workspace-eyebrow">CONFIGURATION</span>
+        <h1>Settings</h1>
+        <p>Manage AI providers, voice, models, and output from one place.</p>
+      </div>
+    </header>
+    <div class="web-settings-grid">
+      <section class="settings-bento-card">
+        <div class="settings-bento-head"><span class="material-symbols-rounded">hub</span><div><h2>AI providers</h2><p>Voice and avatar engines.</p></div><span class="settings-status">Connected</span></div>
+        <div class="settings-bento-content" id="web-settings-provider-slot"></div>
+      </section>
+      <section class="settings-bento-card">
+        <div class="settings-bento-head"><span class="material-symbols-rounded">record_voice_over</span><div><h2>Voice & Persona</h2><p>Voice, speed, and host style.</p></div></div>
+        <div class="settings-bento-content" id="web-settings-voice-slot"></div>
+        <div class="settings-bento-actions" id="web-settings-voice-actions"></div>
+      </section>
+      <section class="settings-bento-card">
+        <div class="settings-bento-head"><span class="material-symbols-rounded">live_tv</span><div><h2>OBS & Output</h2><p>WebSocket and stream output.</p></div></div>
+        <div class="settings-bento-content" id="web-settings-obs-slot"></div>
+        <div class="settings-bento-actions" id="web-settings-obs-actions"></div>
+      </section>
+      <section class="settings-bento-card">
+        <div class="settings-bento-head"><span class="material-symbols-rounded">folder_open</span><div><h2>Project storage</h2><p>Uploads and trained models.</p></div></div>
+        <div class="settings-storage-fields">
+          <label><span>Root folder</span><div class="settings-folder-picker"><input id="project-storage-root" type="text" placeholder="/Users/you/AI-Livestream-Projects" /><button id="select-project-storage-folder" type="button" class="btn-secondary"><span class="material-symbols-rounded">folder_open</span>Select folder</button></div></label>
+          <label><span>Project name</span><input id="project-storage-name" type="text" value="ai-livestream" /></label>
+        </div>
+        <div class="settings-bento-actions"><span id="project-storage-status">Loading settings...</span><button id="save-project-storage" type="button" class="btn-primary">Save folder</button></div>
+      </section>
+      <section class="settings-bento-card">
+        <div class="settings-bento-head"><span class="material-symbols-rounded">memory</span><div><h2>Local AI Director</h2><p>Qwen through Ollama.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
+        <div class="local-ai-model-row">
+          <div><span>Model</span><strong id="local-ai-model-name">qwen3.5:35b-64k</strong></div>
+          <div><span>Runtime</span><strong id="local-ai-runtime-state">Checking Ollama…</strong></div>
+        </div>
+        <p class="local-ai-note" id="local-ai-note">Chat replies stay on this machine, then flow through TTS and LiveTalking.</p>
+        <div class="settings-bento-actions"><span id="local-ai-install-progress"></span><button id="install-local-ai-model" type="button" class="btn-primary"><span class="material-symbols-rounded">download</span>Install model</button></div>
+      </section>
+    </div>
+  </section>
+  </main>
 
   <!-- ══ MODALS / DEDICATED SETTINGS PANELS ═══════════════════ -->
+
+  <div class="modal-backdrop avatar-create-backdrop" id="modal-avatar-create" style="display:none;">
+    <div class="modal-card avatar-create-card">
+      <div class="modal-hdr avatar-create-head">
+        <div><span class="workspace-eyebrow">NEW AVATAR</span><h3>Create Avatar</h3><p>Upload → Avatar ID → Training → Done</p></div>
+        <button class="modal-close" id="close-avatar-create" aria-label="Close">&times;</button>
+      </div>
+      <div class="avatar-create-steps" aria-label="Avatar creation progress">
+        <div class="active" data-create-step="upload"><span>1</span>Upload</div>
+        <div data-create-step="config"><span>2</span>Avatar ID</div>
+        <div data-create-step="training"><span>3</span>Training</div>
+        <div data-create-step="done"><span>4</span>Done</div>
+      </div>
+      <div class="avatar-create-body">
+        <input type="file" id="input-avatar-create-file" accept="image/*,video/*" hidden />
+        <button type="button" class="avatar-upload-drop" id="btn-avatar-create-upload">
+          <span class="material-symbols-rounded" aria-hidden="true">cloud_upload</span>
+          <strong id="avatar-create-file-name">Upload image or video</strong>
+          <small>MP4, MOV, PNG, or JPG</small>
+        </button>
+        <label class="avatar-create-field"><span>Avatar ID</span><input type="text" id="avatar-create-id" value="avatar_main" placeholder="avatar_id" /></label>
+        <div class="avatar-create-progress" id="avatar-create-progress-wrap">
+          <div><span id="avatar-create-status">Ready to upload</span><strong id="avatar-create-progress-label">0%</strong></div>
+          <div class="avatar-create-progress-track"><span id="avatar-create-progress-fill"></span></div>
+        </div>
+        <div class="avatar-create-message" id="avatar-create-message">Your trained avatar will be saved to the local avatar library.</div>
+      </div>
+      <div class="modal-ftr avatar-create-footer">
+        <button type="button" class="btn-secondary" id="cancel-avatar-create">Cancel</button>
+        <button type="button" class="btn-primary" id="btn-avatar-create-train" disabled><span class="material-symbols-rounded">model_training</span>Start Training</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 1. LiveTalking Studio Modal -->
   <div class="modal-backdrop" id="modal-avatar" style="display:none;">
@@ -540,9 +689,9 @@
         <div style="display:flex; align-items:center; gap:10px;">
           <span style="font-size:20px;">⚡</span>
           <div>
-            <h3 style="margin:0; font-size:15px; font-weight:700; color:#fff;">LiveTalking Studio · Avatar & LipSync</h3>
+            <h3 style="margin:0; font-size:15px; font-weight:700; color:#fff;">Avatar</h3>
             <div style="font-size:11px; color:var(--t2); margin-top:2px;">
-              <b>Bước 1: Tạo Avatar Neural</b> ➔ <b>Bước 2: Thử Giọng & LipSync</b>
+              Create · Test · Apply
             </div>
           </div>
         </div>
@@ -554,35 +703,35 @@
         <div class="lt-stepper-bar">
           <div class="lt-step-badge active" id="badge-step-1">
             <span class="step-num">1</span>
-            <span class="step-title">🎬 1. Nạp & Tạo Avatar Neural</span>
-            <span class="step-status" id="lbl-step1-status">Chờ nạp video</span>
+            <span class="step-title">🎬 1. Create</span>
+            <span class="step-status" id="lbl-step1-status">Waiting for media</span>
           </div>
           <div class="lt-step-arrow">➔</div>
           <div class="lt-step-badge locked" id="badge-step-2">
             <span class="step-num">2</span>
-            <span class="step-title">🎙️ 2. Thử Giọng & LipSync</span>
-            <span class="step-status" id="lbl-step2-status">🔒 Đang khóa</span>
+            <span class="step-title">🎙️ 2. Test</span>
+            <span class="step-status" id="lbl-step2-status">🔒 Locked</span>
           </div>
         </div>
 
         <!-- 2-Column LiveTalking Studio Board -->
         <div class="livetalking-studio-grid">
 
-          <!-- ════ CỘT 1: BƯỚC 1 - NẠP VIDEO AVATAR ════ -->
+          <!-- STEP 1: UPLOAD AVATAR MEDIA -->
           <div class="lt-studio-col" id="lt-col-step1">
             <div class="lt-section-card">
               <div class="lt-card-hdr">
-                <span class="lt-card-title">🎬 BƯỚC 1: Tạo Avatar MuseTalk</span>
+                <span class="lt-card-title">🎬 Source and model</span>
                 <div style="display:flex; align-items:center; gap:8px;">
-                  <label class="form-check-label" style="display:inline-flex; align-items:center; gap:4px; font-size:9.5px; color:#38bdf8; cursor:pointer; font-weight:600; background:rgba(56,189,248,0.1); padding:2px 6px; border-radius:4px; border:1px solid rgba(56,189,248,0.25);">
+                  <label class="form-check-label" style="display:inline-flex; align-items:center; gap:4px; font-size:11px; color:#38bdf8; cursor:pointer; font-weight:600; background:rgba(56,189,248,0.1); padding:2px 6px; border-radius:4px; border:1px solid rgba(56,189,248,0.25);">
                     <input type="checkbox" id="chk-show-facemesh" checked style="cursor:pointer; accent-color:#38bdf8;" />
-                    <span>Lưới 3D</span>
+                    <span>3D mesh</span>
                   </label>
-                  <label class="form-check-label" style="display:inline-flex; align-items:center; gap:4px; font-size:9.5px; color:#eab308; cursor:pointer; font-weight:600; background:rgba(234,179,8,0.1); padding:2px 6px; border-radius:4px; border:1px solid rgba(234,179,8,0.25);">
+                  <label class="form-check-label" style="display:inline-flex; align-items:center; gap:4px; font-size:11px; color:#eab308; cursor:pointer; font-weight:600; background:rgba(234,179,8,0.1); padding:2px 6px; border-radius:4px; border:1px solid rgba(234,179,8,0.25);">
                     <input type="checkbox" id="chk-debug-facemesh" style="cursor:pointer; accent-color:#eab308;" />
                     <span>Debug</span>
                   </label>
-                  <span class="badge-status-pill" id="badge-train-state">Chưa Train</span>
+                  <span class="badge-status-pill" id="badge-train-state">Not created</span>
                 </div>
               </div>
 
@@ -590,11 +739,11 @@
               <div class="lt-video-screen-box" id="lt-video-screen-box">
                 <canvas id="lt-train-video-canvas" width="480" height="270" style="width:100%; height:100%; object-fit:contain; display:none;"></canvas>
                 <video id="lt-train-video-preview" autoplay loop muted playsinline style="display:none;"></video>
-                <div class="lt-stream-overlay-badge" id="lt-train-face-badge" style="display:none;">🟢 3D Face Mesh · Đã Khóa Góc</div>
+                <div class="lt-stream-overlay-badge" id="lt-train-face-badge" style="display:none;">🟢 3D face mesh · Angle locked</div>
                 <div id="lt-train-video-placeholder" class="lt-screen-placeholder">
                   <div style="font-size:36px; margin-bottom:8px;">🎬</div>
-                  <div style="font-weight:700; font-size:12px; color:var(--t1);">Chưa có Ảnh / Video Avatar</div>
-                  <div style="font-size:10.5px; color:var(--t3); margin-top:4px;">Nạp ảnh hoặc video để worker MuseTalk tạo latent, bbox và mask thật</div>
+                  <div style="font-weight:700; font-size:12px; color:var(--t1);">No avatar media</div>
+                  <div style="font-size:11px; color:var(--t3); margin-top:4px;">Upload an image or video for MuseTalk preprocessing.</div>
                 </div>
               </div>
 
@@ -602,11 +751,11 @@
               <input type="file" id="input-train-video-file" accept="image/*,video/*" style="display:none;" />
               <div class="lt-file-action-bar">
                 <button type="button" class="btn-primary-sm" id="btn-upload-train-video" style="background:#3b82f6; white-space:nowrap;">
-                  📁 Nạp Ảnh / Video
+                  📁 Upload media
                 </button>
-                <div class="lt-file-info-text" id="lt-video-file-info">Chưa chọn video...</div>
-                <button type="button" class="btn-xs-link" id="btn-clear-train-video" style="color:#f87171; white-space:nowrap;" title="Xóa video đã nạp">
-                  🗑️ Xóa
+                <div class="lt-file-info-text" id="lt-video-file-info">No media selected</div>
+                <button type="button" class="btn-xs-link" id="btn-clear-train-video" style="color:#f87171; white-space:nowrap;" title="Remove uploaded media">
+                  🗑️ Remove
                 </button>
               </div>
 
@@ -614,38 +763,49 @@
               <div class="lt-training-control-box">
                 <div class="form-row" style="margin-bottom:8px; gap:8px;">
                   <div class="form-group" style="flex:1.4;">
-                    <label style="font-size:9.5px; color:var(--t2);">Pipeline Model</label>
+                    <label style="font-size:11px; color:var(--t2);">Pipeline Model</label>
                     <select class="form-select-sm" id="lt-model-select">
                       <option value="musetalk" selected>MuseTalk v1.5 Neural</option>
                     </select>
                   </div>
                   <div class="form-group" style="flex:1;">
-                    <label style="font-size:9.5px; color:var(--t2);">Avatar ID</label>
+                    <label style="font-size:11px; color:var(--t2);">Avatar ID</label>
                     <input type="text" class="form-input-sm" id="lt-avatar-id-input" value="avatar_main" placeholder="avatar_id" />
                   </div>
                 </div>
 
                 <div class="form-row" style="margin-bottom:8px; gap:8px;">
                   <div class="form-group" style="flex:1;">
-                    <label style="font-size:9.5px; color:var(--t2);">BBox Shift</label>
+                    <label style="font-size:11px; color:var(--t2);">BBox Shift</label>
                     <input type="number" class="form-input-sm" id="lt-bbox-shift-input" value="0" min="-40" max="40" />
                   </div>
                   <div class="form-group" style="flex:1;">
-                    <label style="font-size:9.5px; color:var(--t2);">Extra Margin</label>
+                    <label style="font-size:11px; color:var(--t2);">Extra Margin</label>
                     <input type="number" class="form-input-sm" id="lt-extra-margin-input" value="10" min="0" max="80" />
                   </div>
                   <div class="form-group" style="flex:1.5;">
-                    <label style="font-size:9.5px; color:var(--t2);">Avatar đã tạo</label>
+                    <label style="font-size:11px; color:var(--t2);">Existing avatar</label>
                     <select class="form-select-sm" id="lt-existing-avatar-select">
                       <option value="musetalk_avatar1">musetalk_avatar1</option>
                     </select>
                   </div>
-                  <button type="button" class="btn-primary-sm" id="btn-use-existing-avatar" style="align-self:flex-end; white-space:nowrap;">Dùng Avatar</button>
+                  <button type="button" class="btn-primary-sm" id="btn-use-existing-avatar" style="align-self:flex-end; white-space:nowrap;">Use avatar</button>
+                </div>
+
+                <div class="avatar-pool-card">
+                  <div class="avatar-pool-head">
+                    <div><strong>Live session avatars</strong><small>Select multiple avatars for rotating LipSync.</small></div>
+                    <label class="avatar-random-toggle"><input type="checkbox" id="lt-random-avatar-toggle" /> Random selection</label>
+                  </div>
+                  <div class="avatar-pool-list" id="lt-avatar-pool-list">
+                    <span class="avatar-pool-empty">No trained avatars yet.</span>
+                  </div>
+                  <div class="avatar-pool-footer"><span id="lt-avatar-pool-count">0 avatars selected</span><button type="button" class="btn-secondary-sm" id="btn-save-avatar-pool">Save session</button></div>
                 </div>
 
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                  <span style="font-size:10px; font-weight:700; color:var(--t1);">Tiến trình:</span>
-                  <span style="font-size:10px; font-weight:700; color:#38bdf8;" id="lbl-training-pct">0%</span>
+                  <span style="font-size:11px; font-weight:700; color:var(--t1);">Progress:</span>
+                  <span style="font-size:11px; font-weight:700; color:#38bdf8;" id="lbl-training-pct">0%</span>
                 </div>
 
                 <!-- 4-Stage Progress Bar -->
@@ -656,42 +816,42 @@
                 <!-- 4 Stage Indicators -->
                 <div class="lt-stages-list">
                   <div class="lt-stage-item" id="stage-item-1">
-                    <span class="stage-dot"></span> 1. Trích xuất khung hình (25%)
+                    <span class="stage-dot"></span> 1. Extract frames (25%)
                   </div>
                   <div class="lt-stage-item" id="stage-item-2">
-                    <span class="stage-dot"></span> 2. Phát hiện khuôn mặt & BBox (50%)
+                    <span class="stage-dot"></span> 2. Detect face and BBox (50%)
                   </div>
                   <div class="lt-stage-item" id="stage-item-3">
-                    <span class="stage-dot"></span> 3. Sinh VAE Latent & Face Mask (75%)
+                    <span class="stage-dot"></span> 3. Generate VAE latent and face mask (75%)
                   </div>
                   <div class="lt-stage-item" id="stage-item-4">
-                    <span class="stage-dot"></span> 4. Đóng gói Avatar (100%)
+                    <span class="stage-dot"></span> 4. Build avatar package (100%)
                   </div>
                 </div>
 
                 <!-- Training Button -->
                 <div style="margin-top:10px; display:flex; gap:8px;">
                   <button type="button" class="btn-primary" id="btn-start-training-video" style="flex:1; background:linear-gradient(135deg, #2563eb, #7c3aed); font-weight:700; font-size:12px; padding:9px 16px;">
-                    ⚡ Tạo Avatar Neural trên LiveTalking
+                    ⚡ Create neural avatar
                   </button>
                 </div>
 
                 <!-- Live Status Indicator -->
-                <div style="margin-top:8px; padding:7px 10px; background:rgba(6, 78, 59, 0.45); border:1px solid rgba(52, 211, 153, 0.4); border-radius:5px; display:flex; align-items:center; gap:7px; font-size:10.5px; color:#6ee7b7;">
+                <div style="margin-top:8px; padding:7px 10px; background:rgba(6, 78, 59, 0.45); border:1px solid rgba(52, 211, 153, 0.4); border-radius:5px; display:flex; align-items:center; gap:7px; font-size:11px; color:#6ee7b7;">
                   <span style="font-size:12px;">🔒</span>
                   <div>
-                    <b>LiveTalking Pipeline: Sẵn sàng</b>
-                    <div style="font-size:9.5px; opacity:0.85; margin-top:1px;">Tự động đồng bộ góc nghiêng và cử động môi theo giọng nói.</div>
+                    <b>LiveTalking pipeline: Ready</b>
+                    <div style="font-size:11px; opacity:0.85; margin-top:1px;">Synchronizes head angle and lip movement with speech.</div>
                   </div>
                 </div>
 
                 <!-- Visual Region Control Panel -->
                 <div class="lt-region-control-card" id="lt-region-control-card">
                   <div class="lt-region-card-hdr">
-                    <span style="font-size:10.5px; font-weight:700; color:#38bdf8;">🎯 Tinh Chỉnh Vị Trí:</span>
+                    <span style="font-size:11px; font-weight:700; color:#38bdf8;">🎯 Region controls:</span>
                     <div class="lt-region-tabs">
-                      <button type="button" class="btn-tab-pill active" id="tab-ctrl-mouth" data-target="mouth">👄 Vùng Miệng</button>
-                      <button type="button" class="btn-tab-pill" id="tab-ctrl-face" data-target="face">👤 Khuôn Mặt</button>
+                      <button type="button" class="btn-tab-pill active" id="tab-ctrl-mouth" data-target="mouth">👄 Mouth</button>
+                      <button type="button" class="btn-tab-pill" id="tab-ctrl-face" data-target="face">👤 Face</button>
                     </div>
                   </div>
 
@@ -699,28 +859,28 @@
                   <div class="lt-region-tab-pane" id="pane-ctrl-mouth">
                     <div class="form-row" style="margin-bottom:4px; gap:8px;">
                       <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:9px;">
-                          <span>Tâm X: <b id="val-ctrl-mouth-x" style="color:#34d399;">51%</b></span>
+                        <label style="display:flex; justify-content:space-between; font-size:11px;">
+                          <span>Center X: <b id="val-ctrl-mouth-x" style="color:#34d399;">51%</b></span>
                         </label>
                         <input type="range" id="slider-ctrl-mouth-x" min="10" max="90" value="51" />
                       </div>
                       <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:9px;">
-                          <span>Tâm Y: <b id="val-ctrl-mouth-y" style="color:#34d399;">32%</b></span>
+                        <label style="display:flex; justify-content:space-between; font-size:11px;">
+                          <span>Center Y: <b id="val-ctrl-mouth-y" style="color:#34d399;">32%</b></span>
                         </label>
                         <input type="range" id="slider-ctrl-mouth-y" min="10" max="85" value="32" />
                       </div>
                     </div>
                     <div class="form-row" style="margin-bottom:6px; gap:8px;">
                       <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:9px;">
-                          <span>Rộng: <b id="val-ctrl-mouth-w" style="color:#34d399;">12%</b></span>
+                        <label style="display:flex; justify-content:space-between; font-size:11px;">
+                          <span>Width: <b id="val-ctrl-mouth-w" style="color:#34d399;">12%</b></span>
                         </label>
                         <input type="range" id="slider-ctrl-mouth-w" min="5" max="30" value="12" />
                       </div>
                       <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:9px;">
-                          <span>Cao: <b id="val-ctrl-mouth-h" style="color:#34d399;">7%</b></span>
+                        <label style="display:flex; justify-content:space-between; font-size:11px;">
+                          <span>Height: <b id="val-ctrl-mouth-h" style="color:#34d399;">7%</b></span>
                         </label>
                         <input type="range" id="slider-ctrl-mouth-h" min="3" max="20" value="7" />
                       </div>
@@ -731,28 +891,28 @@
                   <div class="lt-region-tab-pane" id="pane-ctrl-face" style="display:none;">
                     <div class="form-row" style="margin-bottom:4px; gap:8px;">
                       <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:9px;">
-                          <span>Tâm Mặt X: <b id="val-ctrl-face-x" style="color:#38bdf8;">50%</b></span>
+                        <label style="display:flex; justify-content:space-between; font-size:11px;">
+                          <span>Face center X: <b id="val-ctrl-face-x" style="color:#38bdf8;">50%</b></span>
                         </label>
                         <input type="range" id="slider-ctrl-face-x" min="15" max="85" value="50" />
                       </div>
                       <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:9px;">
-                          <span>Tâm Mặt Y: <b id="val-ctrl-face-y" style="color:#38bdf8;">30%</b></span>
+                        <label style="display:flex; justify-content:space-between; font-size:11px;">
+                          <span>Face center Y: <b id="val-ctrl-face-y" style="color:#38bdf8;">30%</b></span>
                         </label>
                         <input type="range" id="slider-ctrl-face-y" min="10" max="70" value="30" />
                       </div>
                     </div>
                     <div class="form-row" style="margin-bottom:6px; gap:8px;">
                       <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:9px;">
-                          <span>Rộng Mặt: <b id="val-ctrl-face-w" style="color:#38bdf8;">30%</b></span>
+                        <label style="display:flex; justify-content:space-between; font-size:11px;">
+                          <span>Face width: <b id="val-ctrl-face-w" style="color:#38bdf8;">30%</b></span>
                         </label>
                         <input type="range" id="slider-ctrl-face-w" min="15" max="60" value="30" />
                       </div>
                       <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:9px;">
-                          <span>Cao Mặt: <b id="val-ctrl-face-h" style="color:#38bdf8;">34%</b></span>
+                        <label style="display:flex; justify-content:space-between; font-size:11px;">
+                          <span>Face height: <b id="val-ctrl-face-h" style="color:#38bdf8;">34%</b></span>
                         </label>
                         <input type="range" id="slider-ctrl-face-h" min="15" max="60" value="34" />
                       </div>
@@ -761,11 +921,11 @@
 
                   <!-- Quick Action Buttons -->
                   <div style="display:flex; gap:6px; margin-top:4px; align-items:center;">
-                    <button type="button" class="btn-xs-link" id="btn-quick-auto-detect" style="color:#38bdf8; background:rgba(56,189,248,0.1); padding:4px 8px; border-radius:4px; font-size:9.5px; white-space:nowrap;">
-                      🎯 Tự Động Quét Lại
+                    <button type="button" class="btn-xs-link" id="btn-quick-auto-detect" style="color:#38bdf8; background:rgba(56,189,248,0.1); padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap;">
+                      🎯 Auto detect
                     </button>
-                    <button type="button" class="btn-xs-link" id="btn-quick-reset-default" style="color:var(--t3); background:rgba(255,255,255,0.05); padding:4px 8px; border-radius:4px; font-size:9.5px; white-space:nowrap;">
-                      🔄 Reset Chuẩn 16:9
+                    <button type="button" class="btn-xs-link" id="btn-quick-reset-default" style="color:var(--t3); background:rgba(255,255,255,0.05); padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap;">
+                      🔄 Reset 16:9
                     </button>
                   </div>
                 </div>
@@ -775,35 +935,35 @@
               <!-- Terminal Log -->
               <div class="lt-terminal-box">
                 <div class="lt-terminal-hdr">
-                  <span>💻 Nhật Ký Hệ Thống</span>
-                  <button type="button" class="btn-xs-link" id="btn-clear-train-logs" style="color:var(--t3); font-size:9px;">Xóa log</button>
+                  <span>💻 System log</span>
+                  <button type="button" class="btn-xs-link" id="btn-clear-train-logs" style="color:var(--t3); font-size:11px;">Clear log</button>
                 </div>
                 <div class="lt-terminal-logs" id="lt-terminal-logs-body">
-                  <div class="log-line info">[System] Sẵn sàng nạp video avatar...</div>
+                  <div class="log-line info">[System] Ready for avatar media...</div>
                 </div>
               </div>
 
             </div>
           </div>
 
-          <!-- ════ CỘT 2: BƯỚC 2 - THỬ GIỌNG & LIPSYNC ════ -->
+          <!-- STEP 2: TEST VOICE AND LIPSYNC -->
           <div class="lt-studio-col lt-col-step2 locked" id="lt-col-step2">
             
             <!-- Glassmorphic Lock Overlay -->
             <div class="lt-lock-overlay" id="lt-step2-lock-overlay">
               <div class="lt-lock-content">
                 <div style="font-size:32px; margin-bottom:6px;">🔒</div>
-                <div style="font-size:13px; font-weight:700; color:#fff;">Bước 2 Chưa Mở Khóa</div>
-                <div style="font-size:10.5px; color:var(--t2); margin-top:4px; max-width:280px; line-height:1.4;">
-                  Vui lòng hoàn tất <b>Bước 1: Huấn Luyện Video</b> ở cột bên trái để mở khóa thử giọng & LipSync!
+                <div style="font-size:13px; font-weight:700; color:#fff;">Step 2 is locked</div>
+                <div style="font-size:11px; color:var(--t2); margin-top:4px; max-width:280px; line-height:1.4;">
+                  Complete <b>Step 1: Create avatar</b> to unlock voice and LipSync testing.
                 </div>
               </div>
             </div>
 
             <div class="lt-section-card">
               <div class="lt-card-hdr">
-                <span class="lt-card-title">🎙️ BƯỚC 2: Thử Giọng & LipSync</span>
-                <span class="badge-status-pill ok" id="badge-stream-state">Sẵn Sàng</span>
+                <span class="lt-card-title">🎙️ Voice and LipSync</span>
+                <span class="badge-status-pill ok" id="badge-stream-state">Ready</span>
               </div>
 
               <!-- Live Talking Stream Screen -->
@@ -815,8 +975,8 @@
 
               <!-- Audio VU Meter Bar -->
               <div style="margin:8px 0 6px;">
-                <div style="display:flex; justify-content:space-between; font-size:9.5px; color:var(--t2); margin-bottom:2px;">
-                  <span>Âm lượng VU Meter:</span>
+                <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--t2); margin-bottom:2px;">
+                  <span>VU level:</span>
                   <span id="lbl-vu-val" style="color:#38bdf8; font-weight:700;">0 dB</span>
                 </div>
                 <div class="lt-vu-meter-track">
@@ -828,16 +988,16 @@
               <div class="lt-voice-config-box">
                 <div class="form-row" style="margin-bottom:6px;">
                   <div class="form-group" style="flex:1.2;">
-                    <label>Dịch Vụ Giọng Nói</label>
+                    <label>Voice provider</label>
                     <select class="form-select-sm" id="lt-voice-provider-select">
-                      <option value="webspeech" selected>Web Speech API (Trình duyệt - 0ms Delay)</option>
-                      <option value="elevenlabs">ElevenLabs Turbo v2.5 (Tiếng Việt · Tự Nhiên)</option>
+                      <option value="webspeech" selected>Web Speech API (Browser · no network delay)</option>
+                      <option value="elevenlabs">ElevenLabs Turbo v2.5 (Multilingual · Natural)</option>
                       <option value="openai">OpenAI TTS (tts-1-hd)</option>
                     </select>
                   </div>
                   <div class="form-group" style="flex:1;">
                     <label style="display:flex; justify-content:space-between;">
-                      <span>Tốc Độ: <b id="val-lt-voice-speed" style="color:#38bdf8;">1.05x</b></span>
+                      <span>Speed: <b id="val-lt-voice-speed" style="color:#38bdf8;">1.05x</b></span>
                     </label>
                     <input type="range" id="lt-voice-speed-slider" min="80" max="150" value="105" />
                   </div>
@@ -846,9 +1006,9 @@
                 <!-- 1. Web Speech Voices Group (DEFAULT) -->
                 <div id="lt-group-webspeech" style="display:flex; flex-direction:column; gap:6px; margin-bottom:6px;">
                   <div class="form-group">
-                    <label>Giọng Đọc Trình Duyệt</label>
+                    <label>Browser voice</label>
                     <select class="form-select-sm" id="lt-webspeech-voice-select">
-                      <option value="">Tự động nhận diện Tiếng Việt...</option>
+                      <option value="">Auto-select a matching voice...</option>
                     </select>
                   </div>
                 </div>
@@ -857,56 +1017,50 @@
                 <div id="lt-group-elevenlabs" style="display:none; flex-direction:column; gap:6px; margin-bottom:6px;">
                   <div class="form-row">
                     <div class="form-group" style="flex:1.2;">
-                      <label>Nhân Vật Giọng Đọc</label>
+                      <label>Voice preset</label>
                       <select class="form-select-sm" id="lt-eleven-voice-select">
-                        <option value="EXAVITQu4vr4xnSDxMaL" selected>Bella (Nữ tính, truyền cảm · VI)</option>
-                        <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Điềm đạm, ấm áp)</option>
-                        <option value="ThT5KcBeYPX3keUQqHPh">Dorothy (Năng động, vui tươi)</option>
-                        <option value="pNInz6obpgDQGcFmaJgB">Adam (Nam trầm, chuyên nghiệp)</option>
-                        <option value="ErXwobaYiN019PkySvjV">Antoni (Nam trẻ trung)</option>
-                        <option value="VR6AewLTigWG4xSOukaG">Arnold (Nam hào hứng)</option>
-                        <option value="custom">-- Nhập Voice ID tùy chỉnh --</option>
+                        <option value="EXAVITQu4vr4xnSDxMaL" selected>Bella (Warm and expressive)</option>
+                        <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Calm and warm)</option>
+                        <option value="ThT5KcBeYPX3keUQqHPh">Dorothy (Energetic and bright)</option>
+                        <option value="pNInz6obpgDQGcFmaJgB">Adam (Deep and professional)</option>
+                        <option value="ErXwobaYiN019PkySvjV">Antoni (Young male)</option>
+                        <option value="VR6AewLTigWG4xSOukaG">Arnold (Excited male)</option>
+                        <option value="custom">-- Custom Voice ID --</option>
                       </select>
                     </div>
                     <div class="form-group" style="flex:0.8;">
                       <label>Model Engine</label>
                       <select class="form-select-sm" id="lt-eleven-model-select">
-                        <option value="eleven_turbo_v2_5" selected>Turbo v2.5 (Nhanh)</option>
+                        <option value="eleven_turbo_v2_5" selected>Turbo v2.5 (Fast)</option>
                         <option value="eleven_multilingual_v2">Multilingual v2</option>
                         <option value="eleven_flash_v2_5">Flash v2.5</option>
                       </select>
                     </div>
                   </div>
                   <div class="form-group" id="lt-custom-voice-id-wrap" style="display:none;">
-                    <label>Voice ID tùy chỉnh</label>
-                    <input type="text" class="form-input" id="lt-eleven-custom-voice-id" placeholder="Paste Voice ID vào đây..." style="font-size:11px;" />
+                    <label>Custom Voice ID</label>
+                    <input type="text" class="form-input" id="lt-eleven-custom-voice-id" placeholder="Paste Voice ID..." style="font-size:11px;" />
                   </div>
-                  <div class="form-group">
-                    <label style="display:flex; justify-content:space-between;">
-                      <span>ElevenLabs API Key:</span>
-                      <button type="button" class="btn-xs-link" id="lt-btn-toggle-apikey" style="color:var(--t3); font-size:9.5px;">👁️ Hiện Key</button>
-                    </label>
-                    <input type="password" class="form-input" id="lt-eleven-apikey-input" placeholder="sk_..." style="font-size:11px;" />
-                  </div>
+                  <div class="settings-note">ElevenLabs credentials are managed by the runtime server.</div>
                 </div>
 
                 <!-- 3. OpenAI TTS Group -->
                 <div id="lt-group-openai" style="display:none; flex-direction:column; gap:6px; margin-bottom:6px;">
                   <div class="form-row">
                     <div class="form-group" style="flex:1;">
-                      <label>Giọng OpenAI</label>
+                      <label>OpenAI voice</label>
                       <select class="form-select-sm" id="lt-openai-voice-select">
-                        <option value="nova" selected>Nova (Nữ ấm áp)</option>
-                        <option value="shimmer">Shimmer (Nữ trong trẻo)</option>
-                        <option value="alloy">Alloy (Cân bằng)</option>
-                        <option value="echo">Echo (Nam rõ ràng)</option>
+                        <option value="nova" selected>Nova (Warm female)</option>
+                        <option value="shimmer">Shimmer (Clear female)</option>
+                        <option value="alloy">Alloy (Balanced)</option>
+                        <option value="echo">Echo (Clear male)</option>
                         <option value="fable">Fable (Anh-Anh)</option>
-                        <option value="onyx">Onyx (Nam trầm)</option>
+                        <option value="onyx">Onyx (Deep male)</option>
                       </select>
                     </div>
                     <div class="form-group" style="flex:1;">
-                      <label>OpenAI API Key</label>
-                      <input type="password" class="form-input" id="lt-openai-apikey-input" placeholder="sk-proj-..." style="font-size:11px;" />
+                      <label>Provider credentials</label>
+                      <div class="settings-note">Managed by the runtime server.</div>
                     </div>
                   </div>
                 </div>
@@ -914,12 +1068,12 @@
                 <!-- Test LipSync Speech Box -->
                 <div class="form-group">
                   <label style="display:flex; justify-content:space-between;">
-                    <span>Nội dung thử:</span>
-                    <button type="button" class="btn-xs-link" id="btn-reset-sample-text" style="color:var(--accent); font-size:9px;">↺ Câu mẫu</button>
+                    <span>Test line:</span>
+                    <button type="button" class="btn-xs-link" id="btn-reset-sample-text" style="color:var(--accent); font-size:11px;">↺ Sample</button>
                   </label>
                   <div class="input-actions-wrap">
-                    <input type="text" class="form-input" id="lt-test-speech-input" value="Chào cả nhà, mình là AI Idol Livestream!" style="font-size:11px;" />
-                    <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-test-speech" title="Xóa">✖</button>
+                    <input type="text" class="form-input" id="lt-test-speech-input" value="Chào cả nhà, Mimi đã sẵn sàng livestream rồi nè!" style="font-size:11px;" />
+                    <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-test-speech" title="Clear">✖</button>
                   </div>
                 </div>
 
@@ -927,14 +1081,14 @@
                 <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
                   <div style="display:flex; gap:8px;">
                     <button type="button" class="btn-primary" id="btn-test-lipsync-speak" style="flex:1; background:#3b82f6; font-weight:700; font-size:11.5px; padding:8px 14px;">
-                      🗣️ Thử Nói & LipSync
+                      🗣️ Test voice and LipSync
                     </button>
-                    <button type="button" class="btn-secondary" id="btn-stop-lipsync-speak" style="padding:8px 12px; font-size:11.5px;" title="Ngắt giọng nói">
-                      ⏹ Dừng
+                    <button type="button" class="btn-secondary" id="btn-stop-lipsync-speak" style="padding:8px 12px; font-size:11.5px;" title="Stop voice">
+                      ⏹ Stop
                     </button>
                   </div>
-                  <button type="button" class="btn-secondary" id="btn-test-audio-wav" style="font-size:11px; padding:6px 12px; color:#34d399; border-color:rgba(52,211,153,0.4);" title="Test âm thanh WAV trực tiếp">
-                    🎵 Thử File WAV
+                  <button type="button" class="btn-secondary" id="btn-test-audio-wav" style="font-size:11px; padding:6px 12px; color:#34d399; border-color:rgba(52,211,153,0.4);" title="Test WAV audio">
+                    🎵 Test WAV
                   </button>
                 </div>
               </div>
@@ -948,13 +1102,13 @@
 
       <!-- Studio Footer -->
       <div class="modal-ftr" style="border-top:1px solid rgba(255,255,255,0.08); padding:12px 20px; display:flex; justify-content:space-between; align-items:center;">
-        <button type="button" class="btn-danger-sm" id="btn-delete-full-avatar" style="background:#ef4444; color:#fff; border:none; padding:7px 14px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;" title="Xóa Avatar này và đặt lại về mặc định">
-          🗑️ Đặt Lại Avatar
+        <button type="button" class="btn-danger-sm" id="btn-delete-full-avatar" style="background:#ef4444; color:#fff; border:none; padding:7px 14px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;" title="Delete this avatar and restore defaults">
+          🗑️ Reset avatar
         </button>
         <div style="display:flex; gap:10px;">
-          <button class="btn-secondary" id="cancel-modal-avatar">Đóng</button>
+          <button class="btn-secondary" id="cancel-modal-avatar">Close</button>
           <button class="btn-primary" id="save-modal-avatar" style="background:linear-gradient(135deg, #10b981, #059669); font-weight:700;">
-            💾 Áp Dụng Lên Stream
+            💾 Apply
           </button>
         </div>
       </div>
@@ -965,46 +1119,40 @@
   <div class="modal-backdrop" id="modal-voice" style="display:none;">
     <div class="modal-card" style="max-width: 580px;">
       <div class="modal-hdr">
-        <h3>🎙️ Cài Đặt Giọng Nói AI (TTS) & Persona</h3>
+        <h3>🎙️ Voice and persona</h3>
         <button class="modal-close" id="close-modal-voice">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label>Dịch vụ Voice TTS (Text-to-Speech)</label>
+          <label>Voice provider</label>
           <select class="form-select" id="cfg-voice-provider">
-            <option value="webspeech">Trình duyệt Web Speech API (Miễn phí 100%, 0ms latency)</option>
-            <option value="elevenlabs" selected>ElevenLabs Multilingual (Cảm xúc tự nhiên, siêu thực)</option>
+            <option value="webspeech">Browser Web Speech API</option>
+            <option value="elevenlabs" selected>ElevenLabs Multilingual</option>
             <option value="openai">OpenAI TTS (tts-1 / tts-1-hd)</option>
             <option value="custom">Custom HTTP Voice API (FPT AI / Zalo / XTTS)</option>
           </select>
         </div>
 
         <div class="form-group" id="group-voice-apikey">
-          <label style="display:flex; justify-content:space-between;">
-            <span>API Key (xi-api-key / OpenAI Key)</span>
-            <button type="button" class="btn-xs-link" id="btn-clear-voice-key" style="color:#f87171;">✖ Xóa Key</button>
-          </label>
-          <div class="input-actions-wrap">
-            <input type="password" class="form-input" id="cfg-voice-apikey" placeholder="Nhập API Key ElevenLabs (xi-api-key)..." />
-            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-apikey-input" title="Xóa">✖</button>
-          </div>
+          <label>Provider credentials</label>
+          <div class="settings-note" id="voice-provider-secret-status">Set on the runtime server. Keys never enter the browser.</div>
         </div>
 
         <div class="form-row">
           <div class="form-group" style="flex:1;">
             <label style="display:flex; justify-content:space-between;">
-              <span>Giọng đọc (Voice ID)</span>
+              <span>Voice ID</span>
               <button type="button" class="btn-xs-link" id="btn-reset-voice-id" style="color:#60a5fa;">↺ Rachel</button>
             </label>
             <div class="input-actions-wrap">
-              <input type="text" class="form-input" id="cfg-voice-id" value="x4KAhuXs2G8TfK9Zr7Q4" placeholder="rachel, bella, dorothy hoặc Voice ID" />
-              <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-voice-id" title="Xóa">✖</button>
-              <button type="button" class="btn-input-action btn-reset-text" id="btn-rst-voice-id" title="Đặt lại rachel">↺</button>
+              <input type="text" class="form-input" id="cfg-voice-id" value="x4KAhuXs2G8TfK9Zr7Q4" placeholder="Preset name or Voice ID" />
+              <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-voice-id" title="Clear">✖</button>
+              <button type="button" class="btn-input-action btn-reset-text" id="btn-rst-voice-id" title="Reset voice ID">↺</button>
             </div>
           </div>
           <div class="form-group" style="flex:1;">
             <label style="display:flex; justify-content:space-between;">
-              <span>Tốc độ nói: <b id="val-voice-speed">1.0x</b></span>
+              <span>Speech rate: <b id="val-voice-speed">1.0x</b></span>
               <button type="button" class="btn-xs-link" id="btn-rst-voice-speed" style="color:#60a5fa;">↺ 1.0x</button>
             </label>
             <input type="range" id="cfg-voice-speed" min="0.8" max="1.5" step="0.05" value="1.0" />
@@ -1014,8 +1162,8 @@
         <div class="form-group" id="group-voice-endpoint" style="display:none;">
           <label>Custom Endpoint URL</label>
           <div class="input-actions-wrap">
-            <input type="text" class="form-input" id="cfg-voice-endpoint" placeholder="http://localhost:5000/tts hoặc FPT AI URL" />
-            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-voice-endpoint" title="Xóa">✖</button>
+            <input type="text" class="form-input" id="cfg-voice-endpoint" placeholder="Custom TTS endpoint" />
+            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-voice-endpoint" title="Clear">✖</button>
           </div>
         </div>
 
@@ -1023,45 +1171,45 @@
 
         <div class="form-group">
           <label style="display:flex; justify-content:space-between;">
-            <span>Tên AI Idol</span>
+            <span>AI host name</span>
             <button type="button" class="btn-xs-link" id="btn-rst-persona-name" style="color:#60a5fa;">↺ Mimi</button>
           </label>
           <div class="input-actions-wrap">
             <input type="text" class="form-input" id="cfg-persona-name" value="Mimi" />
-            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-persona-name" title="Xóa">✖</button>
-            <button type="button" class="btn-input-action btn-reset-text" id="btn-rst-persona-name-btn" title="Đặt lại Mimi">↺</button>
+            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-persona-name" title="Clear">✖</button>
+            <button type="button" class="btn-input-action btn-reset-text" id="btn-rst-persona-name-btn" title="Reset name">↺</button>
           </div>
         </div>
 
         <div class="form-group">
           <label style="display:flex; justify-content:space-between;">
-            <span>Tính cách & System Prompt cho AI</span>
-            <button type="button" class="btn-xs-link" id="btn-rst-persona-prompt" style="color:#60a5fa;">↺ Mặc định</button>
+            <span>Persona and system prompt</span>
+            <button type="button" class="btn-xs-link" id="btn-rst-persona-prompt" style="color:#60a5fa;">↺ Default</button>
           </label>
           <div class="input-actions-wrap">
-            <textarea class="form-textarea" id="cfg-persona-prompt" rows="3" placeholder="Bạn là Mimi, một AI Idol streamer người Việt Nam cực kỳ vui tính, năng động và lôi cuốn...">Bạn là Mimi, một AI Idol streamer người Việt Nam cực kỳ vui tính, năng động và lôi cuốn. Bạn luôn trả lời ngắn gọn (1-2 câu), dùng từ ngữ tự nhiên và thân thiện.</textarea>
-            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-persona-prompt" style="top:8px;" title="Xóa nội dung prompt">✖</button>
+            <textarea class="form-textarea" id="cfg-persona-prompt" rows="3" placeholder="Describe the host persona and response style...">Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu.</textarea>
+            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-persona-prompt" style="top:8px;" title="Clear prompt">✖</button>
           </div>
         </div>
 
         <div class="form-group">
           <label style="display:flex; justify-content:space-between;">
-            <span>Thử nghiệm giọng nói trực tiếp</span>
-            <button type="button" class="btn-xs-link" id="btn-rst-test-voice-text" style="color:#60a5fa;">↺ Câu mẫu</button>
+            <span>Voice preview</span>
+            <button type="button" class="btn-xs-link" id="btn-rst-test-voice-text" style="color:#60a5fa;">↺ Sample</button>
           </label>
           <div style="display:flex; gap:6px;">
             <div class="input-actions-wrap" style="flex:1;">
               <input type="text" class="form-input" id="cfg-test-voice-text" value="Chào bạn nha! Cảm ơn bạn đã xem livestream của Mimi!" />
-              <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-test-voice-text" title="Xóa">✖</button>
+              <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-test-voice-text" title="Clear">✖</button>
             </div>
-            <button class="btn-primary" id="btn-test-voice-speak" style="white-space:nowrap; padding:6px 14px;">▶ Nghe thử</button>
+            <button class="btn-primary" id="btn-test-voice-speak" style="white-space:nowrap; padding:6px 14px;">▶ Preview</button>
           </div>
         </div>
 
       </div>
       <div class="modal-ftr">
-        <button class="btn-secondary" id="cancel-modal-voice">Đóng</button>
-        <button class="btn-primary" id="save-modal-voice">💾 Lưu Cài Đặt</button>
+        <button class="btn-secondary" id="cancel-modal-voice">Close</button>
+        <button class="btn-primary" id="save-modal-voice">💾 Save settings</button>
       </div>
     </div>
   </div>
@@ -1070,7 +1218,7 @@
   <div class="modal-backdrop" id="modal-obs" style="display:none;">
     <div class="modal-card">
       <div class="modal-hdr">
-        <h3>🎥 Cài Đặt OBS Studio (WebSocket v5)</h3>
+        <h3>🎥 OBS Studio connection</h3>
         <button class="modal-close" id="close-modal-obs">&times;</button>
       </div>
       <div class="modal-body">
@@ -1086,24 +1234,24 @@
         </div>
 
         <div class="form-group">
-          <label>Mật khẩu OBS WebSocket (Nếu có)</label>
-          <input type="password" class="form-input" id="cfg-obs-pass" placeholder="Nhập mật khẩu trong OBS Tools > WebSocket Server" />
+          <label>OBS credentials</label>
+          <div class="settings-note">The WebSocket password is managed by the runtime server.</div>
         </div>
 
         <div class="form-group">
           <label class="mixer-auto-toggle">
             <input type="checkbox" id="cfg-obs-autoconnect" checked />
-            <span>Tự động kết nối lại khi OBS khởi động</span>
+            <span>Reconnect automatically when OBS starts</span>
           </label>
         </div>
 
         <div class="obs-status-banner" id="obs-status-banner" style="margin-top:12px; padding:10px; border-radius:6px; background:rgba(48,209,88,0.1); border:1px solid rgba(48,209,88,0.3); font-size:12px; color:var(--green);">
-          ● Sẵn sàng kết nối OBS WebSocket v5 (Scenes: Main Scene, Media: IdolVideo)
+          ● Ready to connect to OBS WebSocket v5 (Scenes: Main Scene, Media: IdolVideo)
         </div>
       </div>
       <div class="modal-ftr">
-        <button class="btn-secondary" id="cancel-modal-obs">Đóng</button>
-        <button class="btn-primary" id="save-modal-obs">Kết Nối OBS</button>
+        <button class="btn-secondary" id="cancel-modal-obs">Close</button>
+        <button class="btn-primary" id="save-modal-obs">Connect OBS</button>
       </div>
     </div>
   </div>
@@ -1112,17 +1260,17 @@
   <div class="modal-backdrop" id="modal-upload-clip" style="display:none;">
     <div class="modal-card">
       <div class="modal-hdr">
-        <h3 id="modal-upload-title">🎬 Tải Video Cho State</h3>
+        <h3 id="modal-upload-title">🎬 Upload state video</h3>
         <button class="modal-close" id="close-modal-upload">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label>1. Chọn File Video từ máy tính (.mp4, .webm, .mov):</label>
+          <label>1. Select a video file (.mp4, .webm, .mov):</label>
           <input type="file" id="state-upload-file-input" accept="video/*" multiple class="form-input" />
         </div>
 
         <div class="form-group">
-          <label>2. Chọn State Mục Tiêu:</label>
+          <label>2. Select target state:</label>
           <div class="state-checkbox-grid" id="upload-state-checkboxes">
             <div class="sc-group-title">Gameplay & Focus (Loop)</div>
             <div class="sc-check-row">
@@ -1130,12 +1278,12 @@
               <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="GAMEPLAY_FOCUS" /> <span>🎯 GAMEPLAY_FOCUS</span></label>
             </div>
 
-            <div class="sc-group-title">Talking & Chat (Trò chuyện / Trả lời bình luận - Lipsync)</div>
+            <div class="sc-group-title">Talking & Chat (Chat responses and LipSync)</div>
             <div class="sc-check-row">
-              <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="TALKING" /> <span>🗣️ TALKING (Khi trả lời chat & Wav2Lip lipsync)</span></label>
+              <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="TALKING" /> <span>🗣️ TALKING (Chat response and LipSync)</span></label>
             </div>
 
-            <div class="sc-group-title">Win & Reactions (Cảm xúc / Sự kiện)</div>
+            <div class="sc-group-title">Win & Reactions (Reactions and events)</div>
             <div class="sc-check-row">
               <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="JACKPOT" /> <span>💥 JACKPOT</span></label>
               <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="BIG_WIN" /> <span>🎉 BIG_WIN</span></label>
@@ -1145,7 +1293,7 @@
               <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="LOSE" /> <span>😢 LOSE</span></label>
             </div>
 
-            <div class="sc-group-title">Goals & CTA (Kêu gọi / Cảm ơn)</div>
+            <div class="sc-group-title">Goals & CTA (Calls to action and thanks)</div>
             <div class="sc-check-row">
               <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="INVITE_PLAY" /> <span>🕹️ INVITE_PLAY</span></label>
               <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="CTA" /> <span>📣 CTA</span></label>
@@ -1155,26 +1303,26 @@
         </div>
 
         <div class="form-group">
-          <label>3. Chế độ Phát Video (Play Mode)</label>
+          <label>3. Playback mode</label>
           <div class="loop-mode-toggle">
             <label class="loop-radio-label active" id="lbl-mode-loop">
               <input type="radio" name="uploadPlayMode" value="loop" checked style="accent-color:var(--green);" />
-              <span>🔄 Loop (Lặp lại)</span>
+              <span>🔄 Loop</span>
             </label>
             <label class="loop-radio-label" id="lbl-mode-once">
               <input type="radio" name="uploadPlayMode" value="once" style="accent-color:var(--accent);" />
-              <span>▶ 1-Time (1 Lần)</span>
+              <span>▶ Play once</span>
             </label>
             <label class="loop-radio-label" id="lbl-mode-off">
               <input type="radio" name="uploadPlayMode" value="off" style="accent-color:var(--red);" />
-              <span>⛔ OFF (Tắt trộn)</span>
+              <span>⛔ Off</span>
             </label>
           </div>
         </div>
       </div>
       <div class="modal-ftr">
-        <button class="btn-secondary" id="cancel-modal-upload">Hủy</button>
-        <button class="btn-primary" id="btn-confirm-upload">Thêm Video Vào Thư Viện</button>
+        <button class="btn-secondary" id="cancel-modal-upload">Cancel</button>
+        <button class="btn-primary" id="btn-confirm-upload">Add to library</button>
       </div>
     </div>
   </div>

@@ -58,6 +58,23 @@ def resolve_avatar_output(value):
     return str(candidate)
 
 
+def resolve_avatar_entry(avatar_id):
+    """Resolve one avatar and its symlink target without escaping allowed roots."""
+    safe_id = require_safe_id(avatar_id, "avatar_id")
+    native_root = Path("./data/avatars").resolve()
+    entry = native_root / safe_id
+    roots = _allowed_roots(
+        "LIVETALKING_ALLOWED_AVATAR_ROOTS",
+        [str(native_root)],
+    )
+    if not entry.exists() and not entry.is_symlink():
+        raise FileNotFoundError("avatar not found")
+    target = entry.resolve(strict=False)
+    if target in roots or not any(root in target.parents for root in roots):
+        raise ValueError("avatar path is outside the allowed avatar roots")
+    return entry, target
+
+
 def is_loopback_host(host: str):
     return host in ("127.0.0.1", "::1", "localhost")
 

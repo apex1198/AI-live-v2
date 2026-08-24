@@ -68,6 +68,10 @@ class BaseAvatar:
         self.sessionid = self.opt.sessionid
 
         self.speaking = False
+        self.pipeline_state = "IDLE"
+        self.pipeline_state_sequence = 0
+        self.pipeline_state_updated_at = time.time()
+        self.pipeline_state_details = {}
         self.recording = False
         self._record_video_pipe = None
         self._record_audio_pipe = None
@@ -126,6 +130,7 @@ class BaseAvatar:
     # 如果系统没有使用 pipeline，或者为了向后兼容原来的 ttsreal.py
     def put_msg_txt(self, msg, datainfo:dict={}):
         if hasattr(self, 'tts'):
+            self.set_pipeline_state("GENERATING", {"text": str(msg or "")[:1000]})
             self.tts.put_msg_txt(msg, datainfo)
     
     def put_audio_frame(self, audio_chunk:NDArray[np.float32], datainfo:dict={}): # 16khz 20ms pcm
@@ -133,6 +138,7 @@ class BaseAvatar:
             self.asr.put_audio_frame(audio_chunk, datainfo)
 
     def put_audio_file(self, filebyte, datainfo:dict={}): 
+        self.set_pipeline_state("GENERATING", {"source": "audio_upload"})
         input_stream = BytesIO(filebyte)
         stream = self.__create_bytes_stream(input_stream)
         streamlen = stream.shape[0]
@@ -188,12 +194,44 @@ class BaseAvatar:
         if hasattr(self, 'asr') and hasattr(self.asr, 'flush_talk'):
             self.asr.flush_talk()
         self.custom_audiotype = 0  
+        self.set_pipeline_state("IDLE", {"reason": "interrupted"})
 
     # def flush(self):
     #     self.flush_talk()
 
     def is_speaking(self) -> bool:
         return self.speaking
+
+    def set_pipeline_state(self, state: str, details:dict=None):
+        """Track the worker-owned speech lifecycle exposed to runtime clients."""
+        normalized = str(state or "IDLE").upper()
+        if normalized not in ("GENERATING", "SPEAKING", "IDLE", "ERROR"):
+            normalized = "ERROR"
+        next_details = details if isinstance(details, dict) else {}
+        if normalized == self.pipeline_state and next_details == self.pipeline_state_details:
+            return
+        self.pipeline_state = normalized
+        self.pipeline_state_details = next_details
+        self.pipeline_state_sequence += 1
+        self.pipeline_state_updated_at = time.time()
+        self.send_msg(json.dumps({
+            "type": "speech_state",
+            "sessionid": self.sessionid,
+            "state": self.pipeline_state,
+            "sequence": self.pipeline_state_sequence,
+            "updated_at": self.pipeline_state_updated_at,
+            "details": self.pipeline_state_details,
+        }))
+
+    def get_pipeline_status(self):
+        return {
+            "sessionid": self.sessionid,
+            "state": self.pipeline_state,
+            "speaking": bool(self.speaking),
+            "sequence": self.pipeline_state_sequence,
+            "updated_at": self.pipeline_state_updated_at,
+            "details": self.pipeline_state_details,
+        }
     
     def __loadcustom(self):
         if not hasattr(self.opt, 'customopt') or not self.opt.customopt:
@@ -226,6 +264,12 @@ class BaseAvatar:
     def notify(self, eventpoint:dict):
         if eventpoint and eventpoint.get('status'):
             logger.info("notify:%s", eventpoint)
+            status = str(eventpoint.get('status') or '').lower()
+            details = {"text": str(eventpoint.get('text') or '')[:1000]} if eventpoint.get('text') else {}
+            if status == 'start':
+                self.set_pipeline_state("SPEAKING", details)
+            elif status == 'end':
+                self.set_pipeline_state("IDLE", details)
             self.send_msg(json.dumps(eventpoint))
 
     def start_recording(self):
@@ -499,4 +543,3 @@ class BaseAvatar:
 
         process_quit_event.set()
         process_thread.join()
-

@@ -1044,6 +1044,10 @@ input[type="checkbox"], input[type="radio"] {
 .avatar-card-preview { position: relative; display: grid; place-items: center; height: 168px; color: #747575; background: linear-gradient(145deg,#292a2a,#181919); }
 .avatar-card-preview > .material-symbols-rounded { width: 64px; height: 64px; font-size: 56px !important; }
 .avatar-card-status { position: absolute; top: 12px; left: 12px; padding: 5px 8px; color: #7ef0ae; border-radius: 99px; background: rgba(10,60,34,.72); font-size: 11px; font-weight: 750; }
+.avatar-card-delete { position: absolute; top: 10px; right: 10px; display: grid; place-items: center; width: 34px; height: 34px; color: #b8b9b9; border: 0; border-radius: 9px; background: rgba(22,23,23,.82); cursor: pointer; }
+.avatar-card-delete:hover { color: #f4f4f4; background: #343535; }
+.avatar-card-delete:disabled { opacity: .45; cursor: wait; }
+.avatar-card-delete .material-symbols-rounded { width: 18px; height: 18px; font-size: 18px !important; }
 .avatar-card-body { padding: 16px; }
 .avatar-card-body h3 { overflow: hidden; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
 .avatar-card-body p { margin-top: 5px; color: var(--t3); font-size: 11px; }

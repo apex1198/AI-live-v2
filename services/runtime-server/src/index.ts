@@ -811,28 +811,7 @@ export class IdolRuntimeServer {
         });
       }
 
-      const waitStartedAt = Date.now();
-      let started = false;
-      while (runId === this._speechRun) {
-        const speaking = await this._liveTalkingProvider.isSessionSpeaking();
-        if (!started && speaking) {
-          started = true;
-          this._director.setSpeaking(true);
-          this._director.forceState('TALKING', 'LiveTalking WebRTC audio/video started');
-          await this._obsController.setSubtitles(command.text);
-          this._setSpeechRuntime({ state: 'SPEAKING' });
-        } else if (started && !speaking) {
-          this._director.setSpeaking(false);
-          await this._obsController.setSubtitles('');
-          this._director.forceState('GAMEPLAY_IDLE', 'LiveTalking speech completed');
-          this._setSpeechRuntime({ state: 'IDLE' });
-          return;
-        }
-        if (!started && Date.now() - waitStartedAt > 30_000) {
-          throw new Error('LiveTalking did not start speaking within 30 seconds');
-        }
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      }
+      await this._waitForLiveTalkingSpeech(runId, command);
     } catch (error) {
       if (runId !== this._speechRun) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -840,6 +819,78 @@ export class IdolRuntimeServer {
       await this._obsController.setSubtitles('');
       this._setSpeechRuntime({ state: 'ERROR', error: message });
       this._addLog('error', `Speech ${commandId} failed: ${message}`);
+    }
+  }
+
+  private async _waitForLiveTalkingSpeech(
+    runId: number,
+    command: z.infer<typeof SpeechCommandSchema>,
+  ): Promise<void> {
+    let started = false;
+    const markStarted = async (): Promise<void> => {
+      if (started) return;
+      started = true;
+      this._director.setSpeaking(true);
+      this._director.forceState('TALKING', 'LiveTalking WebRTC audio/video started');
+      await this._obsController.setSubtitles(command.text);
+      this._setSpeechRuntime({ state: 'SPEAKING' });
+    };
+    const markFinished = async (): Promise<void> => {
+      this._director.setSpeaking(false);
+      await this._obsController.setSubtitles('');
+      this._director.forceState('GAMEPLAY_IDLE', 'LiveTalking speech completed');
+      this._setSpeechRuntime({ state: 'IDLE' });
+    };
+
+    const streamController = new AbortController();
+    let streamStartTimedOut = false;
+    let startTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      streamStartTimedOut = true;
+      streamController.abort();
+    }, 30_000);
+    try {
+      for await (const status of this._liveTalkingProvider.watchSessionStatus(undefined, streamController.signal)) {
+        if (runId !== this._speechRun) {
+          streamController.abort();
+          return;
+        }
+        if (status.state === 'ERROR') {
+          throw new Error(String(status.details?.['error'] || 'LiveTalking worker reported a speech error'));
+        }
+        if (status.state === 'SPEAKING') {
+          if (startTimer) clearTimeout(startTimer);
+          startTimer = null;
+          await markStarted();
+        } else if (started && status.state === 'IDLE') {
+          await markFinished();
+          streamController.abort();
+          return;
+        }
+      }
+    } catch (error) {
+      if (runId !== this._speechRun) return;
+      if (streamStartTimedOut) {
+        throw new Error('LiveTalking did not start speaking within 30 seconds');
+      }
+      this._addLog('warn', `LiveTalking state stream unavailable; using status fallback (${error instanceof Error ? error.message : String(error)})`);
+    } finally {
+      if (startTimer) clearTimeout(startTimer);
+      streamController.abort();
+    }
+
+    const waitStartedAt = Date.now();
+    while (runId === this._speechRun) {
+      const speaking = await this._liveTalkingProvider.isSessionSpeaking();
+      if (speaking) {
+        await markStarted();
+      } else if (started) {
+        await markFinished();
+        return;
+      }
+      if (!started && Date.now() - waitStartedAt > 30_000) {
+        throw new Error('LiveTalking did not start speaking within 30 seconds');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
     }
   }
 
@@ -1355,6 +1406,28 @@ export class IdolRuntimeServer {
       return;
     }
 
+    const avatarLibraryMatch = pathname.match(/^\/api\/avatars\/library\/([a-zA-Z0-9_-]{1,80})$/);
+    if (avatarLibraryMatch && method === 'DELETE') {
+      const avatarId = avatarLibraryMatch[1]!;
+      this._liveTalkingProvider.deleteTrainedAvatar(avatarId).then(() => {
+        this._db.deleteAvatar(avatarId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, avatarId, deleted: true }));
+      }).catch((err: any) => {
+        const message = String(err?.message || err);
+        if (/not found/i.test(message)) {
+          this._db.deleteAvatar(avatarId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, avatarId, deleted: true, workerArtifactFound: false }));
+          return;
+        }
+        const status = /in use|still active/i.test(message) ? 409 : 503;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: message }));
+      });
+      return;
+    }
+
     if (pathname === '/api/avatars/session' && method === 'POST') {
       this._readJsonBody(req, (body) => {
         const input = this._parseBody(AvatarSessionSchema, body, res);
@@ -1532,11 +1605,6 @@ export class IdolRuntimeServer {
       this._readJsonBody(req, (body) => {
         const input = this._parseBody(SpeechCommandSchema, body, res);
         if (!input) return;
-        if (!this._liveTalkingProvider.sessionId) {
-          res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Connect a LiveTalking avatar before speaking' }));
-          return;
-        }
         const command = { ...input, commandId: input.commandId || `speech_${crypto.randomBytes(8).toString('hex')}` };
         void this._executeSpeechCommand(command);
         res.writeHead(202, { 'Content-Type': 'application/json' });
@@ -1584,11 +1652,6 @@ export class IdolRuntimeServer {
       this._readJsonBody(req, (body) => {
         const command = this._parseBody(SpeechCommandSchema, body, res);
         if (!command) return;
-        if (!this._liveTalkingProvider.sessionId) {
-          res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Connect a LiveTalking avatar before speaking' }));
-          return;
-        }
         const normalized = { ...command, commandId: command.commandId || `speech_${crypto.randomBytes(8).toString('hex')}` };
         void this._executeSpeechCommand(normalized);
         res.writeHead(202, { 'Content-Type': 'application/json' });

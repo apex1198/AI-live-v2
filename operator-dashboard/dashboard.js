@@ -46,31 +46,6 @@ const STORAGE_KEYS = {
 // Provider secrets are server-side only. Remove credentials persisted by older builds.
 localStorage.removeItem('idol_elevenlabs_key');
 
-const RUNTIME_TOKEN_SESSION_KEY = 'idol_runtime_auth_token';
-const nativeFetch = window.fetch.bind(window);
-window.fetch = async (input, init = {}) => {
-  const requestUrl = new URL(typeof input === 'string' ? input : input.url, location.href);
-  const isRuntimeApi = requestUrl.origin === location.origin && requestUrl.pathname.startsWith('/api/');
-  if (!isRuntimeApi) return nativeFetch(input, init);
-
-  const send = (token = '') => {
-    const headers = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined));
-    if (token) headers.set('Authorization', `Bearer ${token}`);
-    return nativeFetch(input, { ...init, headers });
-  };
-
-  let token = sessionStorage.getItem(RUNTIME_TOKEN_SESSION_KEY) || '';
-  let response = await send(token);
-  if (response.status === 401) {
-    token = window.prompt('Enter the Runtime access token for this session:')?.trim() || '';
-    if (token) {
-      sessionStorage.setItem(RUNTIME_TOKEN_SESSION_KEY, token);
-      response = await send(token);
-    }
-  }
-  return response;
-};
-
 const STATE_COLOR = {
   GAMEPLAY_IDLE:  '#60a5fa',
   GAMEPLAY_FOCUS: '#818cf8',
@@ -106,104 +81,8 @@ const CLIP_LIBRARY = {
 
 const UPLOADED_BLOBS = new Map();
 
-// ── Application Runtime State ─────────────────────────────
-const App = {
-  streamStart: Date.now() - 22 * 60 * 1000,
-  isPaused: false,
-  isMuted: false,
-  currentState: 'GAMEPLAY_IDLE',
-  currentClip: null,
-  clipStartedAt: null,
-  clipElapsedMs: 0,
-  isAiSpeaking: false,
-  chatQueue: [],
-  chatHistory: [],
-  pendingChatBatch: [],
-  chatProcessTimer: null,
-  eventQueue: [],
-  eventLog: [],
-  lastCtaAt: Date.now() - (4 * 60 + 21) * 1000,
-  ctaCooldownMs: 4 * 60 * 1000,
-  ctaEnabled: true,
-  nextGoalSec: 14,
-  
-  // Video State Mixer & Per-Group Random Mode (Persisted)
-  autoMix: localStorage.getItem(STORAGE_KEYS.AUTO_MIX) !== null ? (localStorage.getItem(STORAGE_KEYS.AUTO_MIX) === 'true') : true,
-  globalRandom: localStorage.getItem(STORAGE_KEYS.GLOBAL_RANDOM) !== null ? (localStorage.getItem(STORAGE_KEYS.GLOBAL_RANDOM) === 'true') : true,
-  groupRandom: JSON.parse(localStorage.getItem(STORAGE_KEYS.GROUP_RANDOM) || '{"gameplay":true,"talking":true,"reaction":true,"cta":true}'),
-  queuedTransition: null,
-  activeFilter: 'all',
-  stateHistory: [
-    { state: 'GAMEPLAY_IDLE', time: Date.now() - 60000, color: '#d8d8da' }
-  ],
-
-  // Stream Context Tracker for AI Response Generation
-  streamContext: {
-    lastGameEvent: 'New round in progress',
-    lastGameOutcome: null,
-    totalWins: 0,
-    totalLosses: 0,
-    recentTopics: [],
-  },
-
-  // Level 3 Realtime Talking Video Engine
-  talkingEngine: {
-    provider: localStorage.getItem(STORAGE_KEYS.TALKING_PROVIDER) === 'off' ? 'off' : 'livetalking',
-    endpoint: localStorage.getItem(STORAGE_KEYS.LIVETALKING_ENDPOINT) || 'http://localhost:8011',
-    model: localStorage.getItem(STORAGE_KEYS.LIVETALKING_MODEL) || 'musetalk',
-    checkpoint: localStorage.getItem(STORAGE_KEYS.W2L_CHECKPOINT) || 'wav2lip',
-    detector: localStorage.getItem(STORAGE_KEYS.W2L_DETECTOR) || 'mediapipe',
-    isConnected: true,
-    device: 'metal',
-    lastHealthMs: 0,
-    mouthOpen: 0,
-    mouthWide: 0.3,
-    mouthPucker: 0,
-    jawOpen: 0,
-    viseme: 'sil',
-    currentSpeechDurationMs: 0,
-    speechStartedAt: 0,
-  },
-  
-  // Voice Settings (With Native Vietnamese WebSpeech Default & ElevenLabs Option)
-  voice: {
-    provider: localStorage.getItem(STORAGE_KEYS.VOICE_PROVIDER) || 'webspeech',
-    language: (() => {
-      const storedLanguage = localStorage.getItem(STORAGE_KEYS.VOICE_LANG);
-      return !storedLanguage || storedLanguage === 'auto' ? 'vi' : storedLanguage;
-    })(),
-    providerConfigured: false,
-    elevenLabsVoiceId: localStorage.getItem(STORAGE_KEYS.ELEVENLABS_VOICE) || 'EXAVITQu4vr4xnSDxMaL',
-    customVoices: JSON.parse(localStorage.getItem(STORAGE_KEYS.CUSTOM_VOICES) || '[]'),
-    speed: parseFloat(localStorage.getItem(STORAGE_KEYS.VOICE_SPEED) || '1.05'),
-    personaName: localStorage.getItem(STORAGE_KEYS.PERSONA_NAME) || 'Mimi',
-    personaPrompt: localStorage.getItem(STORAGE_KEYS.PERSONA_PROMPT) || 'Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu.',
-  },
-
-  // Avatar Settings (Preserved Presets, Custom Image & Video Loop)
-  avatar: {
-    displayMode: localStorage.getItem('idol_avatar_display_mode') || 'video',
-    customImageData: localStorage.getItem(STORAGE_KEYS.AVATAR_IMAGE) || null,
-    portraitImageData: localStorage.getItem(STORAGE_KEYS.PORTRAIT_IMAGE) || null,
-    preset: localStorage.getItem(STORAGE_KEYS.AVATAR_PRESET) || 'mimi_anime',
-    imageObj: null,
-    portraitImage: null,
-    portraitImageUrl: null,
-    videoEl: null,
-    videoUrl: null,
-    tempPreviewImage: null,
-    tempPortraitImage: null,
-    tempPreviewVideo: null,
-    tempPreviewData: null,
-    tempPreset: 'mimi_anime',
-  },
-
-  // Audio Context & Playback
-  audioCtx: null,
-  audioElement: null,
-  currentAudioUrl: null,
-  isAudioUnlocked: false,
-};
+// Runtime owns Director truth; this store contains only current operator UI state.
+const App = window.createOperatorStore(STORAGE_KEYS);
 
 // ── DOM Helpers ───────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -1849,108 +1728,10 @@ const MuseTalkRealtimeEngine = {
   }
 };
 
-// Real LiveTalking WebRTC receiver. When connected, the dashboard canvas uses
-// the neural video track directly instead of the browser retargeting fallback.
-const LiveTalkingWebRTCClient = {
-  pc: null,
-  sessionId: null,
-  videoEl: null,
-  audioEl: null,
-  endpoint: null,
-
-  async ensureAudioPlayback() {
-    const audio = this.audioEl;
-    if (!audio) return false;
-    audio.muted = false;
-    audio.defaultMuted = false;
-    audio.volume = 1;
-    if (App.isMuted) return false;
-    try {
-      await audio.play();
-      return true;
-    } catch (error) {
-      // The next explicit Test/Voice click calls this method again in a user gesture.
-      console.warn('[LiveTalking] WebRTC audio play blocked:', error.message);
-      return false;
-    }
-  },
-
-  async connect(endpoint, avatarId = 'avatar_main') {
-    this.disconnect();
-    this.endpoint = String(endpoint || 'http://localhost:8011').replace(/\/$/, '');
-    if (location.protocol === 'file:') throw new Error('Open the dashboard through the runtime server');
-    const healthResponse = await fetch('/api/talking-head/livetalking/status');
-    const health = await healthResponse.json();
-    if (!healthResponse.ok || !health.health?.healthy) throw new Error(health.error || 'LiveTalking worker is not ready');
-
-    const pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan' });
-    this.pc = pc;
-    pc.addTransceiver('video', { direction: 'recvonly' });
-    pc.addTransceiver('audio', { direction: 'recvonly' });
-
-    const video = document.createElement('video');
-    video.autoplay = true; video.playsInline = true; video.muted = true;
-    const audio = document.createElement('audio');
-    audio.autoplay = true; audio.playsInline = true;
-    audio.muted = false; audio.defaultMuted = false; audio.volume = 1;
-    audio.setAttribute('aria-hidden', 'true');
-    audio.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;';
-    document.body.appendChild(audio);
-    this.videoEl = video; this.audioEl = audio;
-
-    pc.addEventListener('track', event => {
-      const stream = event.streams?.[0] || new MediaStream([event.track]);
-      if (event.track.kind === 'video') {
-        video.srcObject = stream;
-        video.play().catch(() => {});
-        LiveTalkingStudio.videoEl = video;
-        App.avatar.videoEl = video;
-      } else {
-        event.track.enabled = true;
-        // Keep the receiver audio isolated from the video MediaStream and route
-        // it to the physical output exactly once through this media element.
-        audio.srcObject = new MediaStream([event.track]);
-        this.ensureAudioPlayback();
-      }
-    });
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    if (pc.iceGatheringState !== 'complete') {
-      await new Promise(resolve => {
-        const done = () => {
-          if (pc.iceGatheringState === 'complete') {
-            pc.removeEventListener('icegatheringstatechange', done);
-            resolve();
-          }
-        };
-        pc.addEventListener('icegatheringstatechange', done);
-        setTimeout(resolve, 3000);
-      });
-    }
-    const response = await fetch('/api/talking-head/offer', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: 'offer', avatarId }),
-    });
-    const answer = await response.json();
-    if (!response.ok || !answer.sdp) throw new Error(answer.error || 'Worker returned no WebRTC SDP');
-    this.sessionId = answer.sessionid || null;
-    await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
-    return { sessionId: this.sessionId, health: health.health };
-  },
-
-  disconnect() {
-    if (this.pc) this.pc.close();
-    this.pc = null; this.sessionId = null;
-    if (this.videoEl) this.videoEl.srcObject = null;
-    if (this.audioEl) {
-      this.audioEl.pause();
-      this.audioEl.srcObject = null;
-      this.audioEl.remove();
-    }
-    this.videoEl = null; this.audioEl = null;
-  }
-};
+const LiveTalkingWebRTCClient = window.createLiveTalkingWebRTCClient({
+  getApp: () => App,
+  getStudio: () => LiveTalkingStudio,
+});
 window.LiveTalkingWebRTCClient = LiveTalkingWebRTCClient;
 
 const LiveTalkingStudio = {
@@ -2020,12 +1801,18 @@ async function persistProjectJson(category, filename, data, avatarId = '') {
 
 async function registerProjectAvatar(avatar) {
   if (location.protocol === 'file:') return avatar;
-  const response = await fetch('/api/avatars/library', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ avatar }),
-  });
-  const payload = await response.json();
-  if (!response.ok || !payload.success) throw new Error(payload.error || 'Could not save the avatar library');
+  const payload = await window.LiveTalkingApi.registerAvatar(avatar);
   return payload.avatar;
+}
+
+async function deleteProjectAvatar(avatarId) {
+  if (location.protocol === 'file:') throw new Error('Open the dashboard through localhost to manage avatars');
+  const payload = await window.LiveTalkingApi.deleteAvatar(avatarId);
+  AvatarSession.selected = AvatarSession.selected.filter(id => id !== avatarId);
+  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
+  await saveAvatarSession().catch(() => {});
+  await refreshLiveTalkingAvatarList();
+  return payload;
 }
 
 async function loadProjectStorageConfig() {
@@ -2668,9 +2455,9 @@ async function refreshLiveTalkingAvatarList() {
   const select = $('lt-existing-avatar-select');
   const records = new Map();
   const [workerResult, localResult, sessionResult] = await Promise.allSettled([
-    location.protocol === 'file:' ? Promise.resolve({ data: { tasks: [] } }) : fetch('/api/avatar/tasks').then(r => r.json()),
-    location.protocol === 'file:' ? Promise.resolve({ avatars: [] }) : fetch('/api/avatars/library').then(r => r.json()),
-    location.protocol === 'file:' ? Promise.resolve({ session: null }) : fetch('/api/avatars/session').then(r => r.json()),
+    location.protocol === 'file:' ? Promise.resolve({ data: { tasks: [] } }) : window.LiveTalkingApi.listTasks(),
+    location.protocol === 'file:' ? Promise.resolve({ avatars: [] }) : window.LiveTalkingApi.listAvatars(),
+    location.protocol === 'file:' ? Promise.resolve({ session: null }) : window.LiveTalkingApi.getAvatarSession(),
   ]);
   if (workerResult.status === 'fulfilled') {
     for (const task of workerResult.value.data?.tasks || []) {
@@ -2732,6 +2519,25 @@ function renderAvatarLibrary(avatars) {
     const preview = document.createElement('div');
     preview.className = 'avatar-card-preview';
     preview.innerHTML = `<span class="avatar-card-status">Ready</span><span class="material-symbols-rounded" aria-hidden="true">person</span>`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'avatar-card-delete';
+    remove.title = `Delete ${avatar.id}`;
+    remove.setAttribute('aria-label', `Delete ${avatar.id}`);
+    remove.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">delete</span>';
+    remove.addEventListener('click', async () => {
+      if (!confirm(`Delete avatar “${avatar.id}” and its trained model files?`)) return;
+      remove.disabled = true;
+      try {
+        await deleteProjectAvatar(avatar.id);
+        addLog(`Avatar ${avatar.id} deleted.`, 'ok');
+      } catch (error) {
+        remove.disabled = false;
+        addLog(`Could not delete avatar: ${error.message}`, 'warn');
+        alert(error.message);
+      }
+    });
+    preview.append(remove);
 
     const body = document.createElement('div');
     body.className = 'avatar-card-body';
@@ -2808,10 +2614,7 @@ async function saveAvatarSession() {
   localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
   localStorage.setItem(STORAGE_KEYS.AVATAR_RANDOM, String(AvatarSession.random));
   if (location.protocol !== 'file:') {
-    await fetch('/api/avatars/session', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selected: AvatarSession.selected, random: AvatarSession.random }),
-    });
+    await window.LiveTalkingApi.saveAvatarSession(AvatarSession.selected, AvatarSession.random);
   }
   addLog(`Saved avatar session: ${AvatarSession.selected.length} avatar${AvatarSession.random ? ' · random' : ''}`, 'ok');
 }
@@ -2875,15 +2678,8 @@ async function startLiveTalkingTraining() {
   try {
     const storedVideo = await persistProjectFile(file, 'avatars/source', avatarId);
     if (!storedVideo?.path) throw new Error('Could not save the avatar source video');
-    const createdResponse = await fetch('/api/avatar/task', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, avatar_id: avatarId, video_path: storedVideo.path }),
-    });
-    const created = await createdResponse.json();
-    if (!createdResponse.ok || created.code !== 0 || !created.data?.task_id) {
-      throw new Error(created.msg || `Runtime returned HTTP ${createdResponse.status}`);
-    }
+    const created = await window.LiveTalkingApi.createTask({ model, avatar_id: avatarId, video_path: storedVideo.path });
+    if (!created.data?.task_id) throw new Error(created.msg || 'Runtime returned no avatar task ID');
 
     const taskId = created.data.task_id;
     logLiveTalkingTerminal(`🧠 Task ${taskId.slice(0, 8)} created. Worker is running Face Detection → VAE → Mask...`, 'info');
@@ -2891,9 +2687,7 @@ async function startLiveTalkingTraining() {
     let task;
     while (Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 1000));
-      const statusResponse = await fetch(`/api/avatar/task/${taskId}`);
-      const statusPayload = await statusResponse.json();
-      if (!statusResponse.ok || statusPayload.code !== 0) throw new Error(statusPayload.msg || 'Could not read worker progress');
+      const statusPayload = await window.LiveTalkingApi.getTask(taskId);
       task = statusPayload.data;
       LiveTalkingStudio.trainProgress = Math.max(1, Math.min(100, Number(task.progress) || 1));
       updateLiveTalkingUI();
@@ -3333,7 +3127,7 @@ function stopLiveSpeech() {
     App.audioElement.currentTime = 0;
   }
   if (App.talkingEngine.provider === 'livetalking' && location.protocol !== 'file:') {
-    fetch('/api/speech/interrupt', { method: 'POST' }).catch(() => {});
+    window.LiveTalkingApi.interrupt().catch(() => {});
   }
   LiveLipSyncEngine.stopSpeech();
   MuseTalkRealtimeEngine.stopAudio();
@@ -3356,35 +3150,20 @@ async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
     ? emotion
     : 'happy';
 
-  await fetch('/api/settings/voice', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      provider: runtimeProvider,
-      voiceId: App.voice.elevenLabsVoiceId,
-      speed,
-      languageCode: App.voice.language || 'vi',
-    }),
-  }).then(async (response) => {
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || 'Could not apply server voice settings');
-    }
+  await window.LiveTalkingApi.setVoice({
+    provider: runtimeProvider,
+    voiceId: App.voice.elevenLabsVoiceId,
+    speed,
+    languageCode: App.voice.language || 'vi',
   });
 
-  const commandResponse = await fetch('/api/speech/commands', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, emotion: normalizedEmotion, speed }),
-  });
-  const command = await commandResponse.json().catch(() => ({}));
-  if (!commandResponse.ok || !command.commandId) throw new Error(command.error || 'Could not start speech');
+  const command = await window.LiveTalkingApi.speak({ text, emotion: normalizedEmotion, speed });
+  if (!command.commandId) throw new Error(command.error || 'Could not start speech');
 
   let playbackStarted = false;
   const startedAt = Date.now();
   while (runId === liveTalkingSpeechRun) {
-    const statusResponse = await fetch('/api/speech/status');
-    const payload = await statusResponse.json().catch(() => ({}));
+    const payload = await window.LiveTalkingApi.speechStatus();
     const speech = payload.speech || {};
     if (speech.commandId !== command.commandId) {
       if (Date.now() - startedAt > 30_000) throw new Error('Speech command did not enter the runtime queue');
@@ -3471,76 +3250,9 @@ window.speakAiVoice = speakAI;
 
 let liveTalkingSpeechRun = 0;
 
-async function getLiveTalkingSpeaking(endpoint, sessionid) {
-  const response = await fetch(`${endpoint}/is_speaking`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionid }),
-  });
-  const result = await response.json();
-  if (!response.ok || result.code !== 0) throw new Error(result.msg || 'Could not read LiveTalking status');
-  return Boolean(result.data);
-}
-
-async function waitForLiveTalkingPlayback(text, voiceLabel, runId) {
-  const endpoint = String(App.talkingEngine.endpoint || 'http://localhost:8011').replace(/\/$/, '');
-  const sessionid = LiveTalkingWebRTCClient.sessionId;
-  const startedAt = Date.now();
-  let started = false;
-  while (runId === liveTalkingSpeechRun) {
-    const speaking = await getLiveTalkingSpeaking(endpoint, sessionid);
-    if (!started && speaking) {
-      started = true;
-      App.isAiSpeaking = true;
-      setVisualState('TALKING', 3, 'livetalking-webrtc-started', true);
-      updateVoiceStatusUI('playing', `Playing [${voiceLabel}] through LiveTalking WebRTC...`, 35);
-      const subBox = $('mon-subtitles');
-      const subTxt = $('mon-sub-text');
-      if (subBox && subTxt) { subTxt.textContent = text; subBox.classList.add('visible'); }
-      if ($('talking-live-badge')) $('talking-live-badge').style.display = 'flex';
-      addLog(`🔊 LiveTalking started [${voiceLabel}] — one WebRTC stream.`, 'ok');
-    } else if (started && !speaking) {
-      App.isAiSpeaking = false;
-      updateVoiceStatusUI('idle');
-      $('mon-subtitles')?.classList.remove('visible');
-      if (App.currentState === 'TALKING' && App.autoMix) {
-        requestStateTransition('GAMEPLAY_IDLE', 7, 'livetalking-speech-ended', App.globalRandom, false);
-      }
-      if (App.pendingChatBatch?.length) setTimeout(() => processPendingChatBatch(), 800);
-      return;
-    }
-    if (!started && Date.now() - startedAt > 30000) throw new Error('LiveTalking voice and LipSync timed out after 30 seconds');
-    await new Promise(resolve => setTimeout(resolve, 150));
-  }
-}
-
-async function submitLiveTalkingSpeech({ text, emotion, voiceLabel, blob = null, voice = '', speed = 1.05 }) {
-  const endpoint = String(App.talkingEngine.endpoint || 'http://localhost:8011').replace(/\/$/, '');
-  const sessionid = LiveTalkingWebRTCClient.sessionId;
-  if (!sessionid) throw new Error('No LiveTalking WebRTC session. Activate an avatar first.');
-  const runId = ++liveTalkingSpeechRun;
-  App.isAiSpeaking = false;
-  updateVoiceStatusUI('generating', `⏳ Waiting for LiveTalking voice and LipSync [${voiceLabel}]...`, 20);
-  logLiveTalkingTerminal('⏳ Voice submitted. Waiting for neural frames...', 'info');
-  let response;
-  if (blob) {
-    const form = new FormData();
-    form.append('sessionid', sessionid);
-    form.append('file', blob, 'ai-voice.mp3');
-    response = await fetch(`${endpoint}/humanaudio`, { method: 'POST', body: form });
-  } else {
-    response = await fetch(`${endpoint}/speak`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, sessionid, emotion, voice, speed, interrupt: true }),
-    });
-  }
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || result.code !== 0) throw new Error(result.msg || `LiveTalking HTTP ${response.status}`);
-  await waitForLiveTalkingPlayback(text, voiceLabel, runId);
-}
-
 async function speakWithLiveTalkingText(text, emotion, voiceURI, speed) {
-  const edgeVoice = /Neural$/i.test(voiceURI || '') ? voiceURI : 'vi-VN-HoaiMyNeural';
-  return submitLiveTalkingSpeech({ text, emotion, voiceLabel: edgeVoice, voice: edgeVoice, speed });
+  void voiceURI;
+  return submitRuntimeSpeechCommand(text, emotion, speed, App.voice.provider || 'webspeech');
 }
 
 async function startSynchronizedPlayback(audioElement, text, emotion, voiceLabel, durMs) {
@@ -3573,23 +3285,16 @@ async function startSynchronizedPlayback(audioElement, text, emotion, voiceLabel
 
 async function requestProviderAudio({ provider, text, emotion, voiceId, modelId, speed }) {
   if (location.protocol === 'file:') throw new Error('Open the dashboard through the runtime server');
-  const response = await fetch('/api/speech/synthesize', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      commandId: `speech_${Date.now()}`,
-      provider,
-      text,
-      emotion,
-      voiceId,
-      modelId,
-      speed,
-    }),
+  const payload = await window.LiveTalkingApi.synthesize({
+    commandId: `speech_${Date.now()}`,
+    provider,
+    text,
+    emotion,
+    voiceId,
+    modelId,
+    speed,
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.success || !payload.audioBase64) {
-    throw new Error(payload.error || `Runtime TTS failed with HTTP ${response.status}`);
-  }
+  if (!payload.success || !payload.audioBase64) throw new Error(payload.error || 'Runtime TTS failed');
   const binary = atob(payload.audioBase64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);

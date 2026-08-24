@@ -108,6 +108,21 @@ export class RuntimeDatabase {
     `).run(id, JSON.stringify(value), new Date().toISOString());
   }
 
+  deleteAvatar(id: string): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM avatars WHERE id = ?').run(id);
+      const session = this.getAvatarSession();
+      if (session?.selected.includes(id)) {
+        this.setAvatarSession(session.selected.filter((avatarId) => avatarId !== id), session.random);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   getAvatarSession(): { selected: string[]; random: boolean } | null {
     const row = this.db.prepare('SELECT selected_json, random FROM avatar_sessions WHERE id = 1').get() as { selected_json?: string; random?: number } | undefined;
     if (!row?.selected_json) return null;

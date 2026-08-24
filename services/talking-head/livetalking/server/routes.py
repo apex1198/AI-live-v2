@@ -230,9 +230,30 @@ async def is_speaking(request):
         return json_error("session not found")
     return json_ok(data=avatar_session.is_speaking())
 
+async def session_status(request):
+    """Return the worker-owned state for one active WebRTC session."""
+    try:
+        sessionid = validated_session_id(request.match_info.get('sessionid', ''))
+        avatar_session = get_session(request, sessionid)
+        if avatar_session is None:
+            return json_error("session not found", code=404)
+        if hasattr(avatar_session, 'get_pipeline_status'):
+            return json_ok(data=avatar_session.get_pipeline_status())
+        speaking = bool(avatar_session.is_speaking())
+        return json_ok(data={
+            "sessionid": sessionid,
+            "state": "SPEAKING" if speaking else "IDLE",
+            "speaking": speaking,
+        })
+    except Exception as e:
+        logger.exception('session_status exception:')
+        return json_error(str(e), code=400)
+
 async def sse_handler(request):
-    """SSE 事件流，推送服务器状态更新到客户端"""
-    sessionid = validated_session_id(request.query.get('sessionid', ''))
+    """Cancelable speech-state stream with heartbeat and legacy media events."""
+    sessionid = validated_session_id(
+        request.match_info.get('sessionid') or request.query.get('sessionid', '')
+    )
     avatar_session = session_manager.get_session(sessionid)
     if avatar_session is None:
         return json_error("session not found")
@@ -244,6 +265,7 @@ async def sse_handler(request):
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
         }
     )
     await response.prepare(request)
@@ -253,13 +275,33 @@ async def sse_handler(request):
     avatar_session.add_msgqueue(msgqueue)
 
     try:
+        initial_status = avatar_session.get_pipeline_status() if hasattr(avatar_session, 'get_pipeline_status') else {
+            "sessionid": sessionid,
+            "state": "SPEAKING" if avatar_session.is_speaking() else "IDLE",
+            "speaking": bool(avatar_session.is_speaking()),
+        }
+        await response.write(
+            f"event: speech_state\ndata: {json.dumps(initial_status)}\n\n".encode('utf-8')
+        )
+        heartbeat_at = asyncio.get_running_loop().time()
         while True:
             try:
                 msg = msgqueue.get_nowait()
-                await response.write(f"data: {msg}\n\n".encode('utf-8'))
+                event_name = 'media'
+                try:
+                    parsed = json.loads(msg)
+                    if parsed.get('type') == 'speech_state':
+                        event_name = 'speech_state'
+                except (TypeError, ValueError, AttributeError):
+                    pass
+                await response.write(f"event: {event_name}\ndata: {msg}\n\n".encode('utf-8'))
             except queue.Empty:
-                await asyncio.sleep(0.01)
-    except (asyncio.CancelledError, ConnectionResetError):
+                now = asyncio.get_running_loop().time()
+                if now - heartbeat_at >= 10:
+                    await response.write(b': heartbeat\n\n')
+                    heartbeat_at = now
+                await asyncio.sleep(0.1)
+    except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
         logger.info('SSE connection closed for session: %s', sessionid)
     finally:
         if msgqueue in avatar_session.msgqueues:
@@ -337,6 +379,8 @@ def setup_routes(app):
     app.router.add_post("/record", record)
     app.router.add_post("/interrupt_talk", interrupt_talk)
     app.router.add_post("/is_speaking", is_speaking)
+    app.router.add_get("/api/session/{sessionid}/status", session_status)
+    app.router.add_get("/api/session/{sessionid}/events", sse_handler)
     app.router.add_get("/api/admin/config", admin_config)
     app.router.add_get("/api/admin/sessions", admin_sessions)
     app.router.add_get('/sse', sse_handler)

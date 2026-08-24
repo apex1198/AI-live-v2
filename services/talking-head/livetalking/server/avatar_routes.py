@@ -1,9 +1,11 @@
 import os
 import json
 import uuid
+import shutil
 from aiohttp import web
 from server.task_manager import task_manager
-from server.security import require_safe_id, secure_filename, resolve_existing_media, resolve_avatar_output
+from server.security import require_safe_id, secure_filename, resolve_existing_media, resolve_avatar_output, resolve_avatar_entry
+from server.session_manager import session_manager
 from utils.logger import logger
 
 def json_ok(data=None):
@@ -158,6 +160,39 @@ async def list_trained_avatars(request):
             logger.warning(f"Skipping invalid avatar entry {entry.name}: {exc}")
     return json_ok(data={"avatars": avatars})
 
+async def delete_trained_avatar(request):
+    """DELETE /api/avatars/{avatar_id} — remove one inactive trained avatar."""
+    try:
+        avatar_id = require_safe_id(request.match_info.get('avatar_id'), "avatar_id")
+        for avatar_session in session_manager.sessions.values():
+            if avatar_session is None:
+                continue
+            if str(getattr(getattr(avatar_session, 'opt', None), 'avatar_id', '')) == avatar_id:
+                return json_error("avatar is in use by an active session", code=409)
+        for task in task_manager.list_tasks():
+            if task.get('avatar_id') == avatar_id and task.get('status') in ('pending', 'running'):
+                return json_error("avatar training is still active", code=409)
+
+        entry, target = resolve_avatar_entry(avatar_id)
+        if entry.is_symlink():
+            entry.unlink()
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+        elif entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+        return json_ok(data={"avatar_id": avatar_id, "deleted": True})
+    except FileNotFoundError as exc:
+        return json_error(str(exc), code=404)
+    except ValueError as exc:
+        return json_error(str(exc), code=400)
+    except Exception as exc:
+        logger.exception("delete_trained_avatar error:")
+        return json_error(str(exc))
+
 async def delete_avatar_task(request):
     """
     DELETE /api/avatar/task/{task_id}
@@ -177,3 +212,4 @@ def setup_avatar_routes(app):
     app.router.add_delete("/api/avatar/task/{task_id}", delete_avatar_task)
     app.router.add_get("/api/avatar/tasks", list_avatar_tasks)
     app.router.add_get("/api/avatars", list_trained_avatars)
+    app.router.add_delete("/api/avatars/{avatar_id}", delete_trained_avatar)

@@ -194,6 +194,24 @@ export interface LiveTalkingConfig {
   useWebRTC: boolean;
 }
 
+export interface LiveTalkingSessionStatus {
+  sessionid: string;
+  state: 'GENERATING' | 'SPEAKING' | 'IDLE' | 'ERROR';
+  speaking: boolean;
+  sequence?: number | undefined;
+  updated_at?: number | undefined;
+  details?: Record<string, unknown> | undefined;
+}
+
+const LiveTalkingSessionStatusSchema = z.object({
+  sessionid: z.string().min(1),
+  state: z.enum(['GENERATING', 'SPEAKING', 'IDLE', 'ERROR']),
+  speaking: z.boolean().optional().default(false),
+  sequence: z.number().optional(),
+  updated_at: z.number().optional(),
+  details: z.record(z.unknown()).optional(),
+});
+
 // ── 3. LiveTalkingProvider (lipku/livetalking Engine) ──────
 
 export class LiveTalkingProvider implements TalkingVideoProvider {
@@ -254,6 +272,16 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
 
   setSession(sessionId: string | null): void {
     this._sessionId = sessionId ? String(sessionId) : null;
+  }
+
+  async ensureActiveSession(): Promise<string> {
+    if (this._sessionId) return this._sessionId;
+    const payload = await this._request('/api/admin/sessions', {}, true);
+    const sessions = Array.isArray(payload.data?.sessions) ? payload.data.sessions : [];
+    const active = sessions.find((session: any) => typeof session?.sessionid === 'string' && session.sessionid);
+    if (!active) throw new Error('No active LiveTalking WebRTC session');
+    this._sessionId = active.sessionid;
+    return this._sessionId!;
   }
 
   private _workerModel(): 'musetalk' | 'wav2lip' {
@@ -383,7 +411,7 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     this._isSpeaking = true;
     const text = typeof audio === 'string' ? audio : (options?.text ?? 'Hello everyone!');
     try {
-      await this._request('/speak', {
+      const payload = await this._request('/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -395,6 +423,7 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
           interrupt: true,
         }),
       });
+      if (payload.data?.sessionid) this._sessionId = String(payload.data.sessionid);
     } catch (error) {
       this._isSpeaking = false;
       throw error;
@@ -413,7 +442,7 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
   }
 
   async sendAudio(audio: Blob | ArrayBuffer | Uint8Array, sessionId: string | null = this._sessionId): Promise<void> {
-    if (!sessionId) throw new Error('No active LiveTalking session');
+    sessionId = sessionId || await this.ensureActiveSession();
     let blob: Blob;
     if (audio instanceof Blob) {
       blob = audio;
@@ -430,7 +459,7 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
   }
 
   async isSessionSpeaking(sessionId: string | null = this._sessionId): Promise<boolean> {
-    if (!sessionId) return false;
+    sessionId = sessionId || await this.ensureActiveSession();
     const payload = await this._request('/is_speaking', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -438,6 +467,63 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     }, true);
     this._isSpeaking = Boolean(payload.data);
     return this._isSpeaking;
+  }
+
+  async getSessionStatus(sessionId: string | null = this._sessionId): Promise<LiveTalkingSessionStatus> {
+    sessionId = sessionId || await this.ensureActiveSession();
+    const payload = await this._request(`/api/session/${encodeURIComponent(sessionId)}/status`, {}, true);
+    const status = LiveTalkingSessionStatusSchema.parse(payload.data);
+    this._isSpeaking = status.state === 'SPEAKING' || status.speaking;
+    return status;
+  }
+
+  async *watchSessionStatus(
+    sessionId: string | null = this._sessionId,
+    signal?: AbortSignal,
+  ): AsyncIterable<LiveTalkingSessionStatus> {
+    sessionId = sessionId || await this.ensureActiveSession();
+    const endpoint = this._config.endpointUrl.replace(/\/$/, '');
+    const headers = new Headers({ Accept: 'text/event-stream' });
+    if (this._config.authToken) headers.set('Authorization', `Bearer ${this._config.authToken}`);
+    const streamInit: RequestInit = { headers };
+    if (signal) streamInit.signal = signal;
+    const response = await fetch(
+      `${endpoint}/api/session/${encodeURIComponent(sessionId)}/events`,
+      streamInit,
+    );
+    if (!response.ok || !response.body) {
+      throw new Error(`LiveTalking state stream HTTP ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (!signal?.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+        let boundary = buffer.indexOf('\n\n');
+        while (boundary >= 0) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf('\n\n');
+          if (!block || block.startsWith(':')) continue;
+          const lines = block.split('\n');
+          const eventName = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() || 'message';
+          if (eventName !== 'speech_state' && eventName !== 'message') continue;
+          const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n');
+          if (!data) continue;
+          const parsed = JSON.parse(data);
+          if (eventName === 'message' && parsed?.type !== 'speech_state' && !parsed?.state) continue;
+          const normalized = LiveTalkingSessionStatusSchema.parse(parsed);
+          this._isSpeaking = normalized.state === 'SPEAKING' || normalized.speaking;
+          yield normalized;
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
   }
 
   async listAvatarTasks(): Promise<any[]> {
@@ -473,6 +559,10 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
 
   async deleteAvatarTask(taskId: string): Promise<void> {
     await this._request(`/api/avatar/task/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
+  }
+
+  async deleteTrainedAvatar(avatarId: string): Promise<void> {
+    await this._request(`/api/avatars/${encodeURIComponent(avatarId)}`, { method: 'DELETE' });
   }
 
   async *outputFrames(): AsyncIterable<VideoFrame> {

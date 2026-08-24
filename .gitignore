@@ -1,0 +1,29 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+
+# Python / local runtime
+**/.venv/
+**/__pycache__/
+*.py[cod]
+*.log
+
+# LiveTalking weights, downloads, generated avatars and runtime caches
+services/talking-head/livetalking/models/
+services/talking-head/livetalking/model-downloads/
+services/talking-head/livetalking/data/
+services/talking-head/livetalking/results/
+services/talking-head/livetalking/.git-upstream-backup/
+
+# Secrets and local overrides
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Generated archives
+*.zip

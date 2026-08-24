@@ -1,0 +1,295 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/asset-engine:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../event-schema
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/event-schema:
+    dependencies:
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/goal-engine:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../event-schema
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/lipsync-engine:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../event-schema
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/priority-queue:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../event-schema
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/state-machine:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../event-schema
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  services/chat-adapter:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../../packages/event-schema
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  services/dialogue-agent:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../../packages/event-schema
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  services/director:
+    dependencies:
+      '@idol/asset-engine':
+        specifier: workspace:*
+        version: link:../../packages/asset-engine
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../../packages/event-schema
+      '@idol/goal-engine':
+        specifier: workspace:*
+        version: link:../../packages/goal-engine
+      '@idol/priority-queue':
+        specifier: workspace:*
+        version: link:../../packages/priority-queue
+      '@idol/state-machine':
+        specifier: workspace:*
+        version: link:../../packages/state-machine
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  services/game-adapter:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../../packages/event-schema
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  services/obs-controller:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../../packages/event-schema
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  services/runtime-server:
+    dependencies:
+      '@idol/asset-engine':
+        specifier: workspace:*
+        version: link:../../packages/asset-engine
+      '@idol/chat-adapter':
+        specifier: workspace:*
+        version: link:../chat-adapter
+      '@idol/dialogue-agent':
+        specifier: workspace:*
+        version: link:../dialogue-agent
+      '@idol/director':
+        specifier: workspace:*
+        version: link:../director
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../../packages/event-schema
+      '@idol/game-adapter':
+        specifier: workspace:*
+        version: link:../game-adapter
+      '@idol/goal-engine':
+        specifier: workspace:*
+        version: link:../../packages/goal-engine
+      '@idol/lipsync-engine':
+        specifier: workspace:*
+        version: link:../../packages/lipsync-engine
+      '@idol/obs-controller':
+        specifier: workspace:*
+        version: link:../obs-controller
+      '@idol/priority-queue':
+        specifier: workspace:*
+        version: link:../../packages/priority-queue
+      '@idol/state-machine':
+        specifier: workspace:*
+        version: link:../../packages/state-machine
+      '@idol/talking-head':
+        specifier: workspace:*
+        version: link:../talking-head
+      '@idol/voice':
+        specifier: workspace:*
+        version: link:../voice
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.3
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      '@types/ws':
+        specifier: ^8.5.10
+        version: 8.18.1
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  services/talking-head:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../../packages/event-schema
+      '@idol/lipsync-engine':
+        specifier: workspace:*
+        version: link:../../packages/lipsync-engine
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  services/voice:
+    dependencies:
+      '@idol/event-schema':
+        specifier: workspace:*
+        version: link:../../packages/event-schema
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+packages:
+
+  '@types/node@22.20.1':
+    resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
+
+  '@types/ws@8.18.1':
+    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  undici-types@6.21.0:
+    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+
+  ws@8.21.3:
+    resolution: {integrity: sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+
+snapshots:
+
+  '@types/node@22.20.1':
+    dependencies:
+      undici-types: 6.21.0
+
+  '@types/ws@8.18.1':
+    dependencies:
+      '@types/node': 22.20.1
+
+  typescript@5.9.3: {}
+
+  undici-types@6.21.0: {}
+
+  ws@8.21.3: {}
+
+  zod@3.25.76: {}

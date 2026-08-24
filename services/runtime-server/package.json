@@ -1,0 +1,35 @@
+{
+  "name": "@idol/runtime-server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@idol/event-schema": "workspace:*",
+    "@idol/state-machine": "workspace:*",
+    "@idol/priority-queue": "workspace:*",
+    "@idol/asset-engine": "workspace:*",
+    "@idol/goal-engine": "workspace:*",
+    "@idol/director": "workspace:*",
+    "@idol/dialogue-agent": "workspace:*",
+    "@idol/voice": "workspace:*",
+    "@idol/obs-controller": "workspace:*",
+    "@idol/game-adapter": "workspace:*",
+    "@idol/chat-adapter": "workspace:*",
+    "@idol/lipsync-engine": "workspace:*",
+    "@idol/talking-head": "workspace:*",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.5.4"
+  }
+}

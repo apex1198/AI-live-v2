@@ -1,0 +1,24 @@
+{
+  "name": "hybrid-ai-streamer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hybrid AI Idol Livestream — monorepo root",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "start": "node services/runtime-server/dist/index.js",
+    "test": "npx tsc test_audit.ts --module NodeNext --moduleResolution NodeNext --target ES2022 --lib ES2022,DOM --skipLibCheck && node test_audit.js",
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r clean"
+    ,"livetalking:setup": "bash services/talking-head/livetalking/setup_macos.sh"
+    ,"livetalking:start": "bash services/talking-head/livetalking/run_worker.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

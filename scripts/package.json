@@ -1,0 +1,18 @@
+{
+  "name": "@idol/scripts",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@idol/event-schema": "workspace:*",
+    "@idol/state-machine": "workspace:*",
+    "@idol/priority-queue": "workspace:*",
+    "@idol/asset-engine": "workspace:*",
+    "@idol/goal-engine": "workspace:*",
+    "@idol/director": "workspace:*",
+    "@idol/dialogue-agent": "workspace:*",
+    "@idol/voice": "workspace:*",
+    "@idol/obs-controller": "workspace:*",
+    "@idol/runtime-server": "workspace:*"
+  }
+}

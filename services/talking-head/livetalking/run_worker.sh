@@ -15,6 +15,8 @@ model="${LIVETALKING_MODEL:-musetalk}"
 avatar_id="${LIVETALKING_AVATAR_ID:-musetalk_avatar1}"
 port="${LIVETALKING_PORT:-8011}"
 batch_size="${LIVETALKING_BATCH_SIZE:-4}"
+max_session="${LIVETALKING_MAX_SESSION:-1}"
+stun_url="${LIVETALKING_STUN_URL:-stun:stun.l.google.com:19302}"
 
 if [[ ! -x .venv/bin/python ]]; then
   echo "LiveTalking Python environment is missing. Run: pnpm livetalking:setup"
@@ -53,4 +55,6 @@ exec .venv/bin/python app.py \
   --model "$model" \
   --avatar_id "$avatar_id" \
   --batch_size "$batch_size" \
+  --max_session "$max_session" \
+  --stun "$stun_url" \
   --listenport "$port"

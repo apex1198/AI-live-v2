@@ -60,6 +60,32 @@ def get_requested_or_first_session(request, sessionid: str = ''):
     return None, ''
 
 
+def worker_metrics():
+    active = sum(1 for session in session_manager.sessions.values() if session is not None)
+    metrics = {
+        "active_sessions": active,
+        "max_sessions": session_manager.max_session,
+        "gpu_allocated_bytes": 0,
+        "gpu_reserved_bytes": 0,
+        "accelerator": "cpu",
+    }
+    try:
+        import torch
+        if torch.cuda.is_available():
+            metrics.update({
+                "gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
+                "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
+                "accelerator": str(torch.cuda.get_device_name(0)),
+            })
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            metrics["accelerator"] = "mps"
+            if hasattr(torch, 'mps') and hasattr(torch.mps, 'current_allocated_memory'):
+                metrics["gpu_allocated_bytes"] = int(torch.mps.current_allocated_memory())
+    except Exception:
+        pass
+    return metrics
+
+
 # ─── 路由处理函数 ──────────────────────────────────────────────────────────
 
 async def human(request):
@@ -96,7 +122,7 @@ async def human(request):
 
 async def health(request):
     """Lightweight readiness endpoint used by the TypeScript runtime/dashboard."""
-    active = sum(1 for session in session_manager.sessions.values() if session is not None)
+    metrics = worker_metrics()
     opt = request.app.get("opt")
     return json_ok(data={
         "status": "healthy",
@@ -104,9 +130,39 @@ async def health(request):
         "model": getattr(opt, "model", None),
         "avatar_id": getattr(opt, "avatar_id", None),
         "device": str(request.app.get("device", "auto")),
-        "active_sessions": active,
+        "active_sessions": metrics["active_sessions"],
+        "max_sessions": metrics["max_sessions"],
+        "session_capacity": max(0, metrics["max_sessions"] - metrics["active_sessions"]),
+        "accelerator": metrics["accelerator"],
+        "gpu_allocated_bytes": metrics["gpu_allocated_bytes"],
+        "gpu_reserved_bytes": metrics["gpu_reserved_bytes"],
         "webrtc": True,
     })
+
+
+async def readiness(request):
+    """The route exists only after model weights and the default avatar load."""
+    return json_ok(data={"status": "ready", **worker_metrics()})
+
+
+async def prometheus_metrics(request):
+    values = worker_metrics()
+    body = "\n".join([
+        "# HELP livetalking_active_sessions Active WebRTC avatar sessions.",
+        "# TYPE livetalking_active_sessions gauge",
+        f"livetalking_active_sessions {values['active_sessions']}",
+        "# HELP livetalking_max_sessions Configured WebRTC session limit.",
+        "# TYPE livetalking_max_sessions gauge",
+        f"livetalking_max_sessions {values['max_sessions']}",
+        "# HELP livetalking_gpu_allocated_bytes Accelerator memory allocated by PyTorch.",
+        "# TYPE livetalking_gpu_allocated_bytes gauge",
+        f"livetalking_gpu_allocated_bytes {values['gpu_allocated_bytes']}",
+        "# HELP livetalking_gpu_reserved_bytes CUDA memory reserved by PyTorch.",
+        "# TYPE livetalking_gpu_reserved_bytes gauge",
+        f"livetalking_gpu_reserved_bytes {values['gpu_reserved_bytes']}",
+        "",
+    ])
+    return web.Response(text=body, content_type="text/plain")
 
 
 async def speak_compat(request):
@@ -371,6 +427,8 @@ def setup_routes(app):
     """注册所有路由到 aiohttp app"""
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
+    app.router.add_get("/ready", readiness)
+    app.router.add_get("/metrics", prometheus_metrics)
     app.router.add_post("/speak", speak_compat)
     app.router.add_post("/interrupt", interrupt_compat)
     app.router.add_post("/human", human)

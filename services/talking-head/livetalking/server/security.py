@@ -81,7 +81,7 @@ def is_loopback_host(host: str):
 
 @web.middleware
 async def auth_middleware(request, handler):
-    if request.path == "/health":
+    if request.path in ("/health", "/ready"):
         return await handler(request)
     expected = os.getenv("LIVETALKING_AUTH_TOKEN", "").strip()
     if expected:

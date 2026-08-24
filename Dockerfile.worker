@@ -1,0 +1,35 @@
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev ffmpeg curl libglib2.0-0 libgl1 libsndfile1 \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY services/talking-head/livetalking/requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+  && python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
+  && python3 -m pip install -r /tmp/requirements.txt
+
+COPY services/talking-head/livetalking /app
+COPY deploy/worker-entrypoint.sh /usr/local/bin/worker-entrypoint
+RUN chmod 755 /usr/local/bin/worker-entrypoint \
+  && mkdir -p /app/models /app/data/avatars /app/data/tmp /projects
+
+ENV LIVETALKING_HOST=0.0.0.0
+ENV LIVETALKING_PORT=8011
+ENV LIVETALKING_MODEL=musetalk
+ENV LIVETALKING_AVATAR_ID=musetalk_avatar1
+ENV LIVETALKING_BATCH_SIZE=4
+ENV LIVETALKING_MAX_SESSION=1
+ENV LIVETALKING_ALLOWED_MEDIA_ROOTS=/app/data/tmp,/app/data/avatars,/projects
+ENV LIVETALKING_ALLOWED_AVATAR_ROOTS=/app/data/avatars,/projects
+
+EXPOSE 8011
+HEALTHCHECK --interval=20s --timeout=5s --start-period=180s --retries=6 \
+  CMD curl -fsS http://127.0.0.1:8011/ready || exit 1
+ENTRYPOINT ["worker-entrypoint"]

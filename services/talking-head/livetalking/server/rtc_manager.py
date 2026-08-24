@@ -6,6 +6,7 @@ import json
 import asyncio
 import random
 import copy
+import os
 from typing import Dict, Optional
 import queue
 
@@ -42,9 +43,16 @@ class RTCManager:
 
     async def _create_pc_and_answer(self, avatar_session, sessionid, offer):
         """创建 PeerConnection、添加轨道、SDP 交换，返回已完成 answer 的 pc"""
-        ice_server = RTCIceServer(urls=self.opt.stun)
+        ice_servers = [RTCIceServer(urls=self.opt.stun)]
+        turn_url = os.getenv("LIVETALKING_TURN_URL", "").strip()
+        if turn_url:
+            ice_servers.append(RTCIceServer(
+                urls=turn_url,
+                username=os.getenv("LIVETALKING_TURN_USERNAME", ""),
+                credential=os.getenv("LIVETALKING_TURN_PASSWORD", ""),
+            ))
         pc = RTCPeerConnection(
-            configuration=RTCConfiguration(iceServers=[ice_server])
+            configuration=RTCConfiguration(iceServers=ice_servers)
         )
         self.pcs.add(pc)
 

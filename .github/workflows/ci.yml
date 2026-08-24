@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: npm test
+      - name: Check browser modules
+        run: |
+          node --check operator-dashboard/api/runtime-client.js
+          node --check operator-dashboard/api/livetalking-client.js
+          node --check operator-dashboard/state/operator-store.js
+          node --check operator-dashboard/webrtc/receiver.js
+          node --check operator-dashboard/dashboard.js
+      - name: Check worker Python
+        run: |
+          python3 -m py_compile \
+            services/talking-head/livetalking/avatars/base_avatar.py \
+            services/talking-head/livetalking/server/routes.py \
+            services/talking-head/livetalking/server/avatar_routes.py \
+            services/talking-head/livetalking/server/security.py
+
+  runtime-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.runtime
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

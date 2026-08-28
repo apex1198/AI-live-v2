@@ -73,11 +73,20 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
 
     if progress_callback: progress_callback(5)
 
+    source_fps = 25.0
+    if os.path.isfile(video_path) and is_video_file(video_path):
+        capture = cv2.VideoCapture(video_path)
+        detected_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0)
+        capture.release()
+        if detected_fps > 0:
+            source_fps = detected_fps
+
     with open(os.path.join(avatar_save_path, 'avator_info.json'), "w") as f:
         json.dump({
             "avatar_id": avatar_id,
             "video_path": video_path,
-            "bbox_shift": bbox_shift
+            "bbox_shift": bbox_shift,
+            "source_fps": source_fps
         }, f)
 
     if os.path.isfile(video_path):
@@ -98,7 +107,15 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
 
     input_img_list = sorted(glob.glob(os.path.join(save_full_path, '*.[jpJP][pnPN]*[gG]')))
     print("extracting landmarks...")
-    coord_list, frame_list = get_landmark_and_bbox(input_img_list, bbox_shift)
+    def report_face_progress(processed, total):
+        if progress_callback and total:
+            progress_callback(20 + int(processed / total * 30))
+
+    coord_list, frame_list = get_landmark_and_bbox(
+        input_img_list,
+        bbox_shift,
+        progress_callback=report_face_progress,
+    )
 
     if progress_callback: progress_callback(50)
 

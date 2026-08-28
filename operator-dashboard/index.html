@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Idol — Operator Studio</title>
+  <title>AI IDOL STREAMER</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="design-system.css" />
   <script src="material-icons.js"></script>
@@ -13,10 +13,17 @@
 </head>
 <body>
 
+  <div class="app-startup-overlay" id="app-startup-overlay" aria-live="polite">
+    <div class="app-startup-mark"><span class="material-symbols-rounded" aria-hidden="true">graphic_eq</span></div>
+    <strong>Preparing your live avatar</strong>
+    <span id="app-startup-status">Starting live workspace…</span>
+    <div class="app-startup-progress"><span></span></div>
+  </div>
+
   <!-- ══ TOPBAR WITH EMBEDDED SYSTEM STATUS ═════════════════ -->
-  <header class="topbar">
+  <header class="topbar" data-tauri-drag-region>
     <div class="tb-left">
-      <span class="tb-brand">AI Idol <em>Operator Studio</em></span>
+      <span class="tb-brand">AI IDOL STREAMER <em>Live Control</em></span>
       <div class="live-pill"><span class="live-dot"></span>LIVE</div>
       <span class="stream-clock" id="stream-clock">00:00:00</span>
     </div>
@@ -29,11 +36,14 @@
       </div>
       <div class="sys-item" title="TTS Engine Active">
         <span class="sys-dot ok" id="sys-tts-dot"></span>
-        <span class="sys-k" id="sys-tts-engine">ElevenLabs (VI)</span>
+        <span class="sys-k" id="sys-tts-engine">Voice: Ready</span>
+      </div>
+      <div class="sys-item" title="Dialogue provider used for the latest reply">
+        <span class="dialogue-provider-badge" id="sys-dialogue-provider">QWEN</span>
       </div>
       <div class="sys-item" title="Live Video Pipeline">
         <span class="sys-dot ok" id="sys-talking-dot"></span>
-        <span class="sys-k" id="sys-talking-engine">Stream: Active</span>
+        <span class="sys-k" id="sys-talking-engine">Avatar: Ready</span>
       </div>
       <div class="sys-item" title="TikTok / Live Chat Source">
         <span class="sys-dot ok"></span>
@@ -45,11 +55,19 @@
     </div>
 
     <div class="tb-right">
-      <button class="btn-tb session-quick-settings-button" id="btn-quick-settings" type="button" aria-expanded="false" aria-controls="quick-settings-panel">
-        <span class="material-symbols-rounded" aria-hidden="true">tune</span>Quick Settings
+      <button class="btn-tb topbar-icon-button livetalking-worker-button" id="btn-livetalking-worker" type="button" title="Prepare live avatar" aria-label="Prepare live avatar" hidden>
+        <span class="livetalking-worker-dot" aria-hidden="true"></span>
+        <span class="material-symbols-rounded" aria-hidden="true">power_settings_new</span>
+        <span class="topbar-control-label" id="livetalking-worker-label">Prepare live avatar</span>
       </button>
-      <button class="btn-tb" id="btn-pause" title="Pause or resume AI"><span class="material-symbols-rounded" aria-hidden="true">pause</span>Pause</button>
-      <button class="btn-tb" id="btn-mute" title="Mute or unmute AI">🔇 Mute</button>
+      <button class="btn-tb topbar-icon-button session-quick-settings-button" id="btn-quick-settings" type="button" title="Quick Settings" aria-label="Quick Settings" aria-expanded="false" aria-controls="quick-settings-panel">
+        <span class="material-symbols-rounded" aria-hidden="true">tune</span><span class="topbar-control-label">Quick Settings</span>
+      </button>
+      <button class="btn-tb topbar-icon-button session-quick-settings-button" id="btn-live-session-settings" type="button" title="Live Session" aria-label="Live Session" aria-expanded="false" aria-controls="live-session-settings-panel">
+        <span class="material-symbols-rounded" aria-hidden="true">psychology</span><span class="topbar-control-label">Live Session</span>
+      </button>
+      <button class="btn-tb topbar-icon-button" id="btn-pause" type="button" title="Pause AI" aria-label="Pause AI" aria-pressed="false"><span class="material-symbols-rounded" aria-hidden="true">pause</span><span class="topbar-control-label">Pause AI</span></button>
+      <button class="btn-tb topbar-icon-button" id="btn-mute" type="button" title="Mute voice" aria-label="Mute voice" aria-pressed="false"><span class="material-symbols-rounded" aria-hidden="true">volume_off</span><span class="topbar-control-label">Mute voice</span></button>
     </div>
   </header>
 
@@ -59,6 +77,8 @@
       <button type="button" class="btn-icon-hdr" id="close-quick-settings" aria-label="Close quick settings"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
     </div>
     <div class="session-quick-list">
+      <label><span><strong>Voice</strong><small>Voice used for live replies</small></span><select id="quick-session-voice"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="omnivoice">Omni Voice</option><option value="elevenlabs">ElevenLabs</option></select></label>
+      <label><span><strong>Voice speed</strong><small id="quick-session-voice-speed-value">1.05x</small></span><input type="range" id="quick-session-voice-speed" min="0.7" max="1.5" step="0.05" value="1.05" /></label>
       <label><span><strong>Auto Mix</strong><small>Switch clips automatically</small></span><input type="checkbox" id="quick-session-auto-mix" checked /></label>
       <label><span><strong>Random clips</strong><small>Randomize clips in each state</small></span><input type="checkbox" id="quick-session-random" checked /></label>
       <label><span><strong>Live captions</strong><small>Show generated captions</small></span><input type="checkbox" id="quick-session-captions" checked /></label>
@@ -66,17 +86,30 @@
     <button type="button" class="btn-secondary session-open-settings" id="quick-open-full-settings"><span class="material-symbols-rounded" aria-hidden="true">settings</span>Open full Settings</button>
   </section>
 
+  <section class="session-quick-settings live-session-settings" id="live-session-settings-panel" aria-hidden="true">
+    <div class="session-quick-head">
+      <div><span class="workspace-eyebrow">AI REPLY SKILL</span><strong>Live Session Setting</strong></div>
+      <button type="button" class="btn-icon-hdr" id="close-live-session-settings" aria-label="Close live session settings"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
+    </div>
+    <div class="live-session-fields">
+      <label><span>Goal của phiên live</span><textarea id="live-session-goal" rows="3" placeholder="Mời đăng ký, mời chơi cùng hoặc giới thiệu sản phẩm"></textarea></label>
+      <label><span>Persona và cách nói chuyện</span><textarea id="live-session-persona" rows="4" placeholder="Brief cá tính, giọng điệu và cách xưng hô của nhân vật"></textarea></label>
+      <label><span>Bối cảnh buổi live</span><textarea id="live-session-context" rows="4" placeholder="Live bán hàng, live chơi game hoặc giao lưu"></textarea></label>
+    </div>
+    <div class="live-session-actions"><span id="live-session-save-status">Runtime will generate a reply skill.</span><button type="button" class="btn-primary" id="save-live-session-settings">Generate & Save Skill</button></div>
+  </section>
+
   <aside class="web-side-nav" aria-label="Main navigation">
-    <div class="web-side-brand">
+    <div class="web-side-brand" data-tauri-drag-region>
       <span class="material-symbols-rounded" aria-hidden="true">graphic_eq</span>
-      <div><strong>AI Idol</strong><small>Livestream</small></div>
+      <div><strong>AI IDOL STREAMER</strong><small>Creative live studio</small></div>
     </div>
     <nav class="web-side-menu">
-      <button type="button" class="web-nav-item active" data-app-view="studio">
-        <span class="material-symbols-rounded" aria-hidden="true">space_dashboard</span><span>Live Studio</span>
-      </button>
       <button type="button" class="web-nav-item" data-app-view="avatar">
-        <span class="material-symbols-rounded" aria-hidden="true">person</span><span>Avatar</span>
+        <span class="material-symbols-rounded" aria-hidden="true">person</span><span>AI Profile</span>
+      </button>
+      <button type="button" class="web-nav-item active" data-app-view="studio">
+        <span class="material-symbols-rounded" aria-hidden="true">space_dashboard</span><span>Live</span>
       </button>
       <button type="button" class="web-nav-item" data-app-view="settings">
         <span class="material-symbols-rounded" aria-hidden="true">settings</span><span>Settings</span>
@@ -84,7 +117,7 @@
     </nav>
     <div class="web-side-footer">
       <span class="web-health-dot"></span>
-      <div><strong>System ready</strong><small>Local workspace</small></div>
+      <div><strong>System ready</strong><small>Local AI runtime</small></div>
     </div>
   </aside>
 
@@ -121,8 +154,8 @@
       <p>Control avatars, voice, and audience in one workspace.</p>
     </div>
     <div class="workspace-actions">
-      <button class="workspace-secondary" id="btn-open-library-hero">▣ Library</button>
-      <button class="workspace-primary" id="btn-go-live-hero">✦ Go live</button>
+      <button class="workspace-secondary" id="btn-open-library-hero"><span class="material-symbols-rounded" aria-hidden="true">video_library</span>Library</button>
+      <button class="workspace-primary" id="btn-go-live-hero"><span class="material-symbols-rounded" aria-hidden="true">podcasts</span>Go live</button>
     </div>
   </section>
 
@@ -142,9 +175,9 @@
             <span class="plat-pill-sm"><span class="dot-amber"></span>TikTok / YT</span>
           </div>
           <div class="panel-hdr-actions">
-            <button class="btn-micro-gift" id="btn-gift-rose" title="Send 10 Roses">🌹</button>
-            <button class="btn-micro-gift" id="btn-gift-lion" title="Send a Lion">🦁</button>
-            <button class="btn-icon-hdr" id="btn-clear-chat" title="Clear all chat messages">🗑️</button>
+            <button class="btn-micro-gift" id="btn-gift-rose" title="Send 10 Roses" aria-label="Send 10 Roses"><span class="material-symbols-rounded" aria-hidden="true">local_florist</span></button>
+            <button class="btn-micro-gift" id="btn-gift-lion" title="Send a premium gift" aria-label="Send a premium gift"><span class="material-symbols-rounded" aria-hidden="true">redeem</span></button>
+            <button class="btn-icon-hdr" id="btn-clear-chat" title="Clear all chat messages" aria-label="Clear all chat messages"><span class="material-symbols-rounded" aria-hidden="true">delete_sweep</span></button>
           </div>
         </div>
 
@@ -166,11 +199,6 @@
             <span class="sec-label">Video library</span>
             <span class="lib-count-badge" id="lib-total-count">0 clips</span>
           </div>
-          <div class="panel-hdr-actions">
-            <button class="btn-upload-sm" id="btn-upload" title="Upload video">
-              <span class="material-symbols-rounded" aria-hidden="true">upload</span>
-            </button>
-          </div>
         </div>
 
         <!-- Video Mixer Controls Strip (Clean - No FX) -->
@@ -182,7 +210,7 @@
             </label>
             <label class="mixer-random-toggle" title="Randomly select clips within each state">
               <input type="checkbox" id="chk-global-random" checked />
-              <span>🔀 Random</span>
+              <span><span class="material-symbols-rounded" aria-hidden="true">shuffle</span>Random</span>
             </label>
           </div>
 
@@ -226,8 +254,8 @@
               <span class="lib-gd" style="background:var(--accent)"></span>
               <span class="lib-gn">2. Talking & Chat</span>
               <span class="lib-gc" id="cnt-group-talking">0</span>
-              <button class="btn-group-random is-active" data-rand-group="talking" title="Toggle random video (Talking & Lipsync)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
-              <button class="btn-group-upload" data-upload-target="TALKING" title="Upload the main Talking and LipSync clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
+              <button class="btn-group-random is-active" data-rand-group="talking" title="Toggle random reply video"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
+              <button class="btn-group-upload" data-upload-target="TALKING" title="Upload a spoken reply clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
               <input type="file" class="group-file-input" data-group-target="TALKING" accept="video/*" multiple style="display:none;" />
             </div>
             <div class="clip-list" id="list-group-talking" data-target-group="TALKING">
@@ -283,19 +311,19 @@
               <span class="monitor-clip-name" id="monitor-clip-name">gameplay_idle.mp4</span>
               <div class="talking-live-badge" id="talking-live-badge" title="Live Video Stream Sync">
                 <span class="tl-pulse"></span>
-                <span>Live: Sync</span>
+                <span>Sync</span>
               </div>
               <div class="monitor-btns">
-                <button class="btn-icon-sm" id="btn-prev" title="Previous clip in this state">‹</button>
-                <button class="btn-icon-sm" id="btn-random-clip-now" title="Pick another random clip">🔀</button>
-                <button class="btn-icon-sm" id="btn-next" title="Next clip in this state">›</button>
+                <button class="btn-icon-sm" id="btn-prev" title="Previous clip in this state" aria-label="Previous clip"><span class="material-symbols-rounded" aria-hidden="true">skip_previous</span></button>
+                <button class="btn-icon-sm" id="btn-random-clip-now" title="Pick another random clip" aria-label="Pick random clip"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
+                <button class="btn-icon-sm" id="btn-next" title="Next clip in this state" aria-label="Next clip"><span class="material-symbols-rounded" aria-hidden="true">skip_next</span></button>
                 <button class="btn-icon-sm" id="btn-test-sound" title="Enable and test audio" aria-label="Enable and test audio"><span class="material-symbols-rounded app-icon" aria-hidden="true">volume_up</span></button>
               </div>
             </div>
 
             <!-- Queued transition banner: wait for the active clip -->
             <div class="queued-transition-banner" id="queued-transition-banner" style="display:none;">
-              <span class="q-icon">⏳</span>
+              <span class="material-symbols-rounded q-icon" aria-hidden="true">hourglass_top</span>
               <span class="q-text">Waiting for the current clip to finish. Next: <b id="queued-target-state">TALKING</b></span>
               <button type="button" class="btn-skip-queue" id="btn-skip-queue" title="Skip the queue">Switch now ›</button>
             </div>
@@ -412,7 +440,7 @@
           <section class="panel-section voice-config-panel">
             <div class="panel-hdr">
               <div class="panel-title-box">
-                <span class="sec-label">AI voice and video</span>
+                <span class="sec-label">Live Control · Voice</span>
                 <span class="voice-session-tag" title="Key and settings are saved for this session">💾 Key Saved</span>
               </div>
             </div>
@@ -421,10 +449,11 @@
               <!-- Engine & Language Selector -->
               <div class="form-row">
                 <div class="form-group" style="flex:1.4;">
-                  <label>AI voice</label>
+                  <label>Voice</label>
                   <select class="form-select-sm" id="quick-voice-provider">
-                    <option value="elevenlabs" selected>ElevenLabs Turbo v2.5</option>
-                    <option value="webspeech">Web Speech API (Local / 0ms)</option>
+                    <option value="qwentts" selected>Qwen TTS · Vietnamese</option>
+                    <option value="elevenlabs">ElevenLabs</option>
+                    <option value="omnivoice">Omni Voice</option>
                   </select>
                 </div>
                 <div class="form-group" style="flex:1;">
@@ -433,25 +462,6 @@
                     <option value="auto">🌐 Auto detect</option>
                     <option value="en">🇺🇸 English</option>
                     <option value="vi" selected>🇻🇳 Vietnamese</option>
-                  </select>
-                </div>
-              </div>
-
-              <!-- Talking Video Provider Selector -->
-              <div class="form-group">
-                <div class="label-with-action">
-                  <label>Avatar engine</label>
-                  <span id="talking-provider-status-badge" style="font-size:11px; color:var(--green); font-weight:700;">Live Ready</span>
-                </div>
-                <select class="form-select-sm" id="quick-talking-provider">
-                  <option value="livetalking" selected>LiveTalking Digital Human</option>
-                  <option value="off">Off (Voice Only)</option>
-                </select>
-                <div style="display:flex; gap:6px; margin-top:6px;">
-                  <input class="form-input-sm" id="livetalking-endpoint" value="http://localhost:8011" aria-label="LiveTalking worker endpoint" style="flex:1;" />
-                  <select class="form-select-sm" id="livetalking-model" aria-label="LiveTalking model" style="width:96px;">
-                    <option value="musetalk" selected>MuseTalk</option>
-                    <option value="wav2lip">Wav2Lip</option>
                   </select>
                 </div>
               </div>
@@ -469,32 +479,18 @@
                 <label>Voice</label>
                 <div class="saved-voice-select-wrap">
                   <select class="form-select-sm" id="quick-saved-voice-list">
-                    <optgroup label="🌟 Female streamer voices">
-                      <option value="EXAVITQu4vr4xnSDxMaL" selected>Sarah / Bella — Warm and expressive</option>
-                      <option value="FGY2WhTYpPnrIDTdsKH5">Laura — Bright and energetic</option>
-                      <option value="cgSgspJ2msm6clMCkdW9">Jessica — Playful and engaging</option>
-                      <option value="Xb7hH8MSUJpSbSDYk0k2">Alice — Idol and live host style</option>
-                      <option value="pFZP5JQG7iQjIQuC4Bku">Lily — Clear, soft, and friendly</option>
-                      <option value="21m00Tcm4TlvDq8ikWAM">Rachel — Calm and warm</option>
-                      <option value="AZnzlk1XvdvUeBnXmlld">Domi — Energetic and bold</option>
-                      <option value="MF3mGyEYCl7XYWbV9V6O">Elli — Young VTuber style</option>
-                    </optgroup>
-                    <optgroup label="🎙️ Male voices">
-                      <option value="ErXwobaYiN019PkySvjV">Antoni — Deep and expressive</option>
-                      <option value="VR6AewLTigWG4xSOukaG">Arnold — Strong and direct</option>
-                      <option value="pNInz6obpgDQGcFmaJgB">Adam — Excited and engaging</option>
-                    </optgroup>
+                    <option value="qwen-default" selected>Yến Nhi · Vietnamese preset</option>
                   </select>
                 </div>
               </div>
 
               <!-- Voice ID Input & Fast Actions -->
-              <div class="form-group">
+              <div class="form-group" id="quick-voice-id-section" hidden aria-hidden="true">
                 <div class="label-with-action">
                   <label>Voice ID:</label>
                   <div class="voice-id-actions">
-                    <button type="button" class="btn-micro-action" id="btn-copy-voice-id" title="Copy Voice ID">📋 Copy</button>
-                    <button type="button" class="btn-micro-action" id="btn-save-custom-voice" title="Save this Voice ID">💾 Save</button>
+                    <button type="button" class="btn-micro-action" id="btn-copy-voice-id" title="Copy Voice ID"><span class="material-symbols-rounded" aria-hidden="true">content_copy</span>Copy</button>
+                    <button type="button" class="btn-micro-action" id="btn-save-custom-voice" title="Save this Voice ID"><span class="material-symbols-rounded" aria-hidden="true">save</span>Save</button>
                   </div>
                 </div>
                 <input type="text" class="form-input-sm" id="quick-voice-id-input" value="EXAVITQu4vr4xnSDxMaL" placeholder="Enter Voice ID..." />
@@ -520,9 +516,9 @@
               <!-- Quick Voice Testing -->
               <div class="form-row" style="align-items:flex-end; gap:6px; margin-top:2px;">
                 <div class="form-group" style="flex:1;">
-                  <input type="text" class="form-input-sm" id="quick-test-voice-text" value="Chào bạn nha! Mimi là AI Idol livestream người Việt Nam nè!" placeholder="Enter a voice test line..." />
+                  <input type="text" class="form-input-sm" id="quick-test-voice-text" value="Chào cả nhà, AI Idol đã sẵn sàng livestream rồi nè!" placeholder="Enter a voice test line..." />
                 </div>
-                <button type="button" class="btn-secondary-sm" id="btn-quick-voice-speak">▶ Test voice</button>
+                <button type="button" class="btn-secondary-sm" id="btn-quick-voice-speak"><span class="material-symbols-rounded" aria-hidden="true">play_arrow</span>Test voice</button>
                 <button type="button" class="btn-secondary-sm" id="btn-stop-voice" title="Stop voice now"><span class="material-symbols-rounded" aria-hidden="true">stop</span>Stop</button>
               </div>
             </div>
@@ -581,17 +577,22 @@
   <section class="web-app-view" id="view-avatar" data-view="avatar">
     <header class="web-page-head">
       <div>
-        <span class="workspace-eyebrow">AVATAR LIBRARY</span>
-        <h1>Avatar</h1>
-        <p>Create avatars once, then select which ones can join the live session.</p>
+        <span class="workspace-eyebrow">AI PROFILE</span>
+        <h1>AI Profile</h1>
+        <p>Shape your Idol, voice, and active live avatar in one place.</p>
       </div>
       <button type="button" class="web-primary-action" id="btn-create-avatar">
-        <span class="material-symbols-rounded" aria-hidden="true">add</span>Create Avatar
+        <span class="material-symbols-rounded" aria-hidden="true">add</span>Add Avatar
       </button>
     </header>
+    <div class="ai-profile-section-head">
+      <span class="material-symbols-rounded" aria-hidden="true">smart_toy</span>
+      <div><h2>Avatar</h2><p>Manage trained avatars and choose one for the live session.</p></div>
+    </div>
     <div class="avatar-page-toolbar">
-      <div><strong>Trained avatars</strong><small id="avatar-page-count">0 avatars</small></div>
-      <label class="avatar-page-random"><input type="checkbox" id="avatar-page-random-toggle" /> Random pick during live</label>
+      <div><strong>Avatar Library</strong><small id="avatar-page-count">0 avatars</small></div>
+      <span class="avatar-session-rule"><span class="material-symbols-rounded" aria-hidden="true">verified</span>One active avatar per live session</span>
+      <input type="checkbox" id="avatar-page-random-toggle" hidden />
     </div>
     <div class="avatar-library-grid" id="avatar-library-grid">
       <article class="avatar-empty-card">
@@ -601,6 +602,72 @@
         <button type="button" data-create-avatar>Create Avatar</button>
       </article>
     </div>
+    <div class="ai-profile-section-head ai-profile-section-head-profile">
+      <span class="material-symbols-rounded" aria-hidden="true">face</span>
+      <div><h2>Idol Profile</h2><p>Define the Idol's personality, reply style, and voice.</p></div>
+    </div>
+    <div class="ai-profile-grid">
+      <section class="ai-profile-panel">
+        <div class="ai-profile-panel-head"><span class="material-symbols-rounded" aria-hidden="true">badge</span><div><h2>Persona</h2><p>Personality and spoken reply style.</p></div></div>
+        <div class="ai-profile-fields">
+          <label><span>Idol name</span><input id="profile-idol-name" type="text" value="Mimi" /></label>
+          <label><span>Personality</span><textarea id="profile-idol-personality" rows="3" placeholder="Dễ thương, năng động, hài hước..."></textarea></label>
+          <label><span>Reply brief</span><textarea id="profile-idol-prompt" rows="4" placeholder="Cách xưng hô, văn nói, nhịp câu và nguyên tắc trả lời"></textarea></label>
+        </div>
+        <div class="ai-profile-actions"><span id="profile-save-status">Profile is ready.</span><button type="button" class="btn-primary" id="save-ai-profile">Save profile</button></div>
+      </section>
+      <section class="ai-profile-panel">
+        <div class="ai-profile-panel-head"><span class="material-symbols-rounded" aria-hidden="true">record_voice_over</span><div><h2>Voice Setting</h2><p>Choose the voice for live replies.</p></div></div>
+        <label class="ai-profile-provider"><span>Provider</span><select id="profile-voice-provider" class="form-select"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="elevenlabs">ElevenLabs</option><option value="omnivoice">Omni Voice</option></select></label>
+        <div class="ai-profile-voice-summary" id="ai-voice-profile-summary" aria-live="polite">Loading active voice...</div>
+        <div class="voice-provider-notice" id="voice-provider-notice" aria-live="polite"></div>
+        <label class="voice-preview-copy"><span>Preview line</span><textarea id="profile-voice-preview-text" rows="2">Chào cả nhà, AI Idol đã sẵn sàng livestream rồi nè!</textarea></label>
+        <div class="voice-profile-builder" id="voice-profile-builder">
+          <div class="voice-profile-tabs" role="tablist"><button type="button" class="active" data-voice-profile-mode="design">Design</button><button type="button" data-voice-profile-mode="clone">Clone</button></div>
+          <form id="voice-profile-design-form" class="voice-profile-form">
+            <label><span>Name</span><input name="name" required value="Mimi Bright" /></label>
+            <div class="form-row"><label><span>Gender</span><select name="gender"><option value="female">Female</option><option value="male">Male</option></select></label><label><span>Age</span><select name="age"><option value="young adult">Young adult</option><option value="teenager">Teenager</option><option value="middle-aged">Middle-aged</option><option value="elderly">Elderly</option><option value="child">Child</option></select></label></div>
+            <div class="form-row"><label><span>Pitch</span><select name="pitch"><option value="moderate pitch">Moderate</option><option value="high pitch">High</option><option value="very high pitch">Very high</option><option value="low pitch">Low</option><option value="very low pitch">Very low</option></select></label><label><span>Style</span><select name="style"><option value="">Natural</option><option value="whisper">Whisper</option></select></label></div>
+            <label><span>Accent</span><select name="accent"><option value="">Auto</option><option value="american accent">American</option><option value="british accent">British</option><option value="australian accent">Australian</option><option value="japanese accent">Japanese</option></select></label>
+            <label><span>Preview text</span><textarea name="previewText" rows="2">Chào cả nhà, AI Idol đã sẵn sàng livestream rồi nè!</textarea></label>
+            <button type="submit" class="btn-primary"><span class="material-symbols-rounded" aria-hidden="true">auto_awesome</span>Create voice</button>
+          </form>
+          <form id="voice-profile-clone-form" class="voice-profile-form" hidden>
+            <label><span>Name</span><input name="name" required placeholder="My cloned voice" /></label>
+            <label class="voice-upload-field"><span>Reference audio</span><input name="file" id="ai-voice-clone-file" type="file" accept="audio/wav,audio/mpeg,audio/mp4,.wav,.mp3,.m4a" required /></label>
+            <label><span>Transcript</span><textarea name="transcript" rows="3" placeholder="Exact transcript of the reference audio for fast, accurate cloning."></textarea></label>
+            <button type="submit" class="btn-primary"><span class="material-symbols-rounded" aria-hidden="true">graphic_eq</span>Create cloned voice</button>
+          </form>
+          <div class="voice-profile-status" id="voice-profile-status" aria-live="polite">Select a voice, preview it, then save.</div>
+        </div>
+        <div class="ai-voice-library-head"><span>Voice Library</span><small id="ai-voice-profile-count">0 voices</small></div>
+        <div class="ai-voice-profile-list" id="ai-voice-profile-list"></div>
+        <div class="voice-selection-actions">
+          <button type="button" class="btn-secondary" id="preview-selected-voice" disabled><span class="material-symbols-rounded" aria-hidden="true">play_arrow</span>Preview</button>
+          <button type="button" class="btn-primary" id="save-selected-voice" disabled><span class="material-symbols-rounded" aria-hidden="true">save</span>Save & use</button>
+        </div>
+      </section>
+    </div>
+    <div class="ai-profile-section-head ai-profile-section-head-profile">
+      <span class="material-symbols-rounded" aria-hidden="true">description</span>
+      <div><h2>Live Reply Skill</h2><p>Select the Markdown brief used to generate spoken replies for the live session.</p></div>
+    </div>
+    <section class="ai-profile-panel reply-skill-panel" aria-labelledby="reply-skill-title">
+      <div class="reply-skill-toolbar">
+        <div>
+          <span>Active skill</span>
+          <strong id="reply-skill-active-name">Loading...</strong>
+        </div>
+        <input id="reply-skill-file-input" type="file" accept=".md,text/markdown,text/plain" hidden />
+        <button type="button" class="btn-primary" id="upload-reply-skill">
+          <span class="material-symbols-rounded" aria-hidden="true">upload_file</span>Upload .MD
+        </button>
+      </div>
+      <div class="reply-skill-list" id="reply-skill-list" role="radiogroup" aria-label="Live reply skills">
+        <div class="reply-skill-empty">Loading saved skills...</div>
+      </div>
+      <div class="reply-skill-status" id="reply-skill-status" aria-live="polite">Skills are stored with this project.</div>
+    </section>
   </section>
 
   <section class="web-app-view" id="view-settings" data-view="settings">
@@ -608,15 +675,11 @@
       <div>
         <span class="workspace-eyebrow">CONFIGURATION</span>
         <h1>Settings</h1>
-        <p>Manage AI providers, voice, models, and output from one place.</p>
+        <p>Configure stream output, local storage, and the AI Director.</p>
       </div>
     </header>
     <div class="web-settings-grid">
-      <section class="settings-bento-card">
-        <div class="settings-bento-head"><span class="material-symbols-rounded">hub</span><div><h2>AI providers</h2><p>Voice and avatar engines.</p></div><span class="settings-status">Connected</span></div>
-        <div class="settings-bento-content" id="web-settings-provider-slot"></div>
-      </section>
-      <section class="settings-bento-card">
+      <section class="settings-bento-card" style="display:none;">
         <div class="settings-bento-head"><span class="material-symbols-rounded">record_voice_over</span><div><h2>Voice & Persona</h2><p>Voice, speed, and host style.</p></div></div>
         <div class="settings-bento-content" id="web-settings-voice-slot"></div>
         <div class="settings-bento-actions" id="web-settings-voice-actions"></div>
@@ -635,12 +698,12 @@
         <div class="settings-bento-actions"><span id="project-storage-status">Loading settings...</span><button id="save-project-storage" type="button" class="btn-primary">Save folder</button></div>
       </section>
       <section class="settings-bento-card">
-        <div class="settings-bento-head"><span class="material-symbols-rounded">memory</span><div><h2>Local AI Director</h2><p>Qwen through Ollama.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
+        <div class="settings-bento-head"><span class="material-symbols-rounded">memory</span><div><h2>AI Director</h2><p>Local reply model for live chat.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
         <div class="local-ai-model-row">
-          <div><span>Model</span><strong id="local-ai-model-name">qwen3.5:35b-64k</strong></div>
+          <div><label for="local-ai-model-name">Model</label><input id="local-ai-model-name" type="text" value="qwen3.5:35b-64k" autocomplete="off" spellcheck="false" /></div>
           <div><span>Runtime</span><strong id="local-ai-runtime-state">Checking Ollama…</strong></div>
         </div>
-        <p class="local-ai-note" id="local-ai-note">Chat replies stay on this machine, then flow through TTS and LiveTalking.</p>
+        <p class="local-ai-note" id="local-ai-note">Chat replies stay on this machine, then flow through voice and the active AI Profile.</p>
         <div class="settings-bento-actions"><span id="local-ai-install-progress"></span><button id="install-local-ai-model" type="button" class="btn-primary"><span class="material-symbols-rounded">download</span>Install model</button></div>
       </section>
     </div>
@@ -662,13 +725,14 @@
         <div data-create-step="done"><span>4</span>Done</div>
       </div>
       <div class="avatar-create-body">
-        <input type="file" id="input-avatar-create-file" accept="image/*,video/*" hidden />
+        <input type="file" id="input-avatar-create-file" accept="image/*,video/*" multiple hidden />
         <button type="button" class="avatar-upload-drop" id="btn-avatar-create-upload">
           <span class="material-symbols-rounded" aria-hidden="true">cloud_upload</span>
-          <strong id="avatar-create-file-name">Upload image or video</strong>
-          <small>MP4, MOV, PNG, or JPG</small>
+          <strong id="avatar-create-file-name">Upload one or more avatars</strong>
+          <small>Up to 20 MP4, MOV, PNG, or JPG files</small>
         </button>
         <label class="avatar-create-field"><span>Avatar ID</span><input type="text" id="avatar-create-id" value="avatar_main" placeholder="avatar_id" /></label>
+        <div class="avatar-batch-queue" id="avatar-batch-queue" aria-live="polite"></div>
         <div class="avatar-create-progress" id="avatar-create-progress-wrap">
           <div><span id="avatar-create-status">Ready to upload</span><strong id="avatar-create-progress-label">0%</strong></div>
           <div class="avatar-create-progress-track"><span id="avatar-create-progress-fill"></span></div>
@@ -678,538 +742,6 @@
       <div class="modal-ftr avatar-create-footer">
         <button type="button" class="btn-secondary" id="cancel-avatar-create">Cancel</button>
         <button type="button" class="btn-primary" id="btn-avatar-create-train" disabled><span class="material-symbols-rounded">model_training</span>Start Training</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 1. LiveTalking Studio Modal -->
-  <div class="modal-backdrop" id="modal-avatar" style="display:none;">
-    <div class="modal-card modal-card-lg" style="max-width: 1040px; width: 95vw;">
-      <div class="modal-hdr" style="border-bottom: 1px solid rgba(255,255,255,0.08); padding: 14px 20px;">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <span style="font-size:20px;">⚡</span>
-          <div>
-            <h3 style="margin:0; font-size:15px; font-weight:700; color:#fff;">Avatar</h3>
-            <div style="font-size:11px; color:var(--t2); margin-top:2px;">
-              Create · Test · Apply
-            </div>
-          </div>
-        </div>
-        <button class="modal-close" id="close-modal-avatar">&times;</button>
-      </div>
-
-      <div class="modal-body" style="padding: 16px 20px;">
-        <!-- Stepper Status Bar -->
-        <div class="lt-stepper-bar">
-          <div class="lt-step-badge active" id="badge-step-1">
-            <span class="step-num">1</span>
-            <span class="step-title">🎬 1. Create</span>
-            <span class="step-status" id="lbl-step1-status">Waiting for media</span>
-          </div>
-          <div class="lt-step-arrow">➔</div>
-          <div class="lt-step-badge locked" id="badge-step-2">
-            <span class="step-num">2</span>
-            <span class="step-title">🎙️ 2. Test</span>
-            <span class="step-status" id="lbl-step2-status">🔒 Locked</span>
-          </div>
-        </div>
-
-        <!-- 2-Column LiveTalking Studio Board -->
-        <div class="livetalking-studio-grid">
-
-          <!-- STEP 1: UPLOAD AVATAR MEDIA -->
-          <div class="lt-studio-col" id="lt-col-step1">
-            <div class="lt-section-card">
-              <div class="lt-card-hdr">
-                <span class="lt-card-title">🎬 Source and model</span>
-                <div style="display:flex; align-items:center; gap:8px;">
-                  <label class="form-check-label" style="display:inline-flex; align-items:center; gap:4px; font-size:11px; color:#38bdf8; cursor:pointer; font-weight:600; background:rgba(56,189,248,0.1); padding:2px 6px; border-radius:4px; border:1px solid rgba(56,189,248,0.25);">
-                    <input type="checkbox" id="chk-show-facemesh" checked style="cursor:pointer; accent-color:#38bdf8;" />
-                    <span>3D mesh</span>
-                  </label>
-                  <label class="form-check-label" style="display:inline-flex; align-items:center; gap:4px; font-size:11px; color:#eab308; cursor:pointer; font-weight:600; background:rgba(234,179,8,0.1); padding:2px 6px; border-radius:4px; border:1px solid rgba(234,179,8,0.25);">
-                    <input type="checkbox" id="chk-debug-facemesh" style="cursor:pointer; accent-color:#eab308;" />
-                    <span>Debug</span>
-                  </label>
-                  <span class="badge-status-pill" id="badge-train-state">Not created</span>
-                </div>
-              </div>
-
-              <!-- Video Screen Container -->
-              <div class="lt-video-screen-box" id="lt-video-screen-box">
-                <canvas id="lt-train-video-canvas" width="480" height="270" style="width:100%; height:100%; object-fit:contain; display:none;"></canvas>
-                <video id="lt-train-video-preview" autoplay loop muted playsinline style="display:none;"></video>
-                <div class="lt-stream-overlay-badge" id="lt-train-face-badge" style="display:none;">🟢 3D face mesh · Angle locked</div>
-                <div id="lt-train-video-placeholder" class="lt-screen-placeholder">
-                  <div style="font-size:36px; margin-bottom:8px;">🎬</div>
-                  <div style="font-weight:700; font-size:12px; color:var(--t1);">No avatar media</div>
-                  <div style="font-size:11px; color:var(--t3); margin-top:4px;">Upload an image or video for MuseTalk preprocessing.</div>
-                </div>
-              </div>
-
-              <!-- Upload File Bar -->
-              <input type="file" id="input-train-video-file" accept="image/*,video/*" style="display:none;" />
-              <div class="lt-file-action-bar">
-                <button type="button" class="btn-primary-sm" id="btn-upload-train-video" style="background:#3b82f6; white-space:nowrap;">
-                  📁 Upload media
-                </button>
-                <div class="lt-file-info-text" id="lt-video-file-info">No media selected</div>
-                <button type="button" class="btn-xs-link" id="btn-clear-train-video" style="color:#f87171; white-space:nowrap;" title="Remove uploaded media">
-                  🗑️ Remove
-                </button>
-              </div>
-
-              <!-- Training Control Box -->
-              <div class="lt-training-control-box">
-                <div class="form-row" style="margin-bottom:8px; gap:8px;">
-                  <div class="form-group" style="flex:1.4;">
-                    <label style="font-size:11px; color:var(--t2);">Pipeline Model</label>
-                    <select class="form-select-sm" id="lt-model-select">
-                      <option value="musetalk" selected>MuseTalk v1.5 Neural</option>
-                    </select>
-                  </div>
-                  <div class="form-group" style="flex:1;">
-                    <label style="font-size:11px; color:var(--t2);">Avatar ID</label>
-                    <input type="text" class="form-input-sm" id="lt-avatar-id-input" value="avatar_main" placeholder="avatar_id" />
-                  </div>
-                </div>
-
-                <div class="form-row" style="margin-bottom:8px; gap:8px;">
-                  <div class="form-group" style="flex:1;">
-                    <label style="font-size:11px; color:var(--t2);">BBox Shift</label>
-                    <input type="number" class="form-input-sm" id="lt-bbox-shift-input" value="0" min="-40" max="40" />
-                  </div>
-                  <div class="form-group" style="flex:1;">
-                    <label style="font-size:11px; color:var(--t2);">Extra Margin</label>
-                    <input type="number" class="form-input-sm" id="lt-extra-margin-input" value="10" min="0" max="80" />
-                  </div>
-                  <div class="form-group" style="flex:1.5;">
-                    <label style="font-size:11px; color:var(--t2);">Existing avatar</label>
-                    <select class="form-select-sm" id="lt-existing-avatar-select">
-                      <option value="musetalk_avatar1">musetalk_avatar1</option>
-                    </select>
-                  </div>
-                  <button type="button" class="btn-primary-sm" id="btn-use-existing-avatar" style="align-self:flex-end; white-space:nowrap;">Use avatar</button>
-                </div>
-
-                <div class="avatar-pool-card">
-                  <div class="avatar-pool-head">
-                    <div><strong>Live session avatars</strong><small>Select multiple avatars for rotating LipSync.</small></div>
-                    <label class="avatar-random-toggle"><input type="checkbox" id="lt-random-avatar-toggle" /> Random selection</label>
-                  </div>
-                  <div class="avatar-pool-list" id="lt-avatar-pool-list">
-                    <span class="avatar-pool-empty">No trained avatars yet.</span>
-                  </div>
-                  <div class="avatar-pool-footer"><span id="lt-avatar-pool-count">0 avatars selected</span><button type="button" class="btn-secondary-sm" id="btn-save-avatar-pool">Save session</button></div>
-                </div>
-
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                  <span style="font-size:11px; font-weight:700; color:var(--t1);">Progress:</span>
-                  <span style="font-size:11px; font-weight:700; color:#38bdf8;" id="lbl-training-pct">0%</span>
-                </div>
-
-                <!-- 4-Stage Progress Bar -->
-                <div class="lt-progress-track">
-                  <div class="lt-progress-fill" id="lt-training-progress-fill" style="width: 0%;"></div>
-                </div>
-
-                <!-- 4 Stage Indicators -->
-                <div class="lt-stages-list">
-                  <div class="lt-stage-item" id="stage-item-1">
-                    <span class="stage-dot"></span> 1. Extract frames (25%)
-                  </div>
-                  <div class="lt-stage-item" id="stage-item-2">
-                    <span class="stage-dot"></span> 2. Detect face and BBox (50%)
-                  </div>
-                  <div class="lt-stage-item" id="stage-item-3">
-                    <span class="stage-dot"></span> 3. Generate VAE latent and face mask (75%)
-                  </div>
-                  <div class="lt-stage-item" id="stage-item-4">
-                    <span class="stage-dot"></span> 4. Build avatar package (100%)
-                  </div>
-                </div>
-
-                <!-- Training Button -->
-                <div style="margin-top:10px; display:flex; gap:8px;">
-                  <button type="button" class="btn-primary" id="btn-start-training-video" style="flex:1; background:linear-gradient(135deg, #2563eb, #7c3aed); font-weight:700; font-size:12px; padding:9px 16px;">
-                    ⚡ Create neural avatar
-                  </button>
-                </div>
-
-                <!-- Live Status Indicator -->
-                <div style="margin-top:8px; padding:7px 10px; background:rgba(6, 78, 59, 0.45); border:1px solid rgba(52, 211, 153, 0.4); border-radius:5px; display:flex; align-items:center; gap:7px; font-size:11px; color:#6ee7b7;">
-                  <span style="font-size:12px;">🔒</span>
-                  <div>
-                    <b>LiveTalking pipeline: Ready</b>
-                    <div style="font-size:11px; opacity:0.85; margin-top:1px;">Synchronizes head angle and lip movement with speech.</div>
-                  </div>
-                </div>
-
-                <!-- Visual Region Control Panel -->
-                <div class="lt-region-control-card" id="lt-region-control-card">
-                  <div class="lt-region-card-hdr">
-                    <span style="font-size:11px; font-weight:700; color:#38bdf8;">🎯 Region controls:</span>
-                    <div class="lt-region-tabs">
-                      <button type="button" class="btn-tab-pill active" id="tab-ctrl-mouth" data-target="mouth">👄 Mouth</button>
-                      <button type="button" class="btn-tab-pill" id="tab-ctrl-face" data-target="face">👤 Face</button>
-                    </div>
-                  </div>
-
-                  <!-- Mouth Controls -->
-                  <div class="lt-region-tab-pane" id="pane-ctrl-mouth">
-                    <div class="form-row" style="margin-bottom:4px; gap:8px;">
-                      <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:11px;">
-                          <span>Center X: <b id="val-ctrl-mouth-x" style="color:#34d399;">51%</b></span>
-                        </label>
-                        <input type="range" id="slider-ctrl-mouth-x" min="10" max="90" value="51" />
-                      </div>
-                      <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:11px;">
-                          <span>Center Y: <b id="val-ctrl-mouth-y" style="color:#34d399;">32%</b></span>
-                        </label>
-                        <input type="range" id="slider-ctrl-mouth-y" min="10" max="85" value="32" />
-                      </div>
-                    </div>
-                    <div class="form-row" style="margin-bottom:6px; gap:8px;">
-                      <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:11px;">
-                          <span>Width: <b id="val-ctrl-mouth-w" style="color:#34d399;">12%</b></span>
-                        </label>
-                        <input type="range" id="slider-ctrl-mouth-w" min="5" max="30" value="12" />
-                      </div>
-                      <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:11px;">
-                          <span>Height: <b id="val-ctrl-mouth-h" style="color:#34d399;">7%</b></span>
-                        </label>
-                        <input type="range" id="slider-ctrl-mouth-h" min="3" max="20" value="7" />
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- Face Controls -->
-                  <div class="lt-region-tab-pane" id="pane-ctrl-face" style="display:none;">
-                    <div class="form-row" style="margin-bottom:4px; gap:8px;">
-                      <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:11px;">
-                          <span>Face center X: <b id="val-ctrl-face-x" style="color:#38bdf8;">50%</b></span>
-                        </label>
-                        <input type="range" id="slider-ctrl-face-x" min="15" max="85" value="50" />
-                      </div>
-                      <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:11px;">
-                          <span>Face center Y: <b id="val-ctrl-face-y" style="color:#38bdf8;">30%</b></span>
-                        </label>
-                        <input type="range" id="slider-ctrl-face-y" min="10" max="70" value="30" />
-                      </div>
-                    </div>
-                    <div class="form-row" style="margin-bottom:6px; gap:8px;">
-                      <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:11px;">
-                          <span>Face width: <b id="val-ctrl-face-w" style="color:#38bdf8;">30%</b></span>
-                        </label>
-                        <input type="range" id="slider-ctrl-face-w" min="15" max="60" value="30" />
-                      </div>
-                      <div class="form-group" style="flex:1;">
-                        <label style="display:flex; justify-content:space-between; font-size:11px;">
-                          <span>Face height: <b id="val-ctrl-face-h" style="color:#38bdf8;">34%</b></span>
-                        </label>
-                        <input type="range" id="slider-ctrl-face-h" min="15" max="60" value="34" />
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- Quick Action Buttons -->
-                  <div style="display:flex; gap:6px; margin-top:4px; align-items:center;">
-                    <button type="button" class="btn-xs-link" id="btn-quick-auto-detect" style="color:#38bdf8; background:rgba(56,189,248,0.1); padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap;">
-                      🎯 Auto detect
-                    </button>
-                    <button type="button" class="btn-xs-link" id="btn-quick-reset-default" style="color:var(--t3); background:rgba(255,255,255,0.05); padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap;">
-                      🔄 Reset 16:9
-                    </button>
-                  </div>
-                </div>
-
-              </div>
-
-              <!-- Terminal Log -->
-              <div class="lt-terminal-box">
-                <div class="lt-terminal-hdr">
-                  <span>💻 System log</span>
-                  <button type="button" class="btn-xs-link" id="btn-clear-train-logs" style="color:var(--t3); font-size:11px;">Clear log</button>
-                </div>
-                <div class="lt-terminal-logs" id="lt-terminal-logs-body">
-                  <div class="log-line info">[System] Ready for avatar media...</div>
-                </div>
-              </div>
-
-            </div>
-          </div>
-
-          <!-- STEP 2: TEST VOICE AND LIPSYNC -->
-          <div class="lt-studio-col lt-col-step2 locked" id="lt-col-step2">
-            
-            <!-- Glassmorphic Lock Overlay -->
-            <div class="lt-lock-overlay" id="lt-step2-lock-overlay">
-              <div class="lt-lock-content">
-                <div style="font-size:32px; margin-bottom:6px;">🔒</div>
-                <div style="font-size:13px; font-weight:700; color:#fff;">Step 2 is locked</div>
-                <div style="font-size:11px; color:var(--t2); margin-top:4px; max-width:280px; line-height:1.4;">
-                  Complete <b>Step 1: Create avatar</b> to unlock voice and LipSync testing.
-                </div>
-              </div>
-            </div>
-
-            <div class="lt-section-card">
-              <div class="lt-card-hdr">
-                <span class="lt-card-title">🎙️ Voice and LipSync</span>
-                <span class="badge-status-pill ok" id="badge-stream-state">Ready</span>
-              </div>
-
-              <!-- Live Talking Stream Screen -->
-              <div class="lt-live-stream-box">
-                <canvas id="lt-live-stream-canvas" width="480" height="270" style="width:100%; height:100%; object-fit:cover; display:block;"></canvas>
-                <video id="lt-live-stream-video" autoplay loop muted playsinline style="display:none;"></video>
-                <div class="lt-stream-overlay-badge">🟢 LiveTalking · &lt;35ms</div>
-              </div>
-
-              <!-- Audio VU Meter Bar -->
-              <div style="margin:8px 0 6px;">
-                <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--t2); margin-bottom:2px;">
-                  <span>VU level:</span>
-                  <span id="lbl-vu-val" style="color:#38bdf8; font-weight:700;">0 dB</span>
-                </div>
-                <div class="lt-vu-meter-track">
-                  <div class="lt-vu-meter-fill" id="lt-live-vu-fill" style="width: 0%;"></div>
-                </div>
-              </div>
-
-              <!-- Voice & TTS Settings -->
-              <div class="lt-voice-config-box">
-                <div class="form-row" style="margin-bottom:6px;">
-                  <div class="form-group" style="flex:1.2;">
-                    <label>Voice provider</label>
-                    <select class="form-select-sm" id="lt-voice-provider-select">
-                      <option value="webspeech" selected>Web Speech API (Browser · no network delay)</option>
-                      <option value="elevenlabs">ElevenLabs Turbo v2.5 (Multilingual · Natural)</option>
-                      <option value="openai">OpenAI TTS (tts-1-hd)</option>
-                    </select>
-                  </div>
-                  <div class="form-group" style="flex:1;">
-                    <label style="display:flex; justify-content:space-between;">
-                      <span>Speed: <b id="val-lt-voice-speed" style="color:#38bdf8;">1.05x</b></span>
-                    </label>
-                    <input type="range" id="lt-voice-speed-slider" min="80" max="150" value="105" />
-                  </div>
-                </div>
-
-                <!-- 1. Web Speech Voices Group (DEFAULT) -->
-                <div id="lt-group-webspeech" style="display:flex; flex-direction:column; gap:6px; margin-bottom:6px;">
-                  <div class="form-group">
-                    <label>Browser voice</label>
-                    <select class="form-select-sm" id="lt-webspeech-voice-select">
-                      <option value="">Auto-select a matching voice...</option>
-                    </select>
-                  </div>
-                </div>
-
-                <!-- 2. ElevenLabs Voice Character & Key Group -->
-                <div id="lt-group-elevenlabs" style="display:none; flex-direction:column; gap:6px; margin-bottom:6px;">
-                  <div class="form-row">
-                    <div class="form-group" style="flex:1.2;">
-                      <label>Voice preset</label>
-                      <select class="form-select-sm" id="lt-eleven-voice-select">
-                        <option value="EXAVITQu4vr4xnSDxMaL" selected>Bella (Warm and expressive)</option>
-                        <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Calm and warm)</option>
-                        <option value="ThT5KcBeYPX3keUQqHPh">Dorothy (Energetic and bright)</option>
-                        <option value="pNInz6obpgDQGcFmaJgB">Adam (Deep and professional)</option>
-                        <option value="ErXwobaYiN019PkySvjV">Antoni (Young male)</option>
-                        <option value="VR6AewLTigWG4xSOukaG">Arnold (Excited male)</option>
-                        <option value="custom">-- Custom Voice ID --</option>
-                      </select>
-                    </div>
-                    <div class="form-group" style="flex:0.8;">
-                      <label>Model Engine</label>
-                      <select class="form-select-sm" id="lt-eleven-model-select">
-                        <option value="eleven_turbo_v2_5" selected>Turbo v2.5 (Fast)</option>
-                        <option value="eleven_multilingual_v2">Multilingual v2</option>
-                        <option value="eleven_flash_v2_5">Flash v2.5</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div class="form-group" id="lt-custom-voice-id-wrap" style="display:none;">
-                    <label>Custom Voice ID</label>
-                    <input type="text" class="form-input" id="lt-eleven-custom-voice-id" placeholder="Paste Voice ID..." style="font-size:11px;" />
-                  </div>
-                  <div class="settings-note">ElevenLabs credentials are managed by the runtime server.</div>
-                </div>
-
-                <!-- 3. OpenAI TTS Group -->
-                <div id="lt-group-openai" style="display:none; flex-direction:column; gap:6px; margin-bottom:6px;">
-                  <div class="form-row">
-                    <div class="form-group" style="flex:1;">
-                      <label>OpenAI voice</label>
-                      <select class="form-select-sm" id="lt-openai-voice-select">
-                        <option value="nova" selected>Nova (Warm female)</option>
-                        <option value="shimmer">Shimmer (Clear female)</option>
-                        <option value="alloy">Alloy (Balanced)</option>
-                        <option value="echo">Echo (Clear male)</option>
-                        <option value="fable">Fable (Anh-Anh)</option>
-                        <option value="onyx">Onyx (Deep male)</option>
-                      </select>
-                    </div>
-                    <div class="form-group" style="flex:1;">
-                      <label>Provider credentials</label>
-                      <div class="settings-note">Managed by the runtime server.</div>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Test LipSync Speech Box -->
-                <div class="form-group">
-                  <label style="display:flex; justify-content:space-between;">
-                    <span>Test line:</span>
-                    <button type="button" class="btn-xs-link" id="btn-reset-sample-text" style="color:var(--accent); font-size:11px;">↺ Sample</button>
-                  </label>
-                  <div class="input-actions-wrap">
-                    <input type="text" class="form-input" id="lt-test-speech-input" value="Chào cả nhà, Mimi đã sẵn sàng livestream rồi nè!" style="font-size:11px;" />
-                    <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-test-speech" title="Clear">✖</button>
-                  </div>
-                </div>
-
-                <!-- Speech Test Trigger Buttons -->
-                <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
-                  <div style="display:flex; gap:8px;">
-                    <button type="button" class="btn-primary" id="btn-test-lipsync-speak" style="flex:1; background:#3b82f6; font-weight:700; font-size:11.5px; padding:8px 14px;">
-                      🗣️ Test voice and LipSync
-                    </button>
-                    <button type="button" class="btn-secondary" id="btn-stop-lipsync-speak" style="padding:8px 12px; font-size:11.5px;" title="Stop voice">
-                      ⏹ Stop
-                    </button>
-                  </div>
-                  <button type="button" class="btn-secondary" id="btn-test-audio-wav" style="font-size:11px; padding:6px 12px; color:#34d399; border-color:rgba(52,211,153,0.4);" title="Test WAV audio">
-                    🎵 Test WAV
-                  </button>
-                </div>
-              </div>
-
-            </div>
-          </div>
-
-        </div>
-
-      </div>
-
-      <!-- Studio Footer -->
-      <div class="modal-ftr" style="border-top:1px solid rgba(255,255,255,0.08); padding:12px 20px; display:flex; justify-content:space-between; align-items:center;">
-        <button type="button" class="btn-danger-sm" id="btn-delete-full-avatar" style="background:#ef4444; color:#fff; border:none; padding:7px 14px; border-radius:4px; font-size:11px; font-weight:700; cursor:pointer;" title="Delete this avatar and restore defaults">
-          🗑️ Reset avatar
-        </button>
-        <div style="display:flex; gap:10px;">
-          <button class="btn-secondary" id="cancel-modal-avatar">Close</button>
-          <button class="btn-primary" id="save-modal-avatar" style="background:linear-gradient(135deg, #10b981, #059669); font-weight:700;">
-            💾 Apply
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 1.5 Voice & AI Persona Settings Modal -->
-  <div class="modal-backdrop" id="modal-voice" style="display:none;">
-    <div class="modal-card" style="max-width: 580px;">
-      <div class="modal-hdr">
-        <h3>🎙️ Voice and persona</h3>
-        <button class="modal-close" id="close-modal-voice">&times;</button>
-      </div>
-      <div class="modal-body">
-        <div class="form-group">
-          <label>Voice provider</label>
-          <select class="form-select" id="cfg-voice-provider">
-            <option value="webspeech">Browser Web Speech API</option>
-            <option value="elevenlabs" selected>ElevenLabs Multilingual</option>
-            <option value="openai">OpenAI TTS (tts-1 / tts-1-hd)</option>
-            <option value="custom">Custom HTTP Voice API (FPT AI / Zalo / XTTS)</option>
-          </select>
-        </div>
-
-        <div class="form-group" id="group-voice-apikey">
-          <label>Provider credentials</label>
-          <div class="settings-note" id="voice-provider-secret-status">Set on the runtime server. Keys never enter the browser.</div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group" style="flex:1;">
-            <label style="display:flex; justify-content:space-between;">
-              <span>Voice ID</span>
-              <button type="button" class="btn-xs-link" id="btn-reset-voice-id" style="color:#60a5fa;">↺ Rachel</button>
-            </label>
-            <div class="input-actions-wrap">
-              <input type="text" class="form-input" id="cfg-voice-id" value="x4KAhuXs2G8TfK9Zr7Q4" placeholder="Preset name or Voice ID" />
-              <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-voice-id" title="Clear">✖</button>
-              <button type="button" class="btn-input-action btn-reset-text" id="btn-rst-voice-id" title="Reset voice ID">↺</button>
-            </div>
-          </div>
-          <div class="form-group" style="flex:1;">
-            <label style="display:flex; justify-content:space-between;">
-              <span>Speech rate: <b id="val-voice-speed">1.0x</b></span>
-              <button type="button" class="btn-xs-link" id="btn-rst-voice-speed" style="color:#60a5fa;">↺ 1.0x</button>
-            </label>
-            <input type="range" id="cfg-voice-speed" min="0.8" max="1.5" step="0.05" value="1.0" />
-          </div>
-        </div>
-
-        <div class="form-group" id="group-voice-endpoint" style="display:none;">
-          <label>Custom Endpoint URL</label>
-          <div class="input-actions-wrap">
-            <input type="text" class="form-input" id="cfg-voice-endpoint" placeholder="Custom TTS endpoint" />
-            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-voice-endpoint" title="Clear">✖</button>
-          </div>
-        </div>
-
-        <hr class="modal-divider" />
-
-        <div class="form-group">
-          <label style="display:flex; justify-content:space-between;">
-            <span>AI host name</span>
-            <button type="button" class="btn-xs-link" id="btn-rst-persona-name" style="color:#60a5fa;">↺ Mimi</button>
-          </label>
-          <div class="input-actions-wrap">
-            <input type="text" class="form-input" id="cfg-persona-name" value="Mimi" />
-            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-persona-name" title="Clear">✖</button>
-            <button type="button" class="btn-input-action btn-reset-text" id="btn-rst-persona-name-btn" title="Reset name">↺</button>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label style="display:flex; justify-content:space-between;">
-            <span>Persona and system prompt</span>
-            <button type="button" class="btn-xs-link" id="btn-rst-persona-prompt" style="color:#60a5fa;">↺ Default</button>
-          </label>
-          <div class="input-actions-wrap">
-            <textarea class="form-textarea" id="cfg-persona-prompt" rows="3" placeholder="Describe the host persona and response style...">Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu.</textarea>
-            <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-persona-prompt" style="top:8px;" title="Clear prompt">✖</button>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label style="display:flex; justify-content:space-between;">
-            <span>Voice preview</span>
-            <button type="button" class="btn-xs-link" id="btn-rst-test-voice-text" style="color:#60a5fa;">↺ Sample</button>
-          </label>
-          <div style="display:flex; gap:6px;">
-            <div class="input-actions-wrap" style="flex:1;">
-              <input type="text" class="form-input" id="cfg-test-voice-text" value="Chào bạn nha! Cảm ơn bạn đã xem livestream của Mimi!" />
-              <button type="button" class="btn-input-action btn-clear-text" id="btn-clear-test-voice-text" title="Clear">✖</button>
-            </div>
-            <button class="btn-primary" id="btn-test-voice-speak" style="white-space:nowrap; padding:6px 14px;">▶ Preview</button>
-          </div>
-        </div>
-
-      </div>
-      <div class="modal-ftr">
-        <button class="btn-secondary" id="cancel-modal-voice">Close</button>
-        <button class="btn-primary" id="save-modal-voice">💾 Save settings</button>
       </div>
     </div>
   </div>
@@ -1278,9 +810,9 @@
               <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="GAMEPLAY_FOCUS" /> <span>🎯 GAMEPLAY_FOCUS</span></label>
             </div>
 
-            <div class="sc-group-title">Talking & Chat (Chat responses and LipSync)</div>
+            <div class="sc-group-title">Talking & Chat (Spoken replies)</div>
             <div class="sc-check-row">
-              <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="TALKING" /> <span>🗣️ TALKING (Chat response and LipSync)</span></label>
+              <label class="sc-check-item"><input type="radio" name="uploadTargetState" value="TALKING" /> <span>🗣️ TALKING (Spoken reply)</span></label>
             </div>
 
             <div class="sc-group-title">Win & Reactions (Reactions and events)</div>

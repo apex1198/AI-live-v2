@@ -128,7 +128,12 @@ export class RuntimeDatabase {
     if (!row?.selected_json) return null;
     try {
       const selected = JSON.parse(row.selected_json);
-      return { selected: Array.isArray(selected) ? selected.map(String) : [], random: Boolean(row.random) };
+      // A live runtime owns exactly one avatar. Keep the first legacy value so
+      // older databases migrate without resurrecting a multi-avatar session.
+      return {
+        selected: Array.isArray(selected) ? selected.map(String).filter(Boolean).slice(0, 1) : [],
+        random: false,
+      };
     } catch { return null; }
   }
 
@@ -136,7 +141,7 @@ export class RuntimeDatabase {
     this.db.prepare(`
       INSERT INTO avatar_sessions(id, selected_json, random, updated_at) VALUES (1, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET selected_json = excluded.selected_json, random = excluded.random, updated_at = excluded.updated_at
-    `).run(JSON.stringify(selected), random ? 1 : 0, new Date().toISOString());
+    `).run(JSON.stringify(selected.filter(Boolean).slice(0, 1)), 0, new Date().toISOString());
   }
 
   upsertSpeechCommand(command: { id: string; text: string; provider: string; state: string; error?: string | null }): void {
@@ -145,6 +150,11 @@ export class RuntimeDatabase {
       INSERT INTO speech_commands(id, text, provider, state, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET state = excluded.state, error = excluded.error, updated_at = excluded.updated_at
     `).run(command.id, command.text, command.provider, command.state, command.error || null, now, now);
+  }
+
+  countSpeechCommands(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM speech_commands').get() as { count?: number } | undefined;
+    return Number(row?.count || 0);
   }
 
   close(): void {

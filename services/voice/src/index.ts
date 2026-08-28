@@ -113,6 +113,7 @@ export interface ElevenLabsConfig {
   languageCode?: string;
   stability?: number;
   similarityBoost?: number;
+  timeoutMs?: number;
 }
 
 export const ELEVENLABS_VOICE_PRESETS: Record<string, string> = {
@@ -136,6 +137,7 @@ export class ElevenLabsTTSAdapter implements TTSAdapter {
       languageCode: 'vi',
       stability: 0.5,
       similarityBoost: 0.75,
+      timeoutMs: 30_000,
       voiceId: '21m00Tcm4TlvDq8ikWAM',
       ...config,
     };
@@ -165,14 +167,17 @@ export class ElevenLabsTTSAdapter implements TTSAdapter {
     const voiceId = this._resolveVoiceId(this._config.voiceId);
     const modelId = this._config.modelId || 'eleven_multilingual_v2';
 
-    return new Promise<TTSResult>((resolve) => {
-      this._queue = this._queue.then(async () => {
+    return new Promise<TTSResult>((resolve, reject) => {
+      this._queue = this._queue.catch(() => {}).then(async () => {
         let lastError: any = null;
 
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), this._config.timeoutMs);
             const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
               method: 'POST',
+              signal: controller.signal,
               headers: {
                 'xi-api-key': this._config.apiKey,
                 'Content-Type': 'application/json',
@@ -186,9 +191,10 @@ export class ElevenLabsTTSAdapter implements TTSAdapter {
                   stability: this._config.stability ?? 0.5,
                   similarity_boost: this._config.similarityBoost ?? 0.75,
                   use_speaker_boost: true,
+                  speed: Math.max(0.7, Math.min(1.2, request.speedMultiplier || 1)),
                 },
               }),
-            });
+            }).finally(() => clearTimeout(timeout));
 
             if (res.status === 409 || res.status === 429) {
               const errText = await res.text().catch(() => '');
@@ -225,10 +231,10 @@ export class ElevenLabsTTSAdapter implements TTSAdapter {
         }
 
         console.error('[ElevenLabsTTSAdapter] Synthesis failed after retries:', lastError);
-        resolve(new WebSpeechTTSAdapter().synthesize(request));
+        throw lastError instanceof Error ? lastError : new Error('ElevenLabs synthesis failed');
       }).catch((queueErr) => {
         console.error('[ElevenLabsTTSAdapter] Queue execution error:', queueErr);
-        resolve(new WebSpeechTTSAdapter().synthesize(request));
+        reject(queueErr);
       });
     });
   }

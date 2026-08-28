@@ -1,9 +1,44 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const node_http_1 = __importDefault(require("node:http"));
+const fs = __importStar(require("node:fs"));
+const path = __importStar(require("node:path"));
 const index_js_1 = require("./services/runtime-server/dist/index.js");
 const persistence_js_1 = require("./services/runtime-server/dist/persistence.js");
 const index_js_2 = require("./packages/asset-engine/dist/index.js");
@@ -29,8 +64,35 @@ function assert(condition, testName, detail) {
         process.exitCode = 1;
     }
 }
+function probeWebSocketUpgrade(headers) {
+    return new Promise((resolve, reject) => {
+        const request = node_http_1.default.request({
+            host: '127.0.0.1',
+            port: 9877,
+            path: '/',
+            headers: {
+                Connection: 'Upgrade',
+                Upgrade: 'websocket',
+                'Sec-WebSocket-Version': '13',
+                'Sec-WebSocket-Key': Buffer.from('0123456789abcdef').toString('base64'),
+                ...headers,
+            },
+        });
+        request.once('response', (response) => {
+            response.resume();
+            resolve(response.statusCode || 0);
+        });
+        request.once('upgrade', (_response, socket) => {
+            socket.destroy();
+            resolve(101);
+        });
+        request.once('error', reject);
+        request.end();
+    });
+}
 async function runAudit() {
     process.env.NODE_ENV = 'test';
+    process.env.OMNIVOICE_DESKTOP_ENDPOINT = 'off';
     console.log('\n═══════════════════════════════════════════════════════════════');
     console.log('       HYBRID AI IDOL LIVESTREAM — SYSTEM AUDIT & E2E TEST       ');
     console.log('═══════════════════════════════════════════════════════════════\n');
@@ -98,6 +160,22 @@ async function runAudit() {
     });
     assert(dialogueRes.text.length > 0, 'Dialogue Agent generates contextual Vietnamese celebration line', dialogueRes.text);
     assert(dialogueRes.estimatedDurationMs >= 2000, 'Dialogue Agent calculates estimated speech duration', `${dialogueRes.estimatedDurationMs}ms`);
+    assert((0, index_js_5.normalizeVietnameseSpokenText)('AK47 đang lên!') === 'a ca bốn bảy đang lên!', 'Dialogue output converts product codes to Vietnamese phonetics');
+    assert(!/[\p{Extended_Pictographic}\p{Symbol}]/u.test((0, index_js_5.normalizeVietnameseSpokenText)('Đỉnh quá 🔥')), 'Dialogue output removes icons before TTS');
+    const customPersonaAgent = new index_js_5.DialogueAgent({
+        persona: { ...dialogueAgent.persona, name: 'Bé Lộc Y Tá' },
+        providers: [new index_js_5.MockDialogueProvider()],
+    });
+    const customPersonaBatch = await customPersonaAgent.generateDialogue({
+        type: 'director.intent',
+        action: 'SPEAK',
+        priority: 3,
+        visualState: 'GAMEPLAY_IDLE',
+        intent: 'reply_to_chat_batch',
+        speechText: 'Khánh: Hôm nay chơi gì vậy?\nLinh: Cho mình chơi cùng nha',
+        timestamp: Date.now(),
+    });
+    assert(customPersonaBatch.text.includes('Bé Lộc Y Tá') && !customPersonaBatch.text.includes('Mimi'), 'Dialogue fallback and 15–20 second batch filler always use the active AI Profile name', customPersonaBatch.text);
     let duckingStateObserved = false;
     const voiceService = new index_js_6.VoiceService({
         listeners: {
@@ -268,14 +346,48 @@ async function runAudit() {
     assert(smoothedFrame2[0].x > frame1[0].x && smoothedFrame2[0].x < frame2Jittery[0].x, 'TemporalLandmarkSmoother eliminates inter-frame landmark jitter via EMA in SOURCE_FRAME_SPACE');
     // LiveTalking Digital Human Provider Tests (lipku/livetalking)
     let workerSpeakingPolls = 0;
-    const fakeWorker = node_http_1.default.createServer((request, response) => {
+    let workerTaskCounter = 0;
+    let workerSessionSequence = [];
+    const workerAudioSessions = [];
+    const workerTaskRequests = [];
+    const workerTasks = new Map();
+    const thumbnailBytes = Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    ]);
+    const fakeWorker = node_http_1.default.createServer(async (request, response) => {
         const pathname = new URL(request.url || '/', 'http://127.0.0.1:9880').pathname;
         response.setHeader('Content-Type', 'application/json');
         if (pathname === '/health')
             return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { status: 'healthy', model: 'musetalk' } }));
-        if (pathname === '/offer')
+        if (pathname === '/offer') {
+            let rawBody = '';
+            for await (const chunk of request)
+                rawBody += String(chunk);
+            const input = JSON.parse(rawBody || '{}');
+            if (input.avatar === 'missing_avatar') {
+                response.statusCode = 404;
+                return response.end(JSON.stringify({ code: 404, msg: 'avatar not found' }));
+            }
             return response.end(JSON.stringify({ sdp: 'v=0\r\n', type: 'answer', sessionid: 'session_test' }));
-        if (pathname === '/speak' || pathname === '/humanaudio') {
+        }
+        if (pathname === '/api/admin/sessions') {
+            const sessionid = workerSessionSequence.shift() || 'session_test';
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { sessions: [{ sessionid }] } }));
+        }
+        if (pathname === '/humanaudio') {
+            let rawBody = '';
+            for await (const chunk of request)
+                rawBody += chunk.toString('latin1');
+            const sessionid = rawBody.includes('stale_session') ? 'stale_session' : 'session_test';
+            workerAudioSessions.push(sessionid);
+            if (sessionid === 'stale_session') {
+                return response.end(JSON.stringify({ code: 404, msg: 'session not found' }));
+            }
+            workerSpeakingPolls = 3;
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { sessionid } }));
+        }
+        if (pathname === '/speak') {
             workerSpeakingPolls = 3;
             return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { sessionid: 'session_test' } }));
         }
@@ -288,17 +400,72 @@ async function runAudit() {
             workerSpeakingPolls = 0;
             return response.end(JSON.stringify({ code: 0, msg: 'ok' }));
         }
-        if (pathname === '/api/avatar/task' && request.method === 'POST')
-            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { task_id: 'task_test' } }));
-        if (pathname === '/api/avatar/task/task_test')
-            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { task_id: 'task_test', avatar_id: 'avatar_test', model_type: 'musetalk', status: 'completed', progress: 100 } }));
+        if (pathname === '/api/avatar/task' && request.method === 'POST') {
+            let rawBody = '';
+            for await (const chunk of request)
+                rawBody += String(chunk);
+            const input = JSON.parse(rawBody || '{}');
+            const taskId = workerTaskCounter === 0 ? 'task_test' : `task_batch_${workerTaskCounter}`;
+            workerTaskCounter += 1;
+            workerTaskRequests.push(input);
+            workerTasks.set(taskId, {
+                task_id: taskId,
+                avatar_id: input.avatar_id || 'avatar_test',
+                model_type: input.model || 'musetalk',
+                status: 'completed',
+                progress: 100,
+            });
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { task_id: taskId } }));
+        }
+        const workerTaskMatch = pathname.match(/^\/api\/avatar\/task\/([a-zA-Z0-9_-]+)$/);
+        if (workerTaskMatch && request.method === 'GET') {
+            const task = workerTasks.get(workerTaskMatch[1]) || { task_id: workerTaskMatch[1], avatar_id: 'avatar_test', model_type: 'musetalk', status: 'completed', progress: 100 };
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: task }));
+        }
         if (pathname === '/api/avatar/tasks')
             return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { tasks: [] } }));
+        if (pathname === '/api/avatars')
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { avatars: [{ id: 'avatar_test', model_type: 'musetalk', thumbnail_url: '/api/avatars/avatar_test/thumbnail' }] } }));
+        if (pathname === '/api/avatars/avatar_test/thumbnail') {
+            response.setHeader('Content-Type', 'image/png');
+            return response.end(thumbnailBytes);
+        }
+        if (pathname === '/api/avatars/avatar_test' && request.method === 'DELETE') {
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { avatar_id: 'avatar_test', deleted: true } }));
+        }
         response.statusCode = 404;
         return response.end(JSON.stringify({ code: 404, msg: 'not found' }));
     });
     await new Promise((resolve) => fakeWorker.listen(9880, '127.0.0.1', resolve));
     process.env.LIVETALKING_ENDPOINT = 'http://127.0.0.1:9880';
+    const qwenTestAudio = Buffer.alloc(44);
+    qwenTestAudio.write('RIFF', 0);
+    qwenTestAudio.write('WAVEfmt ', 8);
+    qwenTestAudio.write('data', 36);
+    const fakeQwen = node_http_1.default.createServer(async (request, response) => {
+        const pathname = new URL(request.url || '/', 'http://127.0.0.1:9881').pathname;
+        if (pathname === '/api/health')
+            return response.end(JSON.stringify({ ready: true, provider: 'qwentts', backend: 'mlx' }));
+        if (pathname === '/api/voices')
+            return response.end(JSON.stringify([{ id: 'qwen-default', voice_id: 'qwen-default', name: 'Yến Nhi', kind: 'preset', provider: 'qwentts' }]));
+        if (pathname === '/api/voices/clone' && request.method === 'POST') {
+            for await (const _chunk of request) { /* consume multipart input */ }
+            response.setHeader('Content-Type', 'application/json');
+            response.statusCode = 201;
+            return response.end(JSON.stringify({ id: 'qwen-voice-test', voice_id: 'qwen-voice-test', name: 'Mimi Clone', kind: 'clone', provider: 'qwentts', ref_text: 'xin chào mọi người' }));
+        }
+        if (pathname === '/api/synthesize' && request.method === 'POST') {
+            for await (const _chunk of request) { /* consume JSON input */ }
+            response.setHeader('Content-Type', 'audio/wav');
+            response.setHeader('X-Audio-Duration-Ms', '1200');
+            response.setHeader('X-Generation-Ms', '100');
+            return response.end(qwenTestAudio);
+        }
+        response.statusCode = 404;
+        return response.end(JSON.stringify({ detail: 'not found' }));
+    });
+    await new Promise((resolve) => fakeQwen.listen(9881, '127.0.0.1', resolve));
+    process.env.QWEN_TTS_ENDPOINT = 'http://127.0.0.1:9881';
     const liveTalkingProvider = new index_js_11.LiveTalkingProvider({ endpointUrl: 'http://127.0.0.1:9880', model: 'livetalking-wav2lip', timeoutMs: 1000 });
     assert(liveTalkingProvider.config.model === 'livetalking-wav2lip', 'LiveTalkingProvider initializes with LiveTalking Wav2Lip model');
     await liveTalkingProvider.setModel('livetalking-musetalk');
@@ -307,6 +474,12 @@ async function runAudit() {
     assert(trainRes.success === true && trainRes.stages.stage4_avatarCompiled, 'LiveTalkingProvider delegates avatar training to the worker API');
     const realProviderHealth = await liveTalkingProvider.health();
     assert(realProviderHealth.healthy === true, 'LiveTalkingProvider health reflects the worker response');
+    const providerThumbnail = await liveTalkingProvider.getAvatarThumbnail('avatar_test');
+    assert(providerThumbnail.contentType === 'image/png' && Buffer.from(providerThumbnail.bytes).equals(thumbnailBytes), 'LiveTalkingProvider fetches real avatar thumbnail bytes');
+    workerSessionSequence = ['stale_session', 'session_test'];
+    workerAudioSessions.length = 0;
+    await liveTalkingProvider.sendAudio(new Blob([qwenTestAudio], { type: 'audio/wav' }));
+    assert(workerAudioSessions.join(' -> ') === 'stale_session -> session_test', 'LiveTalkingProvider recovers when WebRTC session changes during TTS upload');
     const mockTalkingProvider = new index_js_11.MockTalkingProvider();
     await mockTalkingProvider.initialize({ id: 'mimi_test' });
     await mockTalkingProvider.startSpeaking('Cảm ơn bạn đã donate nha!', { durationMs: 3000, emotion: 'happy' });
@@ -421,9 +594,9 @@ async function runAudit() {
     assert(persistence.getActiveProject()?.projectName === 'project_test', 'SQLite persists the active project and storage root');
     persistence.upsertAvatar('avatar_test', { id: 'avatar_test', status: 'ready' });
     assert(persistence.listAvatars()[0]?.id === 'avatar_test', 'SQLite persists trained avatar records');
-    persistence.setAvatarSession(['avatar_test'], true);
+    persistence.setAvatarSession(['avatar_test', 'avatar_ignored'], true);
     const persistedSession = persistence.getAvatarSession();
-    assert(persistedSession?.selected[0] === 'avatar_test' && persistedSession.random, 'SQLite persists avatar selection and random mode');
+    assert(persistedSession?.selected.length === 1 && persistedSession.selected[0] === 'avatar_test' && persistedSession.random === false, 'SQLite enforces one active avatar per live session');
     persistence.close();
     // ── Step 9 Audit: Runtime Server End-to-End Integration ───
     console.log('\n▶ Auditing Phase 6: Runtime Server Full Integration...');
@@ -435,7 +608,51 @@ async function runAudit() {
         const res = await fetch('http://localhost:9876/api/status');
         const json = await res.json();
         assert(json.status === 'healthy', 'HTTP REST /api/status responds with healthy state');
+        assert(json.service === 'ai-idol-runtime' && typeof json.runtimeBuildId === 'string', 'Runtime status identifies the native backend build');
         assert(json.state.currentVisual !== undefined, 'REST status includes Director state');
+        const defaultSettingsRes = await fetch('http://localhost:9876/api/settings/all');
+        const defaultSettings = await defaultSettingsRes.json();
+        assert(defaultSettings.voice.provider === 'qwentts'
+            && defaultSettings.voice.voiceId === 'qwen-default'
+            && defaultSettings.voice.languageCode === 'vi', 'Runtime defaults TTS to Qwen Vietnamese 0.6B');
+        assert(defaultSettings.talkingEngine === undefined && defaultSettings.realtimeStatus !== undefined, 'Public settings hide core realtime implementation details');
+        await fetch('http://localhost:9876/api/settings/persona', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'Bé Lộc' }),
+        });
+        const customPersonaRes = await fetch('http://localhost:9876/api/settings/persona', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: 'Bé Lộc Y Tá',
+                systemPrompt: 'Bạn là Bé Lộc Y Tá, Idol streamer người Việt Nam thân thiện.',
+            }),
+        });
+        const customPersonaSettings = await customPersonaRes.json();
+        assert(customPersonaRes.status === 200
+            && customPersonaSettings.settings?.name === 'Bé Lộc Y Tá'
+            && !customPersonaSettings.settings?.systemPrompt?.includes('Mimi')
+            && !customPersonaSettings.settings?.systemPrompt?.includes('Y Tá Y Tá'), 'AI Profile updates legacy prompt names without duplicating a new name that extends the previous name');
+        const rejectedMultiAvatarSession = await fetch('http://localhost:9876/api/avatars/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ selected: ['avatar_one', 'avatar_two'], random: true }),
+        });
+        assert(rejectedMultiAvatarSession.status === 400, 'Avatar session rejects multiple active avatars');
+        const activeAvatarSessionRes = await fetch('http://localhost:9876/api/avatars/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ avatarId: 'avatar_test', selected: ['avatar_test'], random: false }),
+        });
+        const activeAvatarSession = await activeAvatarSessionRes.json();
+        assert(activeAvatarSession.session?.avatarId === 'avatar_test' && activeAvatarSession.session?.selected.length === 1, 'Avatar session stores exactly one active avatar');
+        const workerStatusRes = await fetch('http://localhost:9876/api/talking-head/livetalking/worker');
+        const workerStatus = await workerStatusRes.json();
+        assert(workerStatus.worker?.state === 'READY' && workerStatus.worker?.owned === false, 'Worker status detects an externally running LiveTalking worker without spawning one');
+        const workerStartRes = await fetch('http://localhost:9876/api/talking-head/livetalking/worker/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const workerStart = await workerStartRes.json();
+        assert(workerStartRes.status === 200 && workerStart.worker?.ready === true && workerStart.worker?.owned === false, 'Worker start endpoint reuses an already healthy worker');
         // Test Game Spin API
         const spinRes = await fetch('http://localhost:9876/api/game/spin', {
             method: 'POST',
@@ -444,14 +661,53 @@ async function runAudit() {
         });
         const spinJson = await spinRes.json();
         assert(spinJson.success === true && spinJson.event.type === 'game.mega_win', 'REST /api/game/spin executes simulation spin');
-        // Test Chat Ingestion API
-        const chatRes = await fetch('http://localhost:9876/api/chat/send', {
+        // Test Chat Ingestion API after clearing earlier simulator activity so this assertion isolates one chat.
+        await fetch('http://localhost:9876/api/speech/interrupt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        await fetch('http://localhost:9876/api/operator/command', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: 'Chào idol Mimi!', viewerName: 'Quốc Bảo', viewerTier: 'vip' }),
+            body: JSON.stringify({ action: 'CLEAR_QUEUE' }),
         });
-        const chatJson = await chatRes.json();
-        assert(chatJson.success === true && chatJson.message.priorityScore >= 70, 'REST /api/chat/send ingests and scores live chat');
+        await fetch('http://localhost:9876/api/operator/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'FORCE_STATE', state: 'GAMEPLAY_IDLE' }),
+        });
+        const chatSpeechBaseline = server.speechCommandCount;
+        const priorSpeechStatusRes = await fetch('http://localhost:9876/api/speech/status');
+        const priorSpeechStatus = await priorSpeechStatusRes.json();
+        const priorSpeechCommandId = priorSpeechStatus.speech?.commandId || '';
+        const chatPayloads = [
+            { message: 'Chào idol Mimi!', viewerName: 'Quốc Bảo', viewerTier: 'vip' },
+            { message: 'Hôm nay Mimi chơi game gì vậy?', viewerName: 'Ngọc Mai', viewerTier: 'subscriber' },
+            { message: 'Cho mình tham gia cùng nha', viewerName: 'Thanh Trúc', viewerTier: 'regular' },
+        ];
+        const chatResults = await Promise.all(chatPayloads.map(payload => fetch('http://localhost:9876/api/chat/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        }).then(response => response.json())));
+        assert(chatResults.every(result => result.success === true), 'REST /api/chat/send ingests and scores a chat batch');
+        const chatSpeechDeadline = Date.now() + 5000;
+        let chatDialogueProvider = '';
+        let chatSpeechDurationMs = 0;
+        let chatSpeechText = '';
+        while (Date.now() < chatSpeechDeadline) {
+            const speechStatusRes = await fetch('http://localhost:9876/api/speech/status');
+            const speechStatusJson = await speechStatusRes.json();
+            if (speechStatusJson.speech?.commandId !== priorSpeechCommandId && speechStatusJson.speech?.dialogueProvider) {
+                chatDialogueProvider = speechStatusJson.speech.dialogueProvider;
+                chatSpeechDurationMs = Number(speechStatusJson.speech.durationMs || 0);
+                chatSpeechText = String(speechStatusJson.speech.text || '');
+            }
+            if (server.speechCommandCount > chatSpeechBaseline && chatDialogueProvider)
+                break;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        assert(server.speechCommandCount === chatSpeechBaseline + 1, 'One chat batch creates exactly one SpeechCommand');
+        assert(chatDialogueProvider === 'mock-fallback', 'Chat SpeechCommand records the actual fallback dialogue provider', chatDialogueProvider);
+        assert(chatSpeechDurationMs >= 15_000 && chatSpeechDurationMs <= 20_000, 'Batched chat reply targets a 15–20 second avatar response', `${chatSpeechDurationMs}ms`);
+        assert(chatSpeechText.includes('Bé Lộc Y Tá') && !chatSpeechText.includes('Mimi đã đọc'), 'Runtime chat speech uses the active AI Profile instead of the legacy Mimi batch phrase', chatSpeechText);
         // Establish the runtime-owned LiveTalking session before speech.
         const offerRes = await fetch('http://localhost:9876/api/talking-head/offer', {
             method: 'POST',
@@ -460,6 +716,38 @@ async function runAudit() {
         });
         const offerJson = await offerRes.json();
         assert(offerJson.success === true && offerJson.sessionid === 'session_test', 'Runtime proxies WebRTC signaling to LiveTalking');
+        const failedOfferRes = await fetch('http://localhost:9876/api/talking-head/offer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId: 'missing_avatar' }),
+        });
+        const sessionAfterFailedOffer = await fetch('http://localhost:9876/api/avatars/session').then((response) => response.json());
+        assert(failedOfferRes.status === 503 && sessionAfterFailedOffer.session?.avatarId === 'avatar_test', 'A failed avatar connection cannot replace the persisted active session');
+        process.env.QWEN_TTS_ENDPOINT = 'http://127.0.0.1:9';
+        const omniFallbackRes = await fetch('http://localhost:9876/api/talking-head/speak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: 'Kiểm tra giọng nữ tiếng Việt dự phòng.', durationMs: 1200, emotion: 'happy' }),
+        });
+        const omniFallbackJson = await omniFallbackRes.json();
+        const omniFallbackStates = new Set([omniFallbackJson.state]);
+        let omniFallbackProvider = '';
+        const omniFallbackDeadline = Date.now() + 3000;
+        while (Date.now() < omniFallbackDeadline) {
+            const statusRes = await fetch('http://localhost:9876/api/speech/status');
+            const statusJson = await statusRes.json();
+            if (statusJson.speech?.commandId === omniFallbackJson.commandId) {
+                omniFallbackStates.add(statusJson.speech.state);
+                omniFallbackProvider = statusJson.speech.provider || omniFallbackProvider;
+                if (omniFallbackStates.has('SPEAKING') && statusJson.speech.state === 'IDLE')
+                    break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        assert(omniFallbackProvider === 'system-tts-fallback'
+            && omniFallbackStates.has('SPEAKING')
+            && omniFallbackStates.has('IDLE'), 'Offline OmniVoice falls back to operating-system audio without breaking LiveTalking speech');
+        process.env.QWEN_TTS_ENDPOINT = 'http://127.0.0.1:9881';
         await fetch('http://localhost:9876/api/settings/voice', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -513,6 +801,150 @@ async function runAudit() {
         const settingsRes = await fetch('http://localhost:9876/api/settings/all');
         const settingsJson = await settingsRes.json();
         assert(settingsJson.voice !== undefined && settingsJson.avatar !== undefined, 'REST /api/settings/all returns complete system settings');
+        const voiceProfilesRes = await fetch('http://localhost:9876/api/voice/profiles');
+        const voiceProfilesJson = await voiceProfilesRes.json();
+        const voiceProfileProviders = new Set((voiceProfilesJson.profiles || []).map((profile) => profile.provider));
+        assert(voiceProfileProviders.has('qwentts') && voiceProfileProviders.has('elevenlabs'), 'Voice catalog returns provider-specific Qwen and ElevenLabs profiles');
+        const dashboardHtml = fs.readFileSync('./operator-dashboard/index.html', 'utf8');
+        const dashboardScript = fs.readFileSync('./operator-dashboard/dashboard.js', 'utf8');
+        const dashboardStyles = fs.readFileSync('./operator-dashboard/design-system.css', 'utf8');
+        const webRtcReceiverScript = fs.readFileSync('./operator-dashboard/webrtc/receiver.js', 'utf8');
+        assert(dashboardHtml.includes('id="preview-selected-voice"')
+            && dashboardHtml.includes('id="save-selected-voice"')
+            && dashboardScript.includes('VoiceProfileState.previewedKey !== voiceProfileKey(profile)'), 'AI Profile requires voice preview before Save & use');
+        assert(dashboardHtml.indexOf('id="avatar-library-grid"') < dashboardHtml.indexOf('<h2>Idol Profile</h2>'), 'AI Profile keeps Avatar Library above Idol Profile');
+        assert(dashboardHtml.indexOf('data-app-view="avatar"') < dashboardHtml.indexOf('data-app-view="studio"')
+            && dashboardHtml.includes('id="reply-skill-file-input"')
+            && dashboardHtml.includes('id="reply-skill-list"')
+            && dashboardScript.includes("window.RuntimeApi.post('/api/settings/reply-skills/select'")
+            && dashboardScript.includes("window.RuntimeApi.delete(`/api/settings/reply-skills/${encodeURIComponent(skill.id)}`)"), 'Sidebar starts with AI Profile and exposes the persistent Markdown reply-skill workflow');
+        assert(dashboardStyles.includes('.avatar-library-grid { display: flex; flex: 0 0 304px;') && dashboardStyles.includes('overflow-x: auto'), 'Avatar Library is horizontally scrollable without collapsing inside AI Profile');
+        assert(dashboardStyles.includes('--ui-command-h: var(--ui-control-h);')
+            && dashboardStyles.includes('.chat-input-form > :where(input, button)')
+            && dashboardStyles.includes('border-radius: var(--ui-radius) !important;'), 'Live chat input and Send button share one height and corner-radius token');
+        assert(webRtcReceiverScript.includes('needsServerProbe()')
+            && dashboardScript.includes('LiveTalkingWebRTCClient.needsServerProbe?.()')
+            && dashboardScript.includes('sessionStatus.sessionId === LiveTalkingWebRTCClient.sessionId'), 'A transient WebRTC disconnect is verified against the worker session before reconnecting');
+        assert(dashboardScript.includes('if (LiveTalkingWorker.refreshing) return LiveTalkingWorker;')
+            && dashboardScript.includes('LiveTalkingWorker.refreshing = false;'), 'Live avatar health polls cannot overlap and replace a session twice');
+        assert(dashboardScript.includes('let sessionViable = LiveTalkingWebRTCClient.isViable?.()')
+            && dashboardScript.includes('if (!sessionViable && LiveTalkingWebRTCClient.sessionId && window.LiveTalkingApi?.sessionStatus)')
+            && !dashboardScript.includes("selectedId !== LiveTalkingStudio.avatarId || !LiveTalkingWebRTCClient.isConnected?.()"), 'Quick voice tests reuse a viable avatar session instead of replacing it');
+        assert(dashboardScript.includes("item.status = 'failed';\n      item.error = error.message;"), 'Avatar training surfaces startup and submission failures in the create modal');
+        assert(dashboardScript.includes("function showAppConfirm({ title = 'Confirm action'")
+            && dashboardScript.includes("title: 'Delete avatar?'")
+            && dashboardScript.includes("confirmLabel: 'Delete'")
+            && !dashboardScript.includes('if (!confirm(`Delete avatar'), 'Native avatar deletion uses an in-app confirmation modal');
+        assert(dashboardScript.includes('function resolveRuntimeClip(state, serverAsset = null, forceRandom = false)')
+            && dashboardScript.includes('serverAsset.fileName')
+            && dashboardScript.includes('if (matchingClip) return matchingClip;')
+            && dashboardScript.includes('const clipToPlay = resolveRuntimeClip(state, serverAsset, forceRandom);'), 'Runtime state assets resolve to a playable local library clip after speech ends');
+        const avatarLibraryRes = await fetch('http://localhost:9876/api/avatars/library');
+        const avatarLibraryJson = await avatarLibraryRes.json();
+        assert(avatarLibraryJson.avatars?.[0]?.thumbnailUrl === '/api/avatars/library/avatar_test/thumbnail', 'Avatar library exposes a runtime-owned thumbnail URL');
+        const avatarRenameRes = await fetch('http://localhost:9876/api/avatars/library', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: 'avatar_test', name: 'Mimi Main', modelType: 'musetalk', status: 'ready' }),
+        });
+        const avatarRenameJson = await avatarRenameRes.json();
+        const renamedAvatarLibraryJson = await fetch('http://localhost:9876/api/avatars/library').then((response) => response.json());
+        assert(avatarRenameRes.status === 201
+            && avatarRenameJson.avatar?.name === 'Mimi Main'
+            && renamedAvatarLibraryJson.avatars?.find((avatar) => avatar.id === 'avatar_test')?.name === 'Mimi Main', 'Avatar library persists editable display names');
+        const avatarThumbnailRes = await fetch('http://localhost:9876/api/avatars/library/avatar_test/thumbnail');
+        const avatarThumbnailBytes = Buffer.from(await avatarThumbnailRes.arrayBuffer());
+        assert(avatarThumbnailRes.headers.get('content-type') === 'image/png' && avatarThumbnailBytes.equals(thumbnailBytes), 'Runtime securely proxies avatar thumbnail image bytes');
+        const avatarDeleteRes = await fetch('http://localhost:9876/api/avatars/library/avatar_test', { method: 'DELETE' });
+        const sessionAfterAvatarDelete = await fetch('http://localhost:9876/api/avatars/session').then((response) => response.json());
+        assert(avatarDeleteRes.status === 200 && sessionAfterAvatarDelete.session?.selected?.length === 0, 'Deleting the active avatar clears its persisted live session');
+        // Avatar deletion must also cover legacy project-only artifacts and be
+        // safe to repeat after the worker has already lost its copy.
+        const deleteTestRoot = `/tmp/ai-idol-avatar-delete-${process.pid}`;
+        const deleteTestProject = path.join(deleteTestRoot, 'project');
+        const deleteTestAvatar = 'avatar_delete_integration';
+        fs.rmSync(deleteTestRoot, { recursive: true, force: true });
+        const deleteTestModelDir = path.join(deleteTestProject, 'models', deleteTestAvatar);
+        fs.mkdirSync(path.join(deleteTestModelDir, 'full_imgs'), { recursive: true });
+        fs.mkdirSync(path.join(deleteTestModelDir, 'mask'), { recursive: true });
+        fs.mkdirSync(path.join(deleteTestProject, 'avatars', 'source', deleteTestAvatar), { recursive: true });
+        fs.writeFileSync(path.join(deleteTestModelDir, 'avator_info.json'), JSON.stringify({ avatar_id: deleteTestAvatar }));
+        fs.writeFileSync(path.join(deleteTestModelDir, 'latents.pt'), 'test');
+        fs.writeFileSync(path.join(deleteTestModelDir, 'coords.pkl'), 'test');
+        fs.writeFileSync(path.join(deleteTestModelDir, 'mask_coords.pkl'), 'test');
+        fs.writeFileSync(path.join(deleteTestModelDir, 'full_imgs', '00000000.png'), 'test');
+        fs.writeFileSync(path.join(deleteTestModelDir, 'mask', '00000000.png'), 'test');
+        fs.writeFileSync(path.join(deleteTestProject, 'avatars', 'source', deleteTestAvatar, 'source.mp4'), 'test');
+        const deleteStorageConfigRes = await fetch('http://localhost:9876/api/storage/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rootPath: deleteTestRoot, projectName: 'project' }),
+        });
+        assert(deleteStorageConfigRes.status === 200, 'Avatar deletion integration uses an isolated project directory');
+        const generatedSkillLibrary = await fetch('http://localhost:9876/api/settings/reply-skills').then((response) => response.json());
+        assert(generatedSkillLibrary.activeSkillId === 'generated-live-session'
+            && generatedSkillLibrary.items?.some((skill) => skill.id === 'generated-live-session'), 'Reply-skill library always includes the generated Live Session fallback');
+        const uploadedSkillMarkdown = '# Bé Lộc Sales Skill\n\n- Nói tự nhiên, thân thiện.\n- Mời người xem đăng ký ở cuối câu.';
+        const uploadSkillRes = await fetch('http://localhost:9876/api/settings/reply-skills', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileName: 'be-loc-sales.md', markdown: uploadedSkillMarkdown }),
+        });
+        const uploadedSkillLibrary = await uploadSkillRes.json();
+        const uploadedSkillId = uploadedSkillLibrary.skill?.id || '';
+        const uploadedSkillPath = path.join(deleteTestProject, 'skills', `${uploadedSkillId}.md`);
+        assert(uploadSkillRes.status === 201
+            && uploadedSkillLibrary.activeSkillId === uploadedSkillId
+            && fs.readFileSync(uploadedSkillPath, 'utf8') === uploadedSkillMarkdown, 'Markdown reply skill is persisted to the active project and selected after upload');
+        const selectGeneratedSkillRes = await fetch('http://localhost:9876/api/settings/reply-skills/select', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: 'generated-live-session' }),
+        });
+        const selectedGeneratedSkill = await selectGeneratedSkillRes.json();
+        assert(selectGeneratedSkillRes.status === 200 && selectedGeneratedSkill.activeSkillId === 'generated-live-session', 'Reply-skill library can switch back to the generated Live Session skill');
+        await fetch('http://localhost:9876/api/settings/reply-skills/select', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: uploadedSkillId }),
+        });
+        const deleteSkillRes = await fetch(`http://localhost:9876/api/settings/reply-skills/${uploadedSkillId}`, { method: 'DELETE' });
+        const deletedSkillLibrary = await deleteSkillRes.json();
+        assert(deleteSkillRes.status === 200
+            && deletedSkillLibrary.activeSkillId === 'generated-live-session'
+            && !deletedSkillLibrary.items?.some((skill) => skill.id === uploadedSkillId)
+            && !fs.existsSync(uploadedSkillPath), 'Deleting the active Markdown skill removes its file and safely restores the generated fallback');
+        const projectOnlyAvatarRes = await fetch('http://localhost:9876/api/avatars/library', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: deleteTestAvatar, name: 'Integration Avatar', modelType: 'musetalk', status: 'ready' }),
+        });
+        const projectOnlyLibrary = await fetch('http://localhost:9876/api/avatars/library').then((response) => response.json());
+        assert(projectOnlyAvatarRes.status === 201 && projectOnlyLibrary.avatars?.some((avatar) => avatar.id === deleteTestAvatar), 'Avatar library discovers a trained project-only artifact');
+        await fetch('http://localhost:9876/api/avatars/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ avatarId: deleteTestAvatar, selected: [deleteTestAvatar], random: false }),
+        });
+        const projectOnlyDeleteRes = await fetch(`http://localhost:9876/api/avatars/library/${deleteTestAvatar}`, { method: 'DELETE' });
+        const repeatedDeleteRes = await fetch(`http://localhost:9876/api/avatars/library/${deleteTestAvatar}`, { method: 'DELETE' });
+        const deletedLibrary = await fetch('http://localhost:9876/api/avatars/library').then((response) => response.json());
+        const deletedSession = await fetch('http://localhost:9876/api/avatars/session').then((response) => response.json());
+        assert(projectOnlyDeleteRes.status === 200
+            && repeatedDeleteRes.status === 200
+            && !deletedLibrary.avatars?.some((avatar) => avatar.id === deleteTestAvatar)
+            && !fs.existsSync(path.join(deleteTestProject, 'models', deleteTestAvatar))
+            && !fs.existsSync(path.join(deleteTestProject, 'avatars', 'source', deleteTestAvatar))
+            && deletedSession.session?.selected?.length === 0, 'Avatar deletion removes project artifacts, SQLite state, and remains idempotent');
+        const staleAvatarId = 'avatar_stale_sqlite_only';
+        await fetch('http://localhost:9876/api/avatars/library', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: staleAvatarId, name: 'Stale Avatar', modelType: 'musetalk', status: 'ready' }),
+        });
+        const reconciledLibrary = await fetch('http://localhost:9876/api/avatars/library').then((response) => response.json());
+        assert(!reconciledLibrary.avatars?.some((avatar) => avatar.id === staleAvatarId), 'Avatar library reconciles stale SQLite-only records');
+        fs.rmSync(deleteTestRoot, { recursive: true, force: true });
         assert(settingsJson.voice.apiKey === undefined && typeof settingsJson.voice.apiKeyConfigured === 'boolean', 'REST settings redact provider secrets');
         const rejectedSecretRes = await fetch('http://localhost:9876/api/settings/voice', {
             method: 'POST',
@@ -520,6 +952,19 @@ async function runAudit() {
             body: JSON.stringify({ provider: 'elevenlabs', apiKey: 'sk_test_123', voiceId: 'EXAVITQu4vr4xnSDxMaL', speed: 1.05 }),
         });
         assert(rejectedSecretRes.status === 400, 'REST settings reject provider secrets sent by the browser');
+        const rejectedLegacyVoiceRes = await fetch('http://localhost:9876/api/settings/voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: 'openai' }),
+        });
+        assert(rejectedLegacyVoiceRes.status === 400, 'REST voice settings accept only Qwen TTS, ElevenLabs, and OmniVoice');
+        const qwenVoiceSetRes = await fetch('http://localhost:9876/api/settings/voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: 'qwentts', voiceId: 'qwen-default', speed: 1.05 }),
+        });
+        const qwenVoiceSetJson = await qwenVoiceSetRes.json();
+        assert(qwenVoiceSetJson.success === true && qwenVoiceSetJson.settings.provider === 'qwentts', 'REST /api/settings/voice configures Qwen TTS as the active provider');
         const voiceSetRes = await fetch('http://localhost:9876/api/settings/voice', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -542,13 +987,84 @@ async function runAudit() {
             body: new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112]),
         });
         const videoUploadJson = await videoUploadRes.json();
+        const samePathUploadRes = await fetch('http://localhost:9876/api/storage/file?category=uploads&filename=avatar.mp4', {
+            method: 'POST',
+            headers: { 'Content-Type': 'video/mp4' },
+            body: fs.createReadStream(videoUploadJson.path),
+            duplex: 'half',
+        });
+        const samePathUploadJson = await samePathUploadRes.json();
+        assert(samePathUploadJson.success === true && fs.readFileSync(videoUploadJson.path).equals(Buffer.from([0, 0, 0, 24, 102, 116, 121, 112])), 'Project storage atomically replaces a file without truncating the upload source');
         const audioUploadRes = await fetch('http://localhost:9876/api/storage/file?category=uploads&filename=test.wav', {
             method: 'POST',
             headers: { 'Content-Type': 'audio/wav' },
             body: new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0]),
         });
         const audioUploadJson = await audioUploadRes.json();
+        const avatarSourceARes = await fetch('http://localhost:9876/api/storage/file?category=avatars%2Fsource&filename=shared-avatar.png&avatarId=audit_source_a', {
+            method: 'POST',
+            headers: { 'Content-Type': 'image/png' },
+            body: new Uint8Array([1, 2, 3]),
+        });
+        const avatarSourceBRes = await fetch('http://localhost:9876/api/storage/file?category=avatars%2Fsource&filename=shared-avatar.png&avatarId=audit_source_b', {
+            method: 'POST',
+            headers: { 'Content-Type': 'image/png' },
+            body: new Uint8Array([4, 5, 6]),
+        });
+        const avatarSourceAJson = await avatarSourceARes.json();
+        const avatarSourceBJson = await avatarSourceBRes.json();
+        assert(avatarSourceAJson.path !== avatarSourceBJson.path
+            && avatarSourceAJson.path.includes(`${path.sep}audit_source_a${path.sep}`)
+            && avatarSourceBJson.path.includes(`${path.sep}audit_source_b${path.sep}`), 'Avatar source uploads are isolated by avatar ID and cannot overwrite matching filenames');
+        fs.unlinkSync(avatarSourceAJson.path);
+        fs.unlinkSync(avatarSourceBJson.path);
+        fs.rmdirSync(path.dirname(avatarSourceAJson.path));
+        fs.rmdirSync(path.dirname(avatarSourceBJson.path));
+        const cloneProfileRes = await fetch('http://localhost:9876/api/voice/profiles/clone', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: 'Mimi Clone',
+                sourcePath: audioUploadJson.path,
+                transcript: 'xin chào mọi người',
+                filename: 'test.wav',
+                provider: 'qwentts',
+            }),
+        });
+        const cloneProfileJson = await cloneProfileRes.json();
+        assert(cloneProfileRes.status === 201 && cloneProfileJson.profile?.provider === 'qwentts', 'Qwen voice cloning creates a reusable cached profile');
         assert(videoUploadJson.success === true && audioUploadJson.success === true, 'Project storage accepts bounded test media uploads');
+        const duplicateAvatarBatchRes = await fetch('http://localhost:9876/api/avatar/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: [
+                    { video_path: videoUploadJson.path, avatar_id: 'duplicate_avatar', model: 'musetalk' },
+                    { video_path: videoUploadJson.path, avatar_id: 'duplicate_avatar', model: 'wav2lip' },
+                ] }),
+        });
+        assert(duplicateAvatarBatchRes.status === 400, 'Avatar batch rejects duplicate avatar IDs before submitting tasks');
+        const unsafeAvatarBatchRes = await fetch('http://localhost:9876/api/avatar/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: [{ video_path: '/etc/passwd', avatar_id: 'unsafe_avatar', model: 'musetalk' }] }),
+        });
+        assert(unsafeAvatarBatchRes.status === 400, 'Avatar batch rejects source paths outside the active project');
+        const workerTaskBaseline = workerTaskRequests.length;
+        const avatarBatchRes = await fetch('http://localhost:9876/api/avatar/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: [
+                    { video_path: videoUploadJson.path, avatar_id: 'batch_musetalk', model: 'musetalk' },
+                    { video_path: videoUploadJson.path, avatar_id: 'batch_wav2lip', model: 'wav2lip' },
+                ] }),
+        });
+        const avatarBatchJson = await avatarBatchRes.json();
+        const submittedWorkerTasks = workerTaskRequests.slice(workerTaskBaseline);
+        const submittedModels = new Map(submittedWorkerTasks.map(task => [task.avatar_id, task.model]));
+        assert(avatarBatchRes.status === 202 && avatarBatchJson.data?.tasks?.length === 2, 'Avatar batch returns one task record per requested avatar');
+        assert(submittedWorkerTasks.length === 2
+            && submittedModels.get('batch_musetalk') === 'musetalk'
+            && submittedModels.get('batch_wav2lip') === 'wav2lip', 'Avatar batch submits every task with its explicit model and no shared provider mutation');
         const blockedPathRes = await fetch('http://localhost:9876/api/musetalk/batch-process', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -571,6 +1087,7 @@ async function runAudit() {
         director.destroy();
     }
     await new Promise((resolve, reject) => fakeWorker.close((error) => error ? reject(error) : resolve()));
+    await new Promise((resolve, reject) => fakeQwen.close((error) => error ? reject(error) : resolve()));
     console.log('\n▶ Auditing Phase 0: Runtime Security Boundary...');
     let publicBindRejected = false;
     try {
@@ -599,6 +1116,13 @@ async function runAudit() {
             headers: { Authorization: 'Bearer runtime-test-token' },
         });
         assert(authorizedRes.status === 200, 'Bearer token authorizes protected REST endpoints');
+        const unauthorizedWsStatus = await probeWebSocketUpgrade({ Origin: 'http://localhost:9877' });
+        assert(unauthorizedWsStatus === 401, 'WebSocket upgrades require authentication');
+        const authorizedWsStatus = await probeWebSocketUpgrade({
+            Origin: 'http://localhost:9877',
+            Authorization: 'Bearer runtime-test-token',
+        });
+        assert(authorizedWsStatus === 101, 'Bearer token authorizes WebSocket upgrades');
         const blockedOriginRes = await fetch('http://127.0.0.1:9877/api/settings/all', {
             headers: { Authorization: 'Bearer runtime-test-token', Origin: 'https://evil.example' },
         });
@@ -609,6 +1133,12 @@ async function runAudit() {
             body: JSON.stringify({ viewerName: 'tester', message: 'x'.repeat(300) }),
         });
         assert(oversizedRes.status === 413, 'Runtime enforces the JSON body size limit');
+        const invalidModelRes = await fetch('http://127.0.0.1:9877/api/ai/local/install', {
+            method: 'POST',
+            headers: { Authorization: 'Bearer runtime-test-token', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: '../../bin/sh' }),
+        });
+        assert(invalidModelRes.status === 400, 'Local AI installer rejects unsafe model tags');
     }
     finally {
         await securedServer.stop();

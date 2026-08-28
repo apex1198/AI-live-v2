@@ -36,8 +36,17 @@ class AvatarTask:
         }
 
 class TaskManager:
-    def __init__(self, max_workers=1):
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+    def __init__(self, max_workers=None):
+        if max_workers is None:
+            try:
+                max_workers = int(os.getenv("LIVETALKING_TRAIN_WORKERS", "2"))
+            except ValueError:
+                max_workers = 2
+        self.max_workers = max(1, min(4, max_workers))
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.max_workers,
+            thread_name_prefix="avatar-training",
+        )
         self.tasks = {}
         self.lock = threading.Lock()
 

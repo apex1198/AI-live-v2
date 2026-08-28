@@ -14,8 +14,6 @@
       isAiSpeaking: false,
       chatQueue: [],
       chatHistory: [],
-      pendingChatBatch: [],
-      chatProcessTimer: null,
       eventQueue: [],
       eventLog: [],
       lastCtaAt: Date.now() - (4 * 60 + 21) * 1000,
@@ -27,6 +25,7 @@
       groupRandom: JSON.parse(storage.getItem(storageKeys.GROUP_RANDOM) || '{"gameplay":true,"talking":true,"reaction":true,"cta":true}'),
       queuedTransition: null,
       activeFilter: 'all',
+      libraryRatio: storage.getItem(storageKeys.LIBRARY_RATIO) === '9:16' ? '9:16' : '16:9',
       stateHistory: [{ state: 'GAMEPLAY_IDLE', time: Date.now() - 60000, color: '#d8d8da' }],
       streamContext: {
         lastGameEvent: 'New round in progress',
@@ -36,7 +35,7 @@
         recentTopics: [],
       },
       talkingEngine: {
-        provider: storage.getItem(storageKeys.TALKING_PROVIDER) === 'off' ? 'off' : 'livetalking',
+        provider: 'livetalking',
         endpoint: storage.getItem(storageKeys.LIVETALKING_ENDPOINT) || 'http://localhost:8011',
         model: storage.getItem(storageKeys.LIVETALKING_MODEL) || 'musetalk',
         checkpoint: storage.getItem(storageKeys.W2L_CHECKPOINT) || 'wav2lip',
@@ -53,13 +52,15 @@
         speechStartedAt: 0,
       },
       voice: {
-        provider: storage.getItem(storageKeys.VOICE_PROVIDER) || 'webspeech',
+        provider: ['qwentts', 'elevenlabs', 'omnivoice'].includes(storage.getItem(storageKeys.VOICE_PROVIDER))
+          ? storage.getItem(storageKeys.VOICE_PROVIDER)
+          : 'qwentts',
         language: (() => {
           const storedLanguage = storage.getItem(storageKeys.VOICE_LANG);
           return !storedLanguage || storedLanguage === 'auto' ? 'vi' : storedLanguage;
         })(),
         providerConfigured: false,
-        elevenLabsVoiceId: storage.getItem(storageKeys.ELEVENLABS_VOICE) || 'EXAVITQu4vr4xnSDxMaL',
+        elevenLabsVoiceId: storage.getItem(storageKeys.ELEVENLABS_VOICE) || 'qwen-default',
         customVoices: JSON.parse(storage.getItem(storageKeys.CUSTOM_VOICES) || '[]'),
         speed: parseFloat(storage.getItem(storageKeys.VOICE_SPEED) || '1.05'),
         personaName: storage.getItem(storageKeys.PERSONA_NAME) || 'Mimi',

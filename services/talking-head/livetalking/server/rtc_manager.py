@@ -40,6 +40,67 @@ class RTCManager:
         """
         self.opt = opt
         self.pcs: set = set()
+        self._disconnect_tasks: Dict[str, asyncio.Task] = {}
+        self._session_pcs: Dict[str, RTCPeerConnection] = {}
+        self._closing_sessions: set = set()
+        self.close_timeout_seconds = 2.0
+
+    async def _close_session(self, pc, sessionid):
+        if sessionid in self._closing_sessions:
+            return False
+        self._closing_sessions.add(sessionid)
+        task = self._disconnect_tasks.pop(sessionid, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+        if self._session_pcs.get(sessionid) is pc:
+            self._session_pcs.pop(sessionid, None)
+        self.pcs.discard(pc)
+        session_manager.remove_session(sessionid)
+        try:
+            if pc.connectionState != "closed":
+                try:
+                    await asyncio.wait_for(pc.close(), timeout=self.close_timeout_seconds)
+                except asyncio.TimeoutError:
+                    logger.warning("Peer close timed out for session %s; session state was released", sessionid)
+        finally:
+            self._closing_sessions.discard(sessionid)
+        return True
+
+    async def close_session(self, sessionid):
+        """Explicitly release one WebRTC session before a replacement offer."""
+        pc = self._session_pcs.get(sessionid)
+        if pc is None:
+            existed = session_manager.has_session(sessionid)
+            session_manager.remove_session(sessionid)
+            return existed
+        return await self._close_session(pc, sessionid)
+
+    async def close_all_sessions(self):
+        sessionids = list(session_manager.sessions.keys())
+        if sessionids:
+            await asyncio.gather(*(self.close_session(sessionid) for sessionid in sessionids))
+        return len(sessionids)
+
+    async def close_sessions_for_avatar(self, avatar_id):
+        """Release every WebRTC session using an avatar before its files are deleted."""
+        sessionids = [
+            sessionid
+            for sessionid, avatar_session in list(session_manager.sessions.items())
+            if avatar_session is not None
+            and str(getattr(getattr(avatar_session, 'opt', None), 'avatar_id', '')) == avatar_id
+        ]
+        if sessionids:
+            await asyncio.gather(*(self.close_session(sessionid) for sessionid in sessionids))
+        return len(sessionids)
+
+    async def _close_if_still_disconnected(self, pc, sessionid):
+        try:
+            await asyncio.sleep(5)
+            if pc.connectionState == "disconnected":
+                logger.info("Closing stale disconnected session %s", sessionid)
+                await self._close_session(pc, sessionid)
+        except asyncio.CancelledError:
+            pass
 
     async def _create_pc_and_answer(self, avatar_session, sessionid, offer):
         """创建 PeerConnection、添加轨道、SDP 交换，返回已完成 answer 的 pc"""
@@ -55,14 +116,24 @@ class RTCManager:
             configuration=RTCConfiguration(iceServers=ice_servers)
         )
         self.pcs.add(pc)
+        self._session_pcs[sessionid] = pc
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
             logger.info("Connection state is %s", pc.connectionState)
+            if pc.connectionState == "connected":
+                task = self._disconnect_tasks.pop(sessionid, None)
+                if task:
+                    task.cancel()
+            elif pc.connectionState == "disconnected":
+                previous = self._disconnect_tasks.pop(sessionid, None)
+                if previous:
+                    previous.cancel()
+                self._disconnect_tasks[sessionid] = asyncio.create_task(
+                    self._close_if_still_disconnected(pc, sessionid)
+                )
             if pc.connectionState in ("failed", "closed"):
-                await pc.close()
-                self.pcs.discard(pc)
-                session_manager.remove_session(sessionid)
+                await self._close_session(pc, sessionid)
 
         # 添加发送轨道
         from server.webrtc import HumanPlayer
@@ -94,6 +165,8 @@ class RTCManager:
                 params["avatar"] = require_safe_id(params["avatar"], "avatar")
             except ValueError as exc:
                 return web.json_response({"code": 400, "msg": str(exc)}, status=400)
+        if params.get("replace_existing") is True:
+            await self.close_all_sessions()
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
         try:
@@ -106,9 +179,13 @@ class RTCManager:
             )
         logger.info('offer sessionid=%s', sessionid)
 
-        pc = await self._create_pc_and_answer(
-            session_manager.get_session(sessionid), sessionid, offer
-        )
+        try:
+            pc = await self._create_pc_and_answer(
+                session_manager.get_session(sessionid), sessionid, offer
+            )
+        except Exception:
+            session_manager.remove_session(sessionid)
+            raise
 
         return web.Response(
             content_type="application/json",
@@ -150,9 +227,13 @@ class RTCManager:
             )
         logger.info("whep sessionid=%s", sessionid)
 
-        pc = await self._create_pc_and_answer(
-            session_manager.get_session(sessionid), sessionid, offer
-        )
+        try:
+            pc = await self._create_pc_and_answer(
+                session_manager.get_session(sessionid), sessionid, offer
+            )
+        except Exception:
+            session_manager.remove_session(sessionid)
+            raise
 
         return web.Response(
             status=201,
@@ -197,3 +278,8 @@ class RTCManager:
         coros = [pc.close() for pc in self.pcs]
         await asyncio.gather(*coros)
         self.pcs.clear()
+        self._session_pcs.clear()
+        self._closing_sessions.clear()
+        for task in self._disconnect_tasks.values():
+            task.cancel()
+        self._disconnect_tasks.clear()

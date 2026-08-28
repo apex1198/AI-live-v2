@@ -9,13 +9,16 @@ from transformers import WhisperModel
 import torch
 sys.path.append("..")
 
-device = torch.device(
-    "cuda" if torch.cuda.is_available()
-    else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-    else "cpu"
-)
-# Whisper is more stable in fp32 on Apple Metal; UNet/VAE remain fp16.
-weight_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+requested_device = os.getenv("LIVETALKING_WHISPER_DEVICE", "").strip().lower()
+if requested_device:
+    device = torch.device(requested_device)
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    # On Apple Silicon, Whisper easily meets the audio-feature budget on CPU.
+    # Keeping MPS dedicated to MuseTalk avoids serializing both model workloads.
+    device = torch.device("cpu")
+weight_dtype = torch.float16 if device.type == "cuda" else torch.float32
 class Audio2Feature():
     def __init__(self, 
                  whisper_model_type="tiny",
@@ -26,6 +29,8 @@ class Audio2Feature():
         self.whisper = WhisperModel.from_pretrained(model_path)
         self.whisper = self.whisper.to(device=device, dtype=weight_dtype).eval()
         self.whisper.requires_grad_(False)
+        # Compile/warm the selected backend before the first viewer message.
+        self.audio2feat(np.zeros(16000, dtype=np.float32))
 
     def get_sliced_feature(self,
                            feature_array, 

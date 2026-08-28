@@ -39,5 +39,29 @@ class WebRTCOutput(BaseOutput):
             return self._player.get_buffer_size()
         return 0
 
+    def get_audio_buffer_size(self) -> int:
+        if self._player and hasattr(self._player, 'get_audio_buffer_size'):
+            return self._player.get_audio_buffer_size()
+        return 0
+
+    def get_video_buffer_ms(self) -> float:
+        if self._player and hasattr(self._player, 'get_video_buffer_ms'):
+            return self._player.get_video_buffer_ms()
+        return 0.0
+
+    def get_audio_buffer_ms(self) -> float:
+        if self._player and hasattr(self._player, 'get_audio_buffer_ms'):
+            return self._player.get_audio_buffer_ms()
+        return 0.0
+
+    def get_av_drift_ms(self) -> float:
+        if self._player and hasattr(self._player, 'get_av_drift_ms'):
+            return self._player.get_av_drift_ms()
+        return 0.0
+
+    def clear_buffers(self) -> None:
+        if self._player and hasattr(self._player, 'clear_buffers'):
+            self._player.clear_buffers()
+
     def stop(self) -> None:
         pass

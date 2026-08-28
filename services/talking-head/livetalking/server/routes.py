@@ -4,6 +4,7 @@
 
 import json
 import asyncio
+import os
 from aiohttp import web
 
 from utils.logger import logger
@@ -24,7 +25,9 @@ def json_ok(data=None):
 
 def json_error(msg: str, code: int = -1):
     """返回错误 JSON 响应"""
+    status = code if 400 <= code <= 599 else 400
     return web.Response(
+        status=status,
         content_type="application/json",
         text=json.dumps({"code": code, "msg": str(msg)}),
     )
@@ -60,15 +63,51 @@ def get_requested_or_first_session(request, sessionid: str = ''):
     return None, ''
 
 
+def output_metric(output, method_name, default=0):
+    method = getattr(output, method_name, None)
+    if not callable(method):
+        return default
+    try:
+        return method()
+    except Exception:
+        return default
+
+
 def worker_metrics():
-    active = sum(1 for session in session_manager.sessions.values() if session is not None)
+    active_sessions = [session for session in session_manager.sessions.values() if session is not None]
+    active = len(active_sessions)
     metrics = {
         "active_sessions": active,
         "max_sessions": session_manager.max_session,
         "gpu_allocated_bytes": 0,
         "gpu_reserved_bytes": 0,
         "accelerator": "cpu",
+        "inference_fps": 0.0,
+        "output_fps": 0.0,
+        "model_fps": 0,
+        "video_queue_depth": 0,
+        "audio_queue_depth": 0,
+        "video_buffer_ms": 0.0,
+        "audio_buffer_ms": 0.0,
+        "av_drift_ms": 0.0,
+        "dropped_video_frames": 0,
+        "repeated_video_frames": 0,
     }
+    if active_sessions:
+        session = active_sessions[0]
+        output = getattr(session, "output", None)
+        metrics.update({
+            "inference_fps": round(float(getattr(session, "inference_fps", 0.0)), 2),
+            "output_fps": round(float(getattr(session, "output_fps", 0.0)), 2),
+            "model_fps": int(getattr(getattr(session, "opt", None), "fps", 0)),
+            "video_queue_depth": int(output_metric(output, "get_buffer_size")),
+            "audio_queue_depth": int(output_metric(output, "get_audio_buffer_size")),
+            "video_buffer_ms": round(float(output_metric(output, "get_video_buffer_ms", 0.0)), 2),
+            "audio_buffer_ms": round(float(output_metric(output, "get_audio_buffer_ms", 0.0)), 2),
+            "av_drift_ms": round(float(output_metric(output, "get_av_drift_ms", 0.0)), 2),
+            "dropped_video_frames": int(getattr(session, "dropped_video_frames", 0)),
+            "repeated_video_frames": int(getattr(session, "repeated_video_frames", 0)),
+        })
     try:
         import torch
         if torch.cuda.is_available():
@@ -136,6 +175,16 @@ async def health(request):
         "accelerator": metrics["accelerator"],
         "gpu_allocated_bytes": metrics["gpu_allocated_bytes"],
         "gpu_reserved_bytes": metrics["gpu_reserved_bytes"],
+        "inference_fps": metrics["inference_fps"],
+        "output_fps": metrics["output_fps"],
+        "model_fps": metrics["model_fps"],
+        "video_queue_depth": metrics["video_queue_depth"],
+        "audio_queue_depth": metrics["audio_queue_depth"],
+        "video_buffer_ms": metrics["video_buffer_ms"],
+        "audio_buffer_ms": metrics["audio_buffer_ms"],
+        "av_drift_ms": metrics["av_drift_ms"],
+        "dropped_video_frames": metrics["dropped_video_frames"],
+        "repeated_video_frames": metrics["repeated_video_frames"],
         "webrtc": True,
     })
 
@@ -229,8 +278,15 @@ async def humanaudio(request):
     try:
         form = await request.post()
         sessionid = validated_session_id(form.get('sessionid', ''))
-        fileobj = form["file"]
-        filebytes = fileobj.file.read()
+        fileobj = form.get("file")
+        if fileobj is None or not hasattr(fileobj, 'file'):
+            return json_error("audio file is required", code=400)
+        max_audio_bytes = int(os.getenv("LIVETALKING_MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
+        filebytes = fileobj.file.read(max_audio_bytes + 1)
+        if not filebytes:
+            return json_error("audio file is empty", code=400)
+        if len(filebytes) > max_audio_bytes:
+            return json_error("audio file is too large", code=413)
 
         datainfo = {}
 
@@ -382,6 +438,22 @@ async def admin_config(request):
         return json_error(str(e))
 
 
+async def close_session(request):
+    """Release a dashboard-owned WebRTC session synchronously."""
+    try:
+        sessionid = validated_session_id(request.match_info.get('sessionid', ''))
+        rtc_manager = request.app.get("rtc_manager")
+        if rtc_manager is None:
+            return json_error("RTC manager is unavailable", code=503)
+        closed = await rtc_manager.close_session(sessionid)
+        return json_ok(data={"sessionid": sessionid, "closed": bool(closed)})
+    except ValueError as exc:
+        return json_error(str(exc), code=400)
+    except Exception as exc:
+        logger.exception('close_session exception:')
+        return json_error(str(exc))
+
+
 async def admin_sessions(request):
     """Admin: 获取活跃的会话及其配置"""
     try:
@@ -438,6 +510,7 @@ def setup_routes(app):
     app.router.add_post("/interrupt_talk", interrupt_talk)
     app.router.add_post("/is_speaking", is_speaking)
     app.router.add_get("/api/session/{sessionid}/status", session_status)
+    app.router.add_delete("/api/session/{sessionid}", close_session)
     app.router.add_get("/api/session/{sessionid}/events", sse_handler)
     app.router.add_get("/api/admin/config", admin_config)
     app.router.add_get("/api/admin/sessions", admin_sessions)

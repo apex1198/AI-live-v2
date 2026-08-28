@@ -274,8 +274,8 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     this._sessionId = sessionId ? String(sessionId) : null;
   }
 
-  async ensureActiveSession(): Promise<string> {
-    if (this._sessionId) return this._sessionId;
+  async ensureActiveSession(forceRefresh = false): Promise<string> {
+    if (this._sessionId && !forceRefresh) return this._sessionId;
     const payload = await this._request('/api/admin/sessions', {}, true);
     const sessions = Array.isArray(payload.data?.sessions) ? payload.data.sessions : [];
     const active = sessions.find((session: any) => typeof session?.sessionid === 'string' && session.sessionid);
@@ -288,13 +288,18 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     return this._config.model.includes('musetalk') ? 'musetalk' : 'wav2lip';
   }
 
-  private async _request(pathname: string, init: RequestInit = {}, retryable = false): Promise<any> {
+  private async _request(
+    pathname: string,
+    init: RequestInit = {},
+    retryable = false,
+    timeoutMs = this._config.timeoutMs,
+  ): Promise<any> {
     const endpoint = this._config.endpointUrl.replace(/\/$/, '');
     const attempts = retryable ? Math.max(1, this._config.maxRetries + 1) : 1;
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this._config.timeoutMs);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const headers = new Headers(init.headers);
         if (this._config.authToken) headers.set('Authorization', `Bearer ${this._config.authToken}`);
@@ -331,7 +336,7 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
   async trainAvatarVideo(
     videoPath: string,
     onProgress?: (stage: number, message: string, progressPct: number) => void,
-    options: { avatarId?: string; savePath?: string } = {},
+    options: { avatarId?: string; savePath?: string; model?: 'musetalk' | 'wav2lip' } = {},
   ): Promise<LiveTalkingTrainResult> {
     this._trainingState = 'training';
     this._trainingProgress = 0;
@@ -339,7 +344,7 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     this._config.avatarPath = videoPath;
     try {
       onProgress?.(1, 'Submitting avatar preprocessing to LiveTalking...', 1);
-      const taskId = await this.createAvatarTask(videoPath, avatarId, options.savePath);
+      const taskId = await this.createAvatarTask(videoPath, avatarId, options.savePath, options.model);
 
       const startedAt = Date.now();
       while (Date.now() - startedAt < this._config.trainingTimeoutMs) {
@@ -434,15 +439,32 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     const payload = await this._request('/offer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp, type, ...(avatarId ? { avatar: avatarId } : {}) }),
-    });
+      body: JSON.stringify({
+        sdp,
+        type,
+        replace_existing: true,
+        ...(avatarId ? { avatar: avatarId } : {}),
+      }),
+    }, false, Math.max(this._config.timeoutMs, 30_000));
     const parsed = z.object({ sdp: z.string().min(1), type: z.string().min(1), sessionid: z.string().min(1) }).parse(payload);
     this._sessionId = parsed.sessionid;
     return parsed;
   }
 
-  async sendAudio(audio: Blob | ArrayBuffer | Uint8Array, sessionId: string | null = this._sessionId): Promise<void> {
-    sessionId = sessionId || await this.ensureActiveSession();
+  async closeSession(sessionId: string | null = this._sessionId): Promise<boolean> {
+    if (!sessionId) return false;
+    const payload = await this._request(`/api/session/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+    });
+    if (this._sessionId === sessionId) this._sessionId = null;
+    return Boolean(payload.data?.closed);
+  }
+
+  async sendAudio(
+    audio: Blob | ArrayBuffer | Uint8Array,
+    sessionId: string | null = null,
+    mediaType = 'audio/mpeg',
+  ): Promise<string> {
     let blob: Blob;
     if (audio instanceof Blob) {
       blob = audio;
@@ -450,12 +472,39 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
       const source = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
       const copy = new Uint8Array(source.byteLength);
       copy.set(source);
-      blob = new Blob([copy.buffer], { type: 'audio/mpeg' });
+      blob = new Blob([copy.buffer], { type: mediaType });
     }
-    const form = new FormData();
-    form.append('sessionid', sessionId);
-    form.append('file', blob, 'voice.mp3');
-    await this._request('/humanaudio', { method: 'POST', body: form });
+    const extension = mediaType.includes('wav') ? 'wav' : mediaType.includes('ogg') ? 'ogg' : 'mp3';
+    const upload = async (activeSessionId: string): Promise<void> => {
+      const form = new FormData();
+      form.append('sessionid', activeSessionId);
+      form.append('file', blob, `voice.${extension}`);
+      await this._request('/humanaudio', { method: 'POST', body: form });
+    };
+
+    let activeSessionId = sessionId;
+    let lastSessionError: unknown = null;
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      try {
+        if (!activeSessionId) activeSessionId = await this.ensureActiveSession(true);
+        await upload(activeSessionId);
+        return activeSessionId;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/session\s+not\s+found|no active/i.test(message)) throw error;
+        lastSessionError = error;
+        if (this._sessionId === activeSessionId) this._sessionId = null;
+        activeSessionId = null;
+        await new Promise(resolve => setTimeout(resolve, 500));
+        try {
+          activeSessionId = await this.ensureActiveSession(true);
+        } catch (resolveError) {
+          lastSessionError = resolveError;
+          if (attempt === 15) throw resolveError;
+        }
+      }
+    }
+    throw lastSessionError instanceof Error ? lastSessionError : new Error('No active live avatar session');
   }
 
   async isSessionSpeaking(sessionId: string | null = this._sessionId): Promise<boolean> {
@@ -536,17 +585,42 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     return Array.isArray(payload.data?.avatars) ? payload.data.avatars : [];
   }
 
+  async getAvatarThumbnail(avatarId: string): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const endpoint = this._config.endpointUrl.replace(/\/$/, '');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this._config.timeoutMs);
+    const headers = new Headers();
+    if (this._config.authToken) headers.set('Authorization', `Bearer ${this._config.authToken}`);
+    try {
+      const response = await fetch(`${endpoint}/api/avatars/${encodeURIComponent(avatarId)}/thumbnail`, {
+        headers,
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`LiveTalking thumbnail HTTP ${response.status}`);
+      const contentType = response.headers.get('content-type') || 'image/png';
+      if (!contentType.startsWith('image/')) throw new Error('LiveTalking thumbnail is not an image');
+      return { bytes: new Uint8Array(await response.arrayBuffer()), contentType };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async getAvatarTask(taskId: string): Promise<any> {
     const payload = await this._request(`/api/avatar/task/${encodeURIComponent(taskId)}`, {}, true);
     return payload.data;
   }
 
-  async createAvatarTask(videoPath: string, avatarId: string, savePath?: string): Promise<string> {
+  async createAvatarTask(
+    videoPath: string,
+    avatarId: string,
+    savePath?: string,
+    model?: 'musetalk' | 'wav2lip',
+  ): Promise<string> {
     const created = await this._request('/api/avatar/task', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: this._workerModel(),
+        model: model || this._workerModel(),
         avatar_id: avatarId,
         video_path: videoPath,
         ...(savePath ? { save_path: savePath } : {}),
@@ -590,20 +664,22 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
   }
 
   async health(): Promise<ProviderHealth> {
+    let workerMetrics: Record<string, unknown> = {};
     try {
       const payload = await this._request('/health', {}, true);
       this._isHealthy = payload.code === 0 && payload.data?.status === 'healthy';
+      workerMetrics = payload.data || {};
     } catch {
       this._isHealthy = false;
     }
     return {
       providerName: 'LiveTalking Engine (lipku/livetalking)',
       healthy: this._isHealthy,
-      fps: this._fps,
-      renderLatencyMs: 0,
-      avDriftMs: 0,
-      queueDepth: this._outputQueue.length,
-      droppedFrames: 0,
+      fps: Number(workerMetrics['output_fps'] || this._fps || 0),
+      renderLatencyMs: Number(workerMetrics['video_buffer_ms'] || 0),
+      avDriftMs: Number(workerMetrics['av_drift_ms'] || 0),
+      queueDepth: Number(workerMetrics['video_queue_depth'] || this._outputQueue.length || 0),
+      droppedFrames: Number(workerMetrics['dropped_video_frames'] || 0),
       trainingState: this._trainingState,
       trainingProgress: this._trainingProgress,
     };

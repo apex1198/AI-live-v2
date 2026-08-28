@@ -14,6 +14,7 @@ export interface CharacterPersona {
   language: string;
   catchphrases: string[];
   systemPrompt?: string;
+  sessionSkillMarkdown?: string;
 }
 
 export const DEFAULT_IDOL_PERSONA: CharacterPersona = {
@@ -28,6 +29,7 @@ export const DEFAULT_IDOL_PERSONA: CharacterPersona = {
     'Trúng đậm rồi anh em ơi!',
   ],
   systemPrompt: 'Bạn là Mimi, một AI Idol streamer người Việt Nam cực kỳ vui tính, năng động và lôi cuốn. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu. Không tự chuyển sang tiếng Anh.',
+  sessionSkillMarkdown: '',
 };
 
 export interface DialogueGenerationResult {
@@ -121,6 +123,11 @@ const CURATED_LINES: Record<string, string[]> = {
   ],
 };
 
+function personalizePersonaName(text: string, persona: CharacterPersona): string {
+  const personaName = persona.name.trim() || DEFAULT_IDOL_PERSONA.name;
+  return text.replace(/\bMimi\b/gi, personaName);
+}
+
 function isLikelyVietnamese(text: string): boolean {
   const normalized = ` ${text.toLowerCase()} `;
   return /[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]/i.test(text)
@@ -128,22 +135,55 @@ function isLikelyVietnamese(text: string): boolean {
       .some(token => normalized.includes(token));
 }
 
+const VIETNAMESE_LETTER_NAMES: Record<string, string> = {
+  A: 'a', B: 'bê', C: 'xê', D: 'đê', E: 'e', F: 'ép', G: 'giê', H: 'hát', I: 'i',
+  J: 'giây', K: 'ca', L: 'eo', M: 'em', N: 'en', O: 'ô', P: 'pê', Q: 'quy', R: 'a-rờ',
+  S: 'ét', T: 'tê', U: 'u', V: 'vê', W: 'vê kép', X: 'ích', Y: 'i dài', Z: 'dét',
+};
+const VIETNAMESE_DIGIT_NAMES: Record<string, string> = {
+  '0': 'không', '1': 'một', '2': 'hai', '3': 'ba', '4': 'bốn',
+  '5': 'năm', '6': 'sáu', '7': 'bảy', '8': 'tám', '9': 'chín',
+};
+
+/** Converts display-oriented LLM output into clean Vietnamese speech text for TTS. */
+export function normalizeVietnameseSpokenText(input: string): string {
+  return input
+    .replace(/[`*_~#>|]/g, ' ')
+    .replace(/[\p{Extended_Pictographic}\p{Symbol}]/gu, ' ')
+    .replace(/\b[A-Z0-9-]{2,}\b/g, token => Array.from(token)
+      .filter(char => char !== '-')
+      .map(char => VIETNAMESE_LETTER_NAMES[char] || VIETNAMESE_DIGIT_NAMES[char] || char)
+      .join(' '))
+    .replace(/\b\d+\b/g, token => Array.from(token).map(char => VIETNAMESE_DIGIT_NAMES[char] || char).join(' '))
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // ─────────────────────────────────────────────────────────
 // Mock / Offline Provider
 // ─────────────────────────────────────────────────────────
 
 export class MockDialogueProvider implements DialogueProvider {
-  readonly name = 'mock-template-provider';
+  readonly name = 'mock-fallback';
 
-  async generate(intent: DirectorIntent, _persona: CharacterPersona): Promise<string> {
+  async generate(intent: DirectorIntent, persona: CharacterPersona): Promise<string> {
+    if (intent.intent === 'reply_to_chat_batch' && intent.speechText) {
+      const entries = intent.speechText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (entries.length) {
+        return entries.map((entry, index) => index === 0
+          ? `${persona.name} thấy ${entry} rồi nha.`
+          : `Còn ${entry} thì ${persona.name} trả lời là mình cùng theo dõi tiếp nha.`).join(' ');
+      }
+    }
     if (intent.speechText && !intent.speechText.startsWith('[')) {
-      return intent.speechText;
+      return personalizePersonaName(intent.speechText, persona);
     }
 
     const key = intent.intent ?? 'default';
     const lines = CURATED_LINES[key] ?? CURATED_LINES['default']!;
     const randomIndex = Math.floor(Math.random() * lines.length);
-    return lines[randomIndex] ?? lines[0]!;
+    return personalizePersonaName(lines[randomIndex] ?? lines[0]!, persona);
   }
 }
 
@@ -171,7 +211,7 @@ export class OpenAIDialogueProvider implements DialogueProvider {
 
   async generate(intent: DirectorIntent, persona: CharacterPersona): Promise<string> {
     if (!this._config.apiKey) {
-      return new MockDialogueProvider().generate(intent, persona);
+      throw new Error('OpenAI dialogue provider is not configured');
     }
 
     try {
@@ -186,14 +226,14 @@ export class OpenAIDialogueProvider implements DialogueProvider {
           messages: [
             {
               role: 'system',
-              content: `${persona.systemPrompt || ''}\nTên Idol: ${persona.name}. Tính cách: ${persona.personality}. Bắt buộc trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu, có biểu cảm phù hợp.`,
+              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. Tính cách: ${persona.personality}. ${intent.intent === 'reply_to_chat_batch' ? 'Hãy trả lời lần lượt nhiều bình luận trong cùng một đoạn nói tự nhiên, đủ nội dung cho khoảng 15 đến 20 giây.' : 'Bắt buộc trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1 đến 2 câu.'} Có biểu cảm phù hợp. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
             },
             {
               role: 'user',
               content: `Tình huống: [${intent.action}]. Ý định: ${intent.intent}. Cảm xúc: ${intent.emotion || 'happy'}. Nội dung cần phản hồi: ${intent.speechText || 'Tự sinh lời thoại phù hợp bằng tiếng Việt'}.`,
             },
           ],
-          max_tokens: 120,
+          max_tokens: intent.intent === 'reply_to_chat_batch' ? 280 : 120,
           temperature: this._config.temperature || 0.7,
         }),
       });
@@ -203,8 +243,8 @@ export class OpenAIDialogueProvider implements DialogueProvider {
       const json = await res.json() as any;
       const text = json.choices?.[0]?.message?.content?.trim();
       return text || new MockDialogueProvider().generate(intent, persona);
-    } catch {
-      return new MockDialogueProvider().generate(intent, persona);
+    } catch (error) {
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 }
@@ -216,7 +256,7 @@ export interface OllamaLLMConfig {
 }
 
 export class OllamaDialogueProvider implements DialogueProvider {
-  readonly name = 'ollama-qwen-local';
+  readonly name = 'qwen';
   private readonly _config: Required<OllamaLLMConfig>;
 
   constructor(config: OllamaLLMConfig = {}) {
@@ -242,14 +282,14 @@ export class OllamaDialogueProvider implements DialogueProvider {
           messages: [
             {
               role: 'system',
-              content: `${persona.systemPrompt || ''}\nTên Idol: ${persona.name}. Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1-2 câu. Không giải thích suy luận.`,
+              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. ${intent.intent === 'reply_to_chat_batch' ? 'Hãy trả lời lần lượt nhiều bình luận trong cùng một đoạn nói tự nhiên, đủ nội dung cho khoảng 15 đến 20 giây.' : 'Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1 đến 2 câu.'} Không giải thích suy luận. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
             },
             {
               role: 'user',
               content: `Sự kiện: ${intent.action}. Ý định: ${intent.intent || 'reply_to_chat'}. Cảm xúc: ${intent.emotion || 'happy'}. Tin nhắn: ${intent.speechText || 'Hãy phản hồi phù hợp với livestream.'}`,
             },
           ],
-          options: { temperature: 0.7, num_predict: 120 },
+          options: { temperature: 0.7, num_predict: intent.intent === 'reply_to_chat_batch' ? 280 : 120 },
         }),
       });
       if (!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
@@ -303,7 +343,7 @@ export class DialogueAgent {
         if (this._persona.language.toLowerCase() === 'vietnamese' && !isLikelyVietnamese(text)) {
           const { speechText: _ignoredSpeechText, ...fallbackIntent } = intent;
           text = await new MockDialogueProvider().generate(fallbackIntent, this._persona);
-          providerName = `${provider.name}-vi-fallback`;
+          providerName = 'mock-fallback';
           break;
         }
         providerName = provider.name;
@@ -316,13 +356,22 @@ export class DialogueAgent {
     // Safety fallback
     if (!text) {
       const fallbackList = CURATED_LINES['default']!;
-      text = fallbackList[0]!;
+      text = personalizePersonaName(fallbackList[0]!, this._persona);
       providerName = 'hardcoded-fallback';
     }
 
     // Estimate speaking duration: Vietnamese speaking rate is ~4.5 syllables/sec (~3.5 words/sec)
-    const wordCount = text.split(/\s+/).length;
-    const estimatedDurationMs = Math.max(2000, Math.min(8000, Math.round((wordCount / 3.5) * 1000)));
+    text = normalizeVietnameseSpokenText(personalizePersonaName(text, this._persona));
+    if (intent.intent === 'reply_to_chat_batch') {
+      const batchWords = text.split(/\s+/).filter(Boolean);
+      if (batchWords.length < 48) {
+        text = `${text} ${this._persona.name} đã đọc hết các câu hỏi rồi nha, mọi người cứ nhắn tiếp, ${this._persona.name} sẽ lần lượt trả lời để không bỏ sót ai.`;
+      }
+      const boundedWords = text.split(/\s+/).filter(Boolean);
+      if (boundedWords.length > 70) text = `${boundedWords.slice(0, 70).join(' ').replace(/[,.!?;:]+$/, '')}.`;
+    }
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+    const estimatedDurationMs = Math.max(2000, Math.min(20_000, Math.round((wordCount / 3.5) * 1000)));
 
     return {
       text,

@@ -39,8 +39,10 @@ const STORAGE_KEYS = {
   AUTO_MIX:             'idol_auto_mix',
   GLOBAL_RANDOM:        'idol_global_random',
   GROUP_RANDOM:         'idol_group_random',
+  LIBRARY_RATIO:        'idol_library_ratio',
   OBS_CONFIG:           'idol_obs_config',
   MODEL_TASKS:          'idol_model_tasks',
+  STUDIO_COLUMNS:       'idol_studio_columns',
 };
 
 // Provider secrets are server-side only. Remove credentials persisted by older builds.
@@ -80,9 +82,90 @@ const CLIP_LIBRARY = {
 };
 
 const UPLOADED_BLOBS = new Map();
+const avatarThumbnailObjectUrls = new Set();
+const TRAINED_AVATARS = new Map();
 
 // Runtime owns Director truth; this store contains only current operator UI state.
 const App = window.createOperatorStore(STORAGE_KEYS);
+let runtimeRealtimeSocket = null;
+let runtimeRealtimeConnected = false;
+let runtimeRealtimeReconnectTimer = null;
+let runtimeSpeechState = 'IDLE';
+let pendingRuntimePlaybackCommandId = null;
+
+function applyRuntimeSpeechState(speech = {}) {
+  if (speech.state) runtimeSpeechState = speech.state;
+  const providerBadge = $('sys-dialogue-provider');
+  if (providerBadge && speech.dialogueProvider) {
+    const isFallback = /mock|fallback/i.test(speech.dialogueProvider);
+    providerBadge.textContent = isFallback ? 'MOCK FALLBACK' : (speech.dialogueProvider.includes('qwen') ? 'QWEN' : speech.dialogueProvider.toUpperCase());
+    providerBadge.classList.toggle('fallback', isFallback);
+  }
+  if (speech.state === 'GENERATING') {
+    updateVoiceStatusUI('generating', 'Generating voice and neural frames…', 45);
+    return;
+  }
+  if (speech.state === 'SPEAKING') {
+    App.isAiSpeaking = true;
+    updateVoiceStatusUI('speaking', speech.provider || 'runtime', 100);
+    LiveTalkingWebRTCClient?.ensureAudioPlayback?.();
+    const subBox = $('mon-subtitles');
+    const subTxt = $('mon-sub-text');
+    if (subBox && subTxt) {
+      subTxt.textContent = speech.text || '';
+      subBox.classList.add('visible');
+    }
+    return;
+  }
+  App.isAiSpeaking = false;
+  if (pendingRuntimePlaybackCommandId && App.queuedTransition?.commandId === pendingRuntimePlaybackCommandId) {
+    clearQueuedTransition();
+  }
+  pendingRuntimePlaybackCommandId = null;
+  if (speech.state === 'ERROR') {
+    updateVoiceStatusUI('error', speech.error || 'Runtime speech failed');
+  } else {
+    updateVoiceStatusUI('idle');
+    $('mon-subtitles')?.classList.remove('visible');
+  }
+}
+
+function handleRuntimeRealtimeMessage(payload) {
+  if (payload.type === 'INITIAL_STATE') {
+    const visual = payload.state?.currentVisual;
+    if (visual) setVisualState(visual, 7, 'runtime-snapshot', false, true);
+    if (payload.speech) applyRuntimeSpeechState(payload.speech);
+    if (payload.settings) applyRuntimeSettingsUI(payload.settings);
+    return;
+  }
+  if (payload.type === 'STATE_CHANGE' && payload.toState) {
+    setVisualState(payload.toState, 7, payload.reason || 'runtime', false, true, payload.asset || null);
+  } else if (payload.type === 'SPEECH_PLAYBACK_PENDING' && payload.commandId) {
+    queueRuntimeSpeechPlayback(payload.commandId);
+  } else if (payload.type === 'SPEECH_STATE') {
+    applyRuntimeSpeechState(payload.speech);
+  } else if (payload.type === 'DIRECTOR_INTENT' && payload.intent?.dialogueProvider) {
+    applyRuntimeSpeechState({ dialogueProvider: payload.intent.dialogueProvider });
+  } else if (payload.type === 'SETTINGS_UPDATED' && payload.settings) {
+    applyRuntimeSettingsUI(payload.settings);
+  } else if (payload.type === 'REPLY_SKILLS_UPDATED' && payload.replySkills) {
+    applyReplySkillPayload(payload.replySkills);
+  } else if (payload.type === 'LIVETALKING_WORKER_STATE' && payload.worker) {
+    applyLiveTalkingWorkerState(payload.worker);
+  }
+}
+
+function connectRuntimeRealtime() {
+  if (location.protocol === 'file:' || !window.RuntimeApi?.connectRealtime) return;
+  if (runtimeRealtimeSocket && runtimeRealtimeSocket.readyState < WebSocket.CLOSING) return;
+  runtimeRealtimeSocket = window.RuntimeApi.connectRealtime(handleRuntimeRealtimeMessage, state => {
+    runtimeRealtimeConnected = state === 'open';
+    if (state === 'closed') {
+      clearTimeout(runtimeRealtimeReconnectTimer);
+      runtimeRealtimeReconnectTimer = setTimeout(connectRuntimeRealtime, 2000);
+    }
+  });
+}
 
 // ── DOM Helpers ───────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -161,12 +244,23 @@ function unlockAudio() {
 // ══════════════════════════════════════════════════════════════
 const IdolDB = {
   dbName: 'IdolMediaDB',
-  dbVersion: 1,
+  dbVersion: 2,
   db: null,
+  openingPromise: null,
+  upgradePending: false,
+  pendingWrites: [],
 
   async init() {
     if (this.db) return this.db;
-    return new Promise((resolve) => {
+    if (this.upgradePending) return null;
+    if (this.openingPromise) return this.openingPromise;
+    this.openingPromise = new Promise((resolve) => {
+      let settled = false;
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
       try {
         const request = indexedDB.open(this.dbName, this.dbVersion);
         request.onupgradeneeded = (e) => {
@@ -174,20 +268,55 @@ const IdolDB = {
           if (!db.objectStoreNames.contains('avatar_media')) {
             db.createObjectStore('avatar_media', { keyPath: 'id' });
           }
+          if (!db.objectStoreNames.contains('clip_media')) {
+            db.createObjectStore('clip_media', { keyPath: 'id' });
+          }
         };
         request.onsuccess = (e) => {
           this.db = e.target.result;
-          resolve(this.db);
+          this.upgradePending = false;
+          this.db.onversionchange = () => {
+            this.db?.close();
+            this.db = null;
+          };
+          finish(this.db);
+          this.flushPendingWrites();
         };
         request.onerror = (e) => {
           console.warn('IdolDB init error:', e);
-          resolve(null);
+          this.upgradePending = false;
+          finish(null);
+        };
+        request.onblocked = () => {
+          // Another dashboard tab may still own v1. Keep the request alive so
+          // it can finish later, but never block controls while waiting.
+          this.upgradePending = true;
+          console.warn('IdolDB upgrade is waiting for another dashboard tab to close.');
+          finish(null);
         };
       } catch (err) {
         console.warn('IdolDB open exception:', err);
-        resolve(null);
+        this.upgradePending = false;
+        finish(null);
       }
     });
+    const result = await this.openingPromise;
+    this.openingPromise = null;
+    return result;
+  },
+
+  queuePendingWrite(write) {
+    this.pendingWrites.push(write);
+  },
+
+  async flushPendingWrites() {
+    if (!this.db || !this.pendingWrites.length) return;
+    const writes = this.pendingWrites.splice(0);
+    for (const write of writes) {
+      if (write.type === 'clip') await this.saveClip(write.id, write.blob, write.meta);
+      if (write.type === 'clip-meta') await this.updateClipMeta(write.id, write.meta);
+      if (write.type === 'delete-clip') await this.deleteClip(write.id);
+    }
   },
 
   async saveAvatar(id, blob, meta = {}) {
@@ -238,9 +367,170 @@ const IdolDB = {
         resolve(false);
       }
     });
+  },
+
+  async saveClip(id, blob, meta = {}) {
+    const db = await this.init();
+    if (!db) {
+      if (this.upgradePending) this.queuePendingWrite({ type: 'clip', id, blob, meta });
+      return false;
+    }
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('clip_media', 'readwrite');
+        tx.objectStore('clip_media').put({ id, blob, meta, updatedAt: Date.now() });
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      } catch (err) {
+        console.warn('IdolDB saveClip error:', err);
+        resolve(false);
+      }
+    });
+  },
+
+  async updateClipMeta(id, meta = {}) {
+    const db = await this.init();
+    if (!db) {
+      if (this.upgradePending) this.queuePendingWrite({ type: 'clip-meta', id, meta });
+      return false;
+    }
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('clip_media', 'readwrite');
+        const store = tx.objectStore('clip_media');
+        const request = store.get(id);
+        request.onsuccess = () => {
+          if (!request.result) return;
+          store.put({ ...request.result, meta: { ...request.result.meta, ...meta }, updatedAt: Date.now() });
+        };
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      } catch (err) {
+        console.warn('IdolDB updateClipMeta error:', err);
+        resolve(false);
+      }
+    });
+  },
+
+  async getAllClips() {
+    const db = await this.init();
+    if (!db) return [];
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('clip_media', 'readonly');
+        const request = tx.objectStore('clip_media').getAll();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => resolve([]);
+      } catch (err) {
+        console.warn('IdolDB getAllClips error:', err);
+        resolve([]);
+      }
+    });
+  },
+
+  async deleteClip(id) {
+    const db = await this.init();
+    if (!db) {
+      if (this.upgradePending) this.queuePendingWrite({ type: 'delete-clip', id });
+      return false;
+    }
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction('clip_media', 'readwrite');
+        tx.objectStore('clip_media').delete(id);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      } catch (err) {
+        console.warn('IdolDB deleteClip error:', err);
+        resolve(false);
+      }
+    });
   }
 };
 window.IdolDB = IdolDB;
+
+async function loadPersistedClips() {
+  const records = await IdolDB.getAllClips();
+  for (const record of records) {
+    const state = record.meta?.state;
+    if (!record.blob || !state || !Object.prototype.hasOwnProperty.call(CLIP_LIBRARY, state)) continue;
+    const storageId = record.id;
+    if (CLIP_LIBRARY[state].some(clip => clip.storageId === storageId)) continue;
+    const blobUrl = URL.createObjectURL(record.blob);
+    const clip = {
+      id: record.meta.id || storageId,
+      storageId,
+      label: record.meta.label || record.meta.fileName || storageId,
+      fileName: record.meta.fileName || '',
+      dur: Number(record.meta.dur) || 5000,
+      mode: record.meta.mode || 'loop',
+      loop: (record.meta.mode || 'loop') === 'loop',
+      blobUrl,
+      state,
+    };
+    CLIP_LIBRARY[state].push(clip);
+    UPLOADED_BLOBS.set(storageId, blobUrl);
+  }
+  let restoredCount = records.length;
+  if (!restoredCount && location.protocol !== 'file:') {
+    restoredCount = await migrateLegacyProjectClips();
+  }
+  if (restoredCount) addLog(`Restored ${restoredCount} uploaded video${restoredCount === 1 ? '' : 's'}.`, 'ok');
+  return restoredCount;
+}
+
+async function migrateLegacyProjectClips() {
+  try {
+    const payload = await window.RuntimeApi.get('/api/storage/uploads');
+    let imported = 0;
+    for (const storedFile of payload.files || []) {
+      const response = await window.RuntimeApi.fetch(storedFile.url);
+      if (!response.ok) continue;
+      const blob = await response.blob();
+      const cleanBase = storedFile.filename.replace(/\.[^/.]+$/, '').toLowerCase().replace(/[^a-z0-9_]/g, '_') || `clip_${imported + 1}`;
+      const clipId = CLIP_LIBRARY.GAMEPLAY_IDLE.some(clip => clip.id === cleanBase)
+        ? `${cleanBase}_${imported + 1}`
+        : cleanBase;
+      const storageId = `legacy:${clipId}`;
+      const blobUrl = URL.createObjectURL(blob);
+      const clip = {
+        id: clipId,
+        storageId,
+        label: storedFile.filename.replace(/\.[^/.]+$/, '').slice(0, 18),
+        fileName: storedFile.filename,
+        dur: 5000,
+        mode: 'loop',
+        loop: true,
+        blobUrl,
+        state: 'GAMEPLAY_IDLE',
+      };
+      CLIP_LIBRARY.GAMEPLAY_IDLE.push(clip);
+      UPLOADED_BLOBS.set(storageId, blobUrl);
+      await IdolDB.saveClip(storageId, blob, {
+        id: clipId,
+        fileName: storedFile.filename,
+        label: clip.label,
+        dur: clip.dur,
+        mode: clip.mode,
+        state: clip.state,
+      });
+      const probe = document.createElement('video');
+      probe.preload = 'metadata';
+      probe.src = blobUrl;
+      probe.onloadedmetadata = () => {
+        if (!Number.isFinite(probe.duration) || probe.duration <= 0) return;
+        clip.dur = Math.round(probe.duration * 1000);
+        IdolDB.updateClipMeta(storageId, { dur: clip.dur }).catch(() => {});
+        renderLibraryUI();
+      };
+      imported += 1;
+    }
+    return imported;
+  } catch (error) {
+    console.warn('Legacy project video migration skipped:', error.message);
+    return 0;
+  }
+}
 
 async function loadPersistedAvatar() {
   try {
@@ -1558,7 +1848,7 @@ const MuseTalkRealtimeEngine = {
   audioQueue: [],
   audioFeatureChunks: [],
   generatedFrameQueue: [],
-  startupBufferTarget: 4, // Startup buffer target (3-6 frames, e.g. 4 frames = 160ms at 25 FPS)
+  startupBufferTarget: 6, // Small realtime buffer for the 50 FPS transport.
   inferenceCount: 0,
   generatedFrameCount: 0,
   lastInferenceTime: 0,
@@ -1748,7 +2038,7 @@ const LiveTalkingStudio = {
   trainProgress: 0,
   isTrainedReady: false,
   isSpeaking: false,
-  voiceProvider: 'webspeech',
+  voiceProvider: 'qwentts',
   voiceSpeed: 1.05,
   activeCtrlTab: 'face',
   landmarks468: [],
@@ -1766,11 +2056,162 @@ const LiveTalkingStudio = {
 };
 
 const AvatarSession = {
-  selected: JSON.parse(localStorage.getItem(STORAGE_KEYS.AVATAR_POOL) || '[]'),
-  random: localStorage.getItem(STORAGE_KEYS.AVATAR_RANDOM) === 'true',
+  selected: JSON.parse(localStorage.getItem(STORAGE_KEYS.AVATAR_POOL) || '[]').filter(Boolean).slice(0, 1),
+  random: false,
 };
 
-const AvatarCreateFlow = { status: 'upload', file: null };
+const AvatarCreateFlow = { status: 'upload', progress: 0, file: null, files: [], items: [] };
+const VoiceProfileState = {
+  profiles: [],
+  selected: null,
+  previewedKey: '',
+  previewAudio: null,
+  previewUrl: '',
+};
+const ReplySkillState = {
+  items: [],
+  activeSkillId: '',
+  busy: false,
+};
+const LiveTalkingWorker = {
+  state: 'OFFLINE',
+  ready: false,
+  error: '',
+  instanceKey: '',
+  pollTimer: null,
+  sessionFailureCount: 0,
+  refreshing: false,
+};
+let liveTalkingReconnectPromise = null;
+const avatarDeletionsInProgress = new Set();
+
+function reconnectLiveTalkingAvatar(avatarId) {
+  if (liveTalkingReconnectPromise) return liveTalkingReconnectPromise;
+  liveTalkingReconnectPromise = activateLiveTalkingAvatar(avatarId)
+    .finally(() => { liveTalkingReconnectPromise = null; });
+  return liveTalkingReconnectPromise;
+}
+
+function applyLiveTalkingWorkerState(worker = {}) {
+  LiveTalkingWorker.state = worker.state || (worker.ready ? 'READY' : 'OFFLINE');
+  LiveTalkingWorker.ready = Boolean(worker.ready);
+  LiveTalkingWorker.error = worker.error || '';
+  LiveTalkingWorker.instanceKey = worker.ready
+    ? `${worker.endpoint || ''}:${worker.pid || 'external'}:${worker.startedAt || 0}`
+    : '';
+  const button = $('btn-livetalking-worker');
+  const label = $('livetalking-worker-label');
+  const labels = {
+    OFFLINE: 'Prepare live avatar',
+    STARTING: 'Preparing live avatar',
+    READY: 'Live avatar ready',
+    STOPPING: 'Stopping live avatar',
+    ERROR: 'Retry live avatar',
+  };
+  if (button) {
+    button.dataset.state = LiveTalkingWorker.state;
+    button.disabled = LiveTalkingWorker.state === 'STARTING'
+      || LiveTalkingWorker.state === 'STOPPING'
+      || LiveTalkingWorker.state === 'READY';
+    button.title = LiveTalkingWorker.error || (LiveTalkingWorker.ready
+      ? 'The live avatar is ready'
+      : 'Prepare the live avatar');
+    button.setAttribute('aria-label', button.title);
+  }
+  if (label) label.textContent = labels[LiveTalkingWorker.state] || 'Prepare live avatar';
+}
+
+async function refreshLiveTalkingWorkerStatus({ silent = false } = {}) {
+  if (location.protocol === 'file:' || !window.LiveTalkingApi?.workerStatus) return LiveTalkingWorker;
+  if (LiveTalkingWorker.refreshing) return LiveTalkingWorker;
+  LiveTalkingWorker.refreshing = true;
+  try {
+    const payload = await window.LiveTalkingApi.workerStatus();
+    const wasReady = LiveTalkingWorker.ready;
+    const previousInstanceKey = LiveTalkingWorker.instanceKey;
+    applyLiveTalkingWorkerState(payload.worker || {});
+    const becameReady = !wasReady && LiveTalkingWorker.ready;
+    if (becameReady && TRAINED_AVATARS.size === 0) {
+      await refreshLiveTalkingAvatarList().catch(error => {
+        addLog(`Could not restore Avatar Library: ${error.message}`, 'warn');
+      });
+    }
+    const workerRestarted = Boolean(
+      previousInstanceKey
+      && LiveTalkingWorker.instanceKey
+      && previousInstanceKey !== LiveTalkingWorker.instanceKey,
+    );
+    let sessionViable = LiveTalkingWebRTCClient.isViable?.()
+      ?? LiveTalkingWebRTCClient.isConnected?.()
+      ?? Boolean(LiveTalkingWebRTCClient.sessionId);
+    const speechBusy = runtimeSpeechState === 'GENERATING' || runtimeSpeechState === 'SPEAKING';
+    if (sessionViable
+      && !speechBusy
+      && LiveTalkingWebRTCClient.needsServerProbe?.()
+      && window.LiveTalkingApi?.sessionStatus) {
+      try {
+        const sessionStatus = await window.LiveTalkingApi.sessionStatus();
+        sessionViable = !sessionStatus.sessionId
+          || sessionStatus.sessionId === LiveTalkingWebRTCClient.sessionId;
+      } catch {
+        sessionViable = false;
+      }
+    }
+    if (sessionViable) LiveTalkingWorker.sessionFailureCount = 0;
+    else LiveTalkingWorker.sessionFailureCount += 1;
+    const sessionConfirmedLost = LiveTalkingWorker.sessionFailureCount >= 3;
+    if (LiveTalkingWorker.ready
+      && App.talkingEngine.provider === 'livetalking'
+      && !speechBusy
+      && avatarDeletionsInProgress.size === 0
+      && (becameReady || workerRestarted || sessionConfirmedLost)) {
+      const avatarId = [AvatarSession.selected[0], LiveTalkingStudio.avatarId]
+        .find(id => id && TRAINED_AVATARS.has(id))
+        || TRAINED_AVATARS.keys().next().value;
+      if (avatarId && !liveTalkingReconnectPromise) {
+        LiveTalkingWorker.sessionFailureCount = 0;
+        void reconnectLiveTalkingAvatar(avatarId)
+          .catch(error => addLog(`Live avatar reconnect failed: ${error.message}`, 'warn'));
+      }
+    }
+  } catch (error) {
+    if (!silent) {
+      applyLiveTalkingWorkerState({ state: 'ERROR', ready: false, error: error.message });
+      addLog(`LiveTalking worker status failed: ${error.message}`, 'warn');
+    }
+  } finally {
+    LiveTalkingWorker.refreshing = false;
+  }
+  return LiveTalkingWorker;
+}
+
+async function startLiveTalkingWorker() {
+  if (LiveTalkingWorker.ready) return LiveTalkingWorker;
+  applyLiveTalkingWorkerState({ state: 'STARTING', ready: false });
+  try {
+    const payload = await window.LiveTalkingApi.startWorker();
+    applyLiveTalkingWorkerState(payload.worker || { state: 'STARTING' });
+    addLog('LiveTalking worker startup requested.', 'ok');
+    return LiveTalkingWorker;
+  } catch (error) {
+    applyLiveTalkingWorkerState({ state: 'ERROR', ready: false, error: error.message });
+    addLog(`LiveTalking worker could not start: ${error.message}`, 'err');
+    throw error;
+  }
+}
+
+async function ensureLiveTalkingWorkerReady(timeoutMs = 180000) {
+  await refreshLiveTalkingWorkerStatus({ silent: true });
+  if (!LiveTalkingWorker.ready) await startLiveTalkingWorker();
+  const deadline = Date.now() + timeoutMs;
+  while (!LiveTalkingWorker.ready && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    await refreshLiveTalkingWorkerStatus({ silent: true });
+    if (LiveTalkingWorker.state === 'ERROR') throw new Error(LiveTalkingWorker.error || 'LiveTalking worker failed to start');
+  }
+  if (!LiveTalkingWorker.ready) throw new Error('LiveTalking worker startup timed out');
+  return LiveTalkingWorker;
+}
 
 const ProjectStorage = {
   rootPath: localStorage.getItem(STORAGE_KEYS.PROJECT_STORAGE_ROOT) || '',
@@ -1805,14 +2246,60 @@ async function registerProjectAvatar(avatar) {
   return payload.avatar;
 }
 
+async function renameProjectAvatar(avatar, name) {
+  const nextName = String(name || '').trim();
+  if (!nextName) throw new Error('Avatar name cannot be empty');
+  if (nextName.length > 160) throw new Error('Avatar name must be 160 characters or fewer');
+  const updated = await registerProjectAvatar({
+    id: avatar.id,
+    name: nextName,
+    modelType: avatar.modelType === 'wav2lip' ? 'wav2lip' : 'musetalk',
+    status: avatar.status === 'failed' ? 'failed' : 'ready',
+    ...(Number.isFinite(Number(avatar.trainedAt)) ? { trainedAt: Number(avatar.trainedAt) } : {}),
+  });
+  await refreshLiveTalkingAvatarList();
+  return updated;
+}
+
 async function deleteProjectAvatar(avatarId) {
   if (location.protocol === 'file:') throw new Error('Open the dashboard through localhost to manage avatars');
-  const payload = await window.LiveTalkingApi.deleteAvatar(avatarId);
-  AvatarSession.selected = AvatarSession.selected.filter(id => id !== avatarId);
-  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
-  await saveAvatarSession().catch(() => {});
-  await refreshLiveTalkingAvatarList();
-  return payload;
+  avatarDeletionsInProgress.add(avatarId);
+  const wasSelected = AvatarSession.selected.includes(avatarId);
+  const legacyAvatar = await IdolDB.getAvatar('livetalking_avatar').catch(() => null);
+  const legacyAvatarId = legacyAvatar?.meta?.avatarId || '';
+  try {
+    AvatarSession.selected = AvatarSession.selected.filter(id => id !== avatarId);
+    await saveAvatarSession();
+    if (LiveTalkingStudio.avatarId === avatarId && LiveTalkingWebRTCClient.sessionId) {
+      await LiveTalkingWebRTCClient.disconnect();
+    }
+    const payload = await window.LiveTalkingApi.deleteAvatar(avatarId);
+    // Older builds kept one preview copy under a singleton IndexedDB key.
+    // Remove it too, otherwise a reload can restore the deleted avatar.
+    if (!legacyAvatarId || legacyAvatarId === avatarId) {
+      await IdolDB.deleteAvatar('livetalking_avatar').catch(() => {});
+    }
+    if (LiveTalkingStudio.avatarId === avatarId) {
+      LiveTalkingStudio.avatarId = '';
+      LiveTalkingStudio.isTrainedReady = false;
+      LiveTalkingStudio.trainProgress = 0;
+      localStorage.removeItem(STORAGE_KEYS.LIVETALKING_AVATAR);
+    }
+    if (localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) === avatarId) {
+      localStorage.removeItem(STORAGE_KEYS.LIVETALKING_AVATAR);
+    }
+    localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
+    await refreshLiveTalkingAvatarList();
+    return payload;
+  } catch (error) {
+    if (wasSelected && TRAINED_AVATARS.has(avatarId)) {
+      AvatarSession.selected = [avatarId];
+      await saveAvatarSession().catch(() => {});
+    }
+    throw error;
+  } finally {
+    avatarDeletionsInProgress.delete(avatarId);
+  }
 }
 
 async function loadProjectStorageConfig() {
@@ -1894,7 +2381,7 @@ async function refreshLocalAiStatus() {
     const response = await fetch('/api/ai/local/status');
     const payload = await response.json();
     if (!response.ok || !payload.success) throw new Error(payload.error || 'Could not read local AI status');
-    if (modelName) modelName.textContent = payload.model;
+    if (modelName && document.activeElement !== modelName) modelName.value = payload.model;
     if (badge) badge.textContent = payload.installed ? 'Ready' : (payload.reachable ? 'Not installed' : 'Offline');
     if (state) state.textContent = payload.installed ? 'Ollama ready' : (payload.reachable ? 'Ollama connected' : 'Start Ollama first');
     if (progress) progress.textContent = payload.install?.state === 'INSTALLING' ? payload.install.progress : (payload.install?.error || '');
@@ -1902,7 +2389,7 @@ async function refreshLocalAiStatus() {
       installButton.disabled = payload.installed || payload.install?.state === 'INSTALLING';
       installButton.innerHTML = payload.installed
         ? '<span class="material-symbols-rounded">check</span>Installed'
-        : '<span class="material-symbols-rounded">download</span>Install model';
+        : '<span class="material-symbols-rounded">download</span>Cài đặt Show Director';
     }
     return payload;
   } catch (error) {
@@ -1913,7 +2400,12 @@ async function refreshLocalAiStatus() {
 }
 
 async function installLocalAiModel() {
-  const response = await fetch('/api/ai/local/install', { method: 'POST' });
+  const model = $('local-ai-model-name')?.value?.trim() || '';
+  const response = await fetch('/api/ai/local/install', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(model ? { model } : {}),
+  });
   const payload = await response.json();
   if (!response.ok && response.status !== 409) throw new Error(payload.error || 'Could not start model installation');
   await refreshLocalAiStatus();
@@ -2013,14 +2505,16 @@ function logLiveTalkingTerminal(msg, type = 'info') {
 }
 
 function updateLiveTalkingVoiceUI() {
-  const provider = $('lt-voice-provider-select')?.value || App.voice.provider || 'webspeech';
+  const provider = $('lt-voice-provider-select')?.value || App.voice.provider || 'qwentts';
   const grpEleven = $('lt-group-elevenlabs');
   const grpWebspeech = $('lt-group-webspeech');
   const grpOpenai = $('lt-group-openai');
+  const grpOmnivoice = $('lt-group-omnivoice');
 
   if (grpEleven) grpEleven.style.display = provider === 'elevenlabs' ? 'flex' : 'none';
   if (grpWebspeech) grpWebspeech.style.display = provider === 'webspeech' ? 'flex' : 'none';
   if (grpOpenai) grpOpenai.style.display = provider === 'openai' ? 'flex' : 'none';
+  if (grpOmnivoice) grpOmnivoice.style.display = provider === 'omnivoice' ? 'flex' : 'none';
 
   // Custom ElevenLabs Voice ID field toggle
   const elevenVoice = $('lt-eleven-voice-select')?.value;
@@ -2129,7 +2623,7 @@ function updateLiveTalkingUI() {
 }
 
 function updateAvatarCreateUI() {
-  const progress = Math.max(0, Math.min(100, Number(LiveTalkingStudio.trainProgress) || 0));
+  const progress = Math.max(0, Math.min(100, Number(AvatarCreateFlow.progress) || 0));
   const fill = $('avatar-create-progress-fill');
   const label = $('avatar-create-progress-label');
   const status = $('avatar-create-status');
@@ -2153,21 +2647,100 @@ function updateAvatarCreateUI() {
   });
 
   if (button) {
-    button.disabled = !AvatarCreateFlow.file || LiveTalkingStudio.isTraining;
+    button.disabled = !AvatarCreateFlow.files.length || LiveTalkingStudio.isTraining;
     button.innerHTML = current === 'done'
       ? `${window.materialIcon?.('check') || ''}Done`
       : current === 'training'
         ? `${window.materialIcon?.('progress_activity') || ''}Training…`
         : `${window.materialIcon?.('model_training') || ''}Start Training`;
   }
+  const failedItems = AvatarCreateFlow.items.filter(item => item.status === 'failed');
   if (message) message.textContent = current === 'done'
-    ? 'Training complete. This avatar is saved and ready for live selection.'
+    ? `${AvatarCreateFlow.items.filter(item => item.status === 'completed').length} avatar(s) ready. ${AvatarCreateFlow.items.filter(item => item.status === 'failed').length} failed.`
     : current === 'training'
-      ? 'The worker is preparing frames, face coordinates, latents, and masks.'
+      ? 'The app is preparing the avatar for realtime speech.'
+      : failedItems.length
+        ? `Training failed: ${failedItems[0].error || 'The avatar engine rejected the task.'}`
       : 'Your trained avatar will be saved to the local avatar library.';
 }
 
-async function loadAvatarTrainingFile(file) {
+function cleanAvatarId(value, fallback = 'avatar') {
+  return String(value || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || fallback;
+}
+
+function renderAvatarBatchQueue() {
+  const queue = $('avatar-batch-queue');
+  if (!queue) return;
+  queue.replaceChildren();
+  AvatarCreateFlow.items.forEach((item, index) => {
+    const row = document.createElement('div');
+    row.className = 'avatar-batch-row';
+    row.dataset.status = item.status || 'ready';
+    row.dataset.batchIndex = String(index);
+
+    const filename = document.createElement('span');
+    filename.className = 'avatar-batch-file';
+    filename.textContent = item.file.name;
+    filename.title = item.file.name;
+
+    const idInput = document.createElement('input');
+    idInput.className = 'form-input-sm';
+    idInput.value = item.avatarId;
+    idInput.maxLength = 80;
+    idInput.setAttribute('aria-label', `Avatar ID for ${item.file.name}`);
+    idInput.dataset.batchAvatarId = String(index);
+    idInput.disabled = LiveTalkingStudio.isTraining;
+
+    const modelLabel = document.createElement('span');
+    modelLabel.className = 'avatar-batch-engine';
+    modelLabel.textContent = 'Standard';
+
+    const state = document.createElement('span');
+    state.className = 'avatar-batch-state';
+    state.textContent = item.status === 'failed'
+      ? 'Failed'
+      : item.status === 'completed' ? 'Ready' : item.status === 'training' ? `${Math.round(item.progress || 0)}%` : item.status === 'uploading' ? 'Upload…' : 'Queued';
+    state.title = item.error || '';
+    row.append(filename, idInput, modelLabel, state);
+    queue.appendChild(row);
+  });
+}
+
+function syncAvatarBatchIds(baseId) {
+  const base = cleanAvatarId(baseId, 'avatar');
+  AvatarCreateFlow.items.forEach((item, index) => {
+    item.avatarId = AvatarCreateFlow.items.length === 1 ? base : `${base}_${String(index + 1).padStart(2, '0')}`.slice(0, 80);
+  });
+  renderAvatarBatchQueue();
+}
+
+async function loadAvatarTrainingFiles(fileList) {
+  const files = [...(fileList || [])].slice(0, 20);
+  if (!files.length) return;
+  AvatarCreateFlow.progress = 0;
+  AvatarCreateFlow.files = files;
+  AvatarCreateFlow.file = files[0];
+  const baseId = cleanAvatarId($('avatar-create-id')?.value, `avatar_${String(Date.now()).slice(-6)}`);
+  const model = $('lt-model-select')?.value || 'musetalk';
+  AvatarCreateFlow.items = files.map((file, index) => ({
+    file,
+    avatarId: files.length === 1 ? baseId : `${baseId}_${String(index + 1).padStart(2, '0')}`.slice(0, 80),
+    model,
+    status: 'ready',
+    progress: 0,
+    taskId: '',
+    storedPath: '',
+    error: '',
+  }));
+  renderAvatarBatchQueue();
+  await loadAvatarTrainingFile(files[0], false);
+  if ($('avatar-create-file-name')) $('avatar-create-file-name').textContent = files.length === 1
+    ? files[0].name
+    : `${files.length} avatar files selected`;
+  updateAvatarCreateUI();
+}
+
+async function loadAvatarTrainingFile(file, persistSource = true) {
   if (!file) return;
   AvatarCreateFlow.file = file;
   AvatarCreateFlow.status = 'config';
@@ -2193,15 +2766,22 @@ async function loadAvatarTrainingFile(file) {
     LiveTalkingStudio.videoEl = vid;
   }
 
+  // Project storage is the durable source of truth. This browser cache only
+  // speeds up preview restore and must not prevent a training task from running.
   await IdolDB.saveAvatar('livetalking_avatar', file, {
     fileName: file.name,
     fileSize: file.size,
     isTrainedReady: false,
     uploadedAt: Date.now(),
+  }).catch(error => {
+    console.warn('[Avatar] Local preview cache is unavailable:', error);
+    addLog(`Avatar preview cache skipped: ${error.message}`, 'warn');
   });
-  persistProjectFile(file, 'avatars/source', $('avatar-create-id')?.value.trim() || $('lt-avatar-id-input')?.value.trim() || 'avatar_main')
-    .then(saved => saved && addLog(`Saved avatar media: ${saved.path}`, 'ok'))
-    .catch(err => addLog(`Could not save avatar media: ${err.message}`, 'warn'));
+  if (persistSource) {
+    persistProjectFile(file, 'avatars/source', $('avatar-create-id')?.value.trim() || $('lt-avatar-id-input')?.value.trim() || 'avatar_main')
+      .then(saved => saved && addLog(`Saved avatar media: ${saved.path}`, 'ok'))
+      .catch(err => addLog(`Could not save avatar media: ${err.message}`, 'warn'));
+  }
 
   if ($('avatar-create-file-name')) $('avatar-create-file-name').textContent = file.name;
   updateLiveTalkingUI();
@@ -2211,16 +2791,20 @@ async function loadAvatarTrainingFile(file) {
 function openAvatarCreateModal() {
   if (!LiveTalkingStudio.isTraining) {
     AvatarCreateFlow.status = 'upload';
+    AvatarCreateFlow.progress = 0;
     AvatarCreateFlow.file = null;
+    AvatarCreateFlow.files = [];
+    AvatarCreateFlow.items = [];
     LiveTalkingStudio.trainProgress = 0;
     const suggestedId = `avatar_${String(Date.now()).slice(-6)}`;
     if ($('avatar-create-id')) $('avatar-create-id').value = suggestedId;
     if ($('lt-avatar-id-input')) $('lt-avatar-id-input').value = suggestedId;
     if ($('input-avatar-create-file')) $('input-avatar-create-file').value = '';
-    if ($('avatar-create-file-name')) $('avatar-create-file-name').textContent = 'Upload image or video';
+    if ($('avatar-create-file-name')) $('avatar-create-file-name').textContent = 'Upload one or more avatars';
   }
   if ($('modal-avatar-create')) $('modal-avatar-create').style.display = 'flex';
   updateAvatarCreateUI();
+  renderAvatarBatchQueue();
 }
 
 function closeAvatarCreateModal() {
@@ -2454,20 +3038,10 @@ async function startLiveTalkingTrainingSimulation() {
 async function refreshLiveTalkingAvatarList() {
   const select = $('lt-existing-avatar-select');
   const records = new Map();
-  const [workerResult, localResult, sessionResult] = await Promise.allSettled([
-    location.protocol === 'file:' ? Promise.resolve({ data: { tasks: [] } }) : window.LiveTalkingApi.listTasks(),
+  const [localResult, sessionResult] = await Promise.allSettled([
     location.protocol === 'file:' ? Promise.resolve({ avatars: [] }) : window.LiveTalkingApi.listAvatars(),
     location.protocol === 'file:' ? Promise.resolve({ session: null }) : window.LiveTalkingApi.getAvatarSession(),
   ]);
-  if (workerResult.status === 'fulfilled') {
-    for (const task of workerResult.value.data?.tasks || []) {
-      if (task.status === 'completed' && task.avatar_id) {
-        records.set(task.avatar_id, { id: task.avatar_id, name: task.avatar_id, status: 'ready', trainedAt: task.completed_at || task.updated_at, source: 'worker' });
-      }
-    }
-  } else {
-    logLiveTalkingTerminal(`Could not load avatars from the worker: ${workerResult.reason?.message || workerResult.reason}`, 'warn');
-  }
   if (localResult.status === 'fulfilled') {
     for (const avatar of localResult.value.avatars || []) {
       const id = avatar.id || avatar.avatarId;
@@ -2475,15 +3049,31 @@ async function refreshLiveTalkingAvatarList() {
     }
   }
   if (sessionResult.status === 'fulfilled' && sessionResult.value.session) {
-    AvatarSession.selected = [...new Set(sessionResult.value.session.selected || [])];
-    AvatarSession.random = Boolean(sessionResult.value.session.random);
+    const persistedAvatarId = sessionResult.value.session.avatarId || sessionResult.value.session.selected?.[0] || '';
+    AvatarSession.selected = persistedAvatarId && records.has(persistedAvatarId) ? [persistedAvatarId] : [];
+    AvatarSession.random = false;
     localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
     localStorage.setItem(STORAGE_KEYS.AVATAR_RANDOM, String(AvatarSession.random));
-  }
-  if (LiveTalkingStudio.isTrainedReady && LiveTalkingStudio.avatarId && !records.has(LiveTalkingStudio.avatarId)) {
-    records.set(LiveTalkingStudio.avatarId, { id: LiveTalkingStudio.avatarId, name: LiveTalkingStudio.videoFile?.name || LiveTalkingStudio.avatarId, status: 'ready', source: 'session' });
+    if (persistedAvatarId && !AvatarSession.selected.length && localResult.status === 'fulfilled' && localResult.value.workerAvailable !== false) {
+      void window.LiveTalkingApi.saveAvatarSession([], false)
+        .catch(error => addLog(`Could not clear an unavailable avatar session: ${error.message}`, 'warn'));
+    }
   }
   const avatars = [...records.values()];
+  TRAINED_AVATARS.clear();
+  avatars.forEach(avatar => TRAINED_AVATARS.set(avatar.id, avatar));
+  const validIds = new Set(avatars.map(avatar => avatar.id));
+  const persistedSelectedId = AvatarSession.selected.find(id => validIds.has(id)) || '';
+  const cachedActiveId = validIds.has(LiveTalkingStudio.avatarId) ? LiveTalkingStudio.avatarId : '';
+  const validActiveId = persistedSelectedId || cachedActiveId || avatars[0]?.id || '';
+  AvatarSession.selected = validActiveId ? [validActiveId] : [];
+  LiveTalkingStudio.avatarId = validActiveId;
+  if (validActiveId) {
+    localStorage.setItem(STORAGE_KEYS.LIVETALKING_AVATAR, validActiveId);
+  } else {
+    localStorage.removeItem(STORAGE_KEYS.LIVETALKING_AVATAR);
+  }
+  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
   if (select) {
     select.replaceChildren(...avatars.map(avatar => {
       const option = document.createElement('option');
@@ -2495,12 +3085,15 @@ async function refreshLiveTalkingAvatarList() {
   }
   renderAvatarSessionPool(avatars.map(avatar => avatar.id));
   renderAvatarLibrary(avatars);
+  renderLibraryUI();
   return avatars;
 }
 
 function renderAvatarLibrary(avatars) {
   const grid = $('avatar-library-grid');
   if (!grid) return;
+  for (const objectUrl of avatarThumbnailObjectUrls) URL.revokeObjectURL(objectUrl);
+  avatarThumbnailObjectUrls.clear();
   const valid = avatars.filter(avatar => avatar?.id);
   AvatarSession.selected = AvatarSession.selected.filter(id => valid.some(avatar => avatar.id === id));
   if ($('avatar-page-count')) $('avatar-page-count').textContent = `${valid.length} avatar${valid.length === 1 ? '' : 's'}`;
@@ -2518,7 +3111,71 @@ function renderAvatarLibrary(avatars) {
 
     const preview = document.createElement('div');
     preview.className = 'avatar-card-preview';
-    preview.innerHTML = `<span class="avatar-card-status">Ready</span><span class="material-symbols-rounded" aria-hidden="true">person</span>`;
+    const status = document.createElement('span');
+    status.className = 'avatar-card-status';
+    status.textContent = 'Ready';
+    const fallback = document.createElement('span');
+    fallback.className = 'material-symbols-rounded avatar-card-fallback';
+    fallback.setAttribute('aria-hidden', 'true');
+    fallback.textContent = 'person';
+    preview.append(status, fallback);
+
+    if (avatar.thumbnailUrl && location.protocol !== 'file:') {
+      const image = document.createElement('img');
+      image.className = 'avatar-card-thumbnail';
+      image.alt = `Preview of ${avatar.name || avatar.id}`;
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      preview.prepend(image);
+      window.RuntimeApi.fetch(avatar.thumbnailUrl)
+        .then(response => {
+          if (!response.ok) throw new Error(`Thumbnail HTTP ${response.status}`);
+          const contentType = response.headers.get('content-type') || '';
+          if (!contentType.startsWith('image/')) throw new Error('Thumbnail response is not an image');
+          return response.blob();
+        })
+        .then(blob => {
+          if (!preview.isConnected) return;
+          const objectUrl = URL.createObjectURL(blob);
+          avatarThumbnailObjectUrls.add(objectUrl);
+          image.addEventListener('load', () => {
+            image.classList.add('is-loaded');
+            fallback.hidden = true;
+          }, { once: true });
+          image.addEventListener('error', () => {
+            image.classList.remove('is-loaded');
+            fallback.hidden = false;
+            URL.revokeObjectURL(objectUrl);
+            avatarThumbnailObjectUrls.delete(objectUrl);
+          }, { once: true });
+          image.src = objectUrl;
+        })
+        .catch(error => {
+          fallback.hidden = false;
+          console.warn(`[Avatar] Could not load thumbnail for ${avatar.id}:`, error.message);
+        });
+    }
+    const actions = document.createElement('div');
+    actions.className = 'avatar-card-actions';
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'avatar-card-edit';
+    edit.title = `Rename ${avatar.name || avatar.id}`;
+    edit.setAttribute('aria-label', `Rename ${avatar.name || avatar.id}`);
+    edit.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">edit</span>';
+    edit.addEventListener('click', async () => {
+      const nextName = prompt('Avatar name', avatar.name || avatar.id);
+      if (nextName === null || nextName.trim() === (avatar.name || avatar.id)) return;
+      edit.disabled = true;
+      try {
+        await renameProjectAvatar(avatar, nextName);
+        addLog(`Avatar ${avatar.id} renamed to ${nextName.trim()}.`, 'ok');
+      } catch (error) {
+        edit.disabled = false;
+        addLog(`Could not rename avatar: ${error.message}`, 'warn');
+        alert(error.message);
+      }
+    });
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'avatar-card-delete';
@@ -2526,7 +3183,12 @@ function renderAvatarLibrary(avatars) {
     remove.setAttribute('aria-label', `Delete ${avatar.id}`);
     remove.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">delete</span>';
     remove.addEventListener('click', async () => {
-      if (!confirm(`Delete avatar “${avatar.id}” and its trained model files?`)) return;
+      const confirmed = await showAppConfirm({
+        title: 'Delete avatar?',
+        message: `Delete avatar ${avatar.id} and its trained model files?`,
+        confirmLabel: 'Delete',
+      });
+      if (!confirmed) return;
       remove.disabled = true;
       try {
         await deleteProjectAvatar(avatar.id);
@@ -2537,28 +3199,38 @@ function renderAvatarLibrary(avatars) {
         alert(error.message);
       }
     });
-    preview.append(remove);
+    actions.append(edit, remove);
+    preview.append(actions);
 
     const body = document.createElement('div');
     body.className = 'avatar-card-body';
     const title = document.createElement('h3');
-    title.textContent = avatar.id;
+    title.textContent = avatar.name || avatar.id;
     const meta = document.createElement('p');
-    meta.textContent = `${avatar.modelType || 'MuseTalk'} · ${avatar.name || 'Trained avatar'}`;
+    meta.textContent = `${avatar.id} · Trained avatar`;
     const live = document.createElement('label');
     live.className = 'avatar-live-check';
     const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
+    checkbox.type = 'radio';
+    checkbox.name = 'active-live-avatar';
     checkbox.checked = selected;
     checkbox.setAttribute('aria-label', `Use ${avatar.id} in live session`);
     const label = document.createElement('span');
     label.textContent = 'Use in live session';
     checkbox.addEventListener('change', async () => {
-      if (checkbox.checked) AvatarSession.selected = [...new Set([...AvatarSession.selected, avatar.id])];
-      else AvatarSession.selected = AvatarSession.selected.filter(id => id !== avatar.id);
+      AvatarSession.selected = checkbox.checked ? [avatar.id] : [];
+      AvatarSession.random = false;
       card.classList.toggle('selected', checkbox.checked);
       updateAvatarPoolCount();
-      await saveAvatarSession().catch(err => addLog(`Could not save avatar selection: ${err.message}`, 'warn'));
+      checkbox.disabled = true;
+      try {
+        await saveAvatarSession();
+        if (checkbox.checked) await activateLiveTalkingAvatar(avatar.id);
+      } catch (error) {
+        addLog(`Could not activate avatar: ${error.message}`, 'warn');
+      } finally {
+        checkbox.disabled = false;
+      }
     });
     live.append(checkbox, label);
     body.append(title, meta, live);
@@ -2579,11 +3251,13 @@ function renderAvatarSessionPool(ids) {
     const label = document.createElement('label');
     label.className = `avatar-pool-item${AvatarSession.selected.includes(id) ? ' active' : ''}`;
     const input = document.createElement('input');
-    input.type = 'checkbox';
+    input.type = 'radio';
+    input.name = 'active-live-avatar-pool';
     input.value = id;
     input.checked = AvatarSession.selected.includes(id);
     input.addEventListener('change', () => {
-      AvatarSession.selected = [...list.querySelectorAll('input:checked')].map(item => item.value);
+      AvatarSession.selected = input.checked ? [input.value] : [];
+      AvatarSession.random = false;
       label.classList.toggle('active', input.checked);
       updateAvatarPoolCount();
     });
@@ -2603,38 +3277,55 @@ function renderAvatarSessionPool(ids) {
 }
 
 function updateAvatarPoolCount() {
-  if ($('lt-avatar-pool-count')) $('lt-avatar-pool-count').textContent = `${AvatarSession.selected.length} avatars selected`;
+  if ($('lt-avatar-pool-count')) $('lt-avatar-pool-count').textContent = AvatarSession.selected[0]
+    ? `Active avatar: ${AvatarSession.selected[0]}`
+    : 'No active avatar';
 }
 
 async function saveAvatarSession() {
-  const randomControl = $('avatar-page-random-toggle') || $('lt-random-avatar-toggle');
-  if (randomControl) AvatarSession.random = Boolean(randomControl.checked);
-  if ($('avatar-page-random-toggle')) $('avatar-page-random-toggle').checked = AvatarSession.random;
-  if ($('lt-random-avatar-toggle')) $('lt-random-avatar-toggle').checked = AvatarSession.random;
+  AvatarSession.selected = AvatarSession.selected.filter(Boolean).slice(0, 1);
+  AvatarSession.random = false;
+  if ($('avatar-page-random-toggle')) $('avatar-page-random-toggle').checked = false;
+  if ($('lt-random-avatar-toggle')) $('lt-random-avatar-toggle').checked = false;
   localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
   localStorage.setItem(STORAGE_KEYS.AVATAR_RANDOM, String(AvatarSession.random));
   if (location.protocol !== 'file:') {
     await window.LiveTalkingApi.saveAvatarSession(AvatarSession.selected, AvatarSession.random);
   }
-  addLog(`Saved avatar session: ${AvatarSession.selected.length} avatar${AvatarSession.random ? ' · random' : ''}`, 'ok');
+  addLog(`Saved active avatar session: ${AvatarSession.selected[0] || 'none'}`, 'ok');
 }
 
 async function selectAvatarForSpeech() {
-  if (!AvatarSession.selected.length) return LiveTalkingStudio.avatarId;
-  if (!AvatarSession.random || AvatarSession.selected.length < 2) {
-    const selectedId = AvatarSession.selected[0];
-    if (selectedId && selectedId !== LiveTalkingStudio.avatarId) await activateLiveTalkingAvatar(selectedId);
-    return selectedId || LiveTalkingStudio.avatarId;
+  const selectedId = [AvatarSession.selected[0], LiveTalkingStudio.avatarId]
+    .find(id => id && TRAINED_AVATARS.has(id))
+    || TRAINED_AVATARS.keys().next().value;
+  if (!selectedId) throw new Error('No trained avatar is ready');
+  AvatarSession.selected = [selectedId];
+  let sessionViable = LiveTalkingWebRTCClient.isViable?.()
+    ?? LiveTalkingWebRTCClient.isConnected?.()
+    ?? Boolean(LiveTalkingWebRTCClient.sessionId);
+  if (!sessionViable && LiveTalkingWebRTCClient.sessionId && window.LiveTalkingApi?.sessionStatus) {
+    try {
+      const sessionStatus = await window.LiveTalkingApi.sessionStatus();
+      sessionViable = !sessionStatus.sessionId
+        || sessionStatus.sessionId === LiveTalkingWebRTCClient.sessionId;
+    } catch {
+      sessionViable = false;
+    }
   }
-  const candidates = AvatarSession.selected.filter(id => id !== LiveTalkingStudio.avatarId);
-  const nextId = candidates[Math.floor(Math.random() * candidates.length)] || AvatarSession.selected[0];
-  if (nextId && nextId !== LiveTalkingStudio.avatarId) await activateLiveTalkingAvatar(nextId);
-  return nextId;
+  if (selectedId && (selectedId !== LiveTalkingStudio.avatarId || !sessionViable)) {
+    await activateLiveTalkingAvatar(selectedId);
+  }
+  return selectedId;
 }
 
 async function activateLiveTalkingAvatar(avatarId) {
   const id = String(avatarId || '').trim();
   if (!id) throw new Error('Invalid avatar ID');
+  if (TRAINED_AVATARS.size > 0 && !TRAINED_AVATARS.has(id)) {
+    throw new Error(`Avatar ${id} is not trained or is unavailable`);
+  }
+  AvatarSession.selected = [id];
   LiveTalkingStudio.avatarId = id;
   LiveTalkingStudio.isTrainedReady = true;
   LiveTalkingStudio.trainProgress = 100;
@@ -2644,14 +3335,164 @@ async function activateLiveTalkingAvatar(avatarId) {
   App.talkingEngine.model = 'musetalk';
   localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, 'livetalking');
   localStorage.setItem(STORAGE_KEYS.LIVETALKING_MODEL, 'musetalk');
-  if ($('quick-talking-provider')) $('quick-talking-provider').value = 'livetalking';
-  if ($('livetalking-model')) $('livetalking-model').value = 'musetalk';
   const result = await LiveTalkingWebRTCClient.connect(App.talkingEngine.endpoint, id);
   updateLiveTalkingUI();
   loadPersistedSettings();
-  logLiveTalkingTerminal(`✅ Activated ${id} through neural WebRTC (${result.sessionId || 'active'})`, 'ok');
-  addLog(`✅ Active MuseTalk avatar: ${id}`, 'ok');
+  renderLibraryUI();
+  logLiveTalkingTerminal(`Activated ${id} for the live session (${result.sessionId || 'active'})`, 'ok');
+  addLog(`Active live avatar: ${id}`, 'ok');
   return result;
+}
+
+async function startAvatarBatchTraining() {
+  const items = AvatarCreateFlow.items;
+  if (!items.length || LiveTalkingStudio.isTraining) return;
+  const ids = items.map(item => cleanAvatarId(item.avatarId));
+  if (new Set(ids).size !== ids.length) {
+    alert('Each avatar in the batch needs a unique Avatar ID.');
+    return;
+  }
+  items.forEach((item, index) => { item.avatarId = ids[index]; item.error = ''; });
+  LiveTalkingStudio.isTraining = true;
+  LiveTalkingStudio.isTrainedReady = false;
+  LiveTalkingStudio.trainProgress = 0;
+  AvatarCreateFlow.status = 'training';
+  AvatarCreateFlow.progress = 0;
+  updateLiveTalkingUI();
+
+  try {
+    if ($('avatar-create-status')) $('avatar-create-status').textContent = 'Preparing avatar engine…';
+    await ensureLiveTalkingWorkerReady();
+
+    await Promise.all(items.map(async item => {
+      item.status = 'uploading';
+      renderAvatarBatchQueue();
+      try {
+        const stored = await persistProjectFile(item.file, 'avatars/source', item.avatarId);
+        if (!stored?.path) throw new Error('Upload returned no project path');
+        item.storedPath = stored.path;
+        item.status = 'queued';
+      } catch (error) {
+        item.status = 'failed';
+        item.error = error.message;
+      }
+      renderAvatarBatchQueue();
+    }));
+
+    const readyItems = items.filter(item => item.status === 'queued');
+    if (readyItems.length) {
+      const batch = await window.LiveTalkingApi.createBatch(readyItems.map(item => ({
+        video_path: item.storedPath,
+        avatar_id: item.avatarId,
+        model: item.model,
+      })));
+      const submittedTasks = batch.data?.tasks || [];
+      readyItems.forEach(item => {
+        const task = submittedTasks.find(candidate => candidate.avatar_id === item.avatarId);
+        if (!task?.task_id) {
+          item.status = 'failed';
+          item.error = task?.error_msg || 'Worker did not create this task';
+          return;
+        }
+        item.taskId = task.task_id;
+        item.status = 'training';
+        item.progress = 0;
+      });
+      renderAvatarBatchQueue();
+    }
+
+    const deadline = Date.now() + 30 * 60 * 1000;
+    while (items.some(item => item.status === 'training') && Date.now() < deadline) {
+      const active = items.filter(item => item.status === 'training');
+      await Promise.all(active.map(async item => {
+        try {
+          const payload = await window.LiveTalkingApi.getTask(item.taskId);
+          const task = payload.data || {};
+          item.progress = Math.max(0, Math.min(100, Number(task.progress) || 0));
+          if (task.status === 'completed') {
+            item.status = 'completed';
+            item.progress = 100;
+          } else if (task.status === 'failed') {
+            item.status = 'failed';
+            item.error = task.error_msg || 'Worker training failed';
+          }
+        } catch (error) {
+          item.error = error.message;
+        }
+      }));
+      const batchProgress = Math.round(items.reduce((sum, item) => {
+        if (item.status === 'completed' || item.status === 'failed') return sum + 100;
+        return sum + (item.progress || 0);
+      }, 0) / items.length);
+      AvatarCreateFlow.progress = batchProgress;
+      LiveTalkingStudio.trainProgress = batchProgress;
+      renderAvatarBatchQueue();
+      updateLiveTalkingUI();
+      if (items.some(item => item.status === 'training')) await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    items.filter(item => item.status === 'training').forEach(item => {
+      item.status = 'failed';
+      item.error = 'Avatar training timed out';
+    });
+    const completed = items.filter(item => item.status === 'completed');
+    await Promise.all(completed.map(async item => {
+      const record = {
+        id: item.avatarId,
+        name: item.file.name,
+        modelType: item.model,
+        taskId: item.taskId,
+        status: 'ready',
+        trainedAt: Date.now(),
+      };
+      await registerProjectAvatar(record).catch(() => {});
+      await persistProjectJson('models', 'training-result.json', record, item.avatarId).catch(() => {});
+    }));
+
+    AvatarSession.selected = completed[0]?.avatarId ? [completed[0].avatarId] : AvatarSession.selected.slice(0, 1);
+    await saveAvatarSession().catch(() => {});
+    LiveTalkingStudio.isTraining = false;
+    LiveTalkingStudio.isTrainedReady = completed.length > 0;
+    LiveTalkingStudio.trainProgress = completed.length ? 100 : 0;
+    AvatarCreateFlow.status = completed.length ? 'done' : 'config';
+    AvatarCreateFlow.progress = completed.length ? 100 : 0;
+    if (completed[0]) {
+      const primary = completed[0];
+      LiveTalkingStudio.avatarId = primary.avatarId;
+      LiveTalkingStudio.modelType = primary.model;
+      LiveTalkingStudio.videoFile = primary.file;
+      await IdolDB.saveAvatar('livetalking_avatar', primary.file, {
+        fileName: primary.file.name,
+        fileSize: primary.file.size,
+        modelType: primary.model,
+        avatarId: primary.avatarId,
+        isTrainedReady: true,
+        taskId: primary.taskId,
+        neuralWorker: App.talkingEngine.endpoint,
+        trainedAt: Date.now(),
+      }).catch(() => {});
+    }
+    renderAvatarBatchQueue();
+    updateLiveTalkingUI();
+    await refreshLiveTalkingAvatarList();
+    addLog(`Batch training finished: ${completed.length}/${items.length} avatar(s) ready.`, completed.length ? 'ok' : 'err');
+    if (completed[0]) {
+      await activateLiveTalkingAvatar(completed[0].avatarId).catch(error => {
+        addLog(`Avatar is trained; live connection is pending: ${error.message}`, 'warn');
+      });
+    }
+  } catch (error) {
+    LiveTalkingStudio.isTraining = false;
+    AvatarCreateFlow.status = 'config';
+    AvatarCreateFlow.progress = 0;
+    items.filter(item => !['completed', 'failed'].includes(item.status)).forEach(item => {
+      item.status = 'failed';
+      item.error = error.message;
+    });
+    renderAvatarBatchQueue();
+    updateLiveTalkingUI();
+    addLog(`Batch training could not start: ${error.message}`, 'err');
+  }
 }
 
 async function startLiveTalkingTraining() {
@@ -2715,12 +3556,12 @@ async function startLiveTalkingTraining() {
       avatarId,
       isTrainedReady: true,
       taskId,
-      neuralWorker: endpoint,
+      neuralWorker: App.talkingEngine.endpoint,
       trainedAt: Date.now(),
     });
     await registerProjectAvatar({ id: avatarId, name: file.name, modelType: model, taskId, status: 'ready', trainedAt: Date.now() }).catch(() => {});
     await persistProjectJson('models', 'training-result.json', LiveTalkingStudio.trainedDataset, avatarId).catch(() => {});
-    AvatarSession.selected = [...new Set([...AvatarSession.selected, avatarId])];
+    AvatarSession.selected = [avatarId];
     await saveAvatarSession().catch(() => {});
     updateLiveTalkingUI();
     await refreshLiveTalkingAvatarList();
@@ -2821,7 +3662,7 @@ function renderLiveTalkingStep1Preview(ctx, width, height) {
         ctx.fillRect(tagX, tagY - 20, 240, 18);
         ctx.fillStyle = '#6ee7b7';
         ctx.font = 'bold 8.5px sans-serif';
-        ctx.fillText(`MuseTalk Native Pipeline · 25 FPS [READY]`, tagX + 6, tagY - 7);
+        ctx.fillText(`MuseTalk Native Pipeline · 50 FPS [READY]`, tagX + 6, tagY - 7);
       }
 
       // ── DEBUG INDEX & TELEMETRY HUD ──
@@ -3020,7 +3861,7 @@ function renderLiveTalkingLipSync(ctx, width, height, isSpeaking, avatarData) {
   ctx.fillText('LiveTalking + MuseTalk Native Pipeline', width / 2, height / 2 - 10);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
   ctx.font = '10px sans-serif';
-  ctx.fillText('Upstream Parity · Lockstep Frame Synchronization · 25 FPS', width / 2, height / 2 + 10);
+  ctx.fillText('MPS · Lockstep Frame Synchronization · 50 FPS target', width / 2, height / 2 + 10);
   ctx.restore();
 }
 
@@ -3030,6 +3871,8 @@ function initAvatarCanvas() {
   const liveStreamCanvas = $('lt-live-stream-canvas');
   const liveStreamCtx = liveStreamCanvas?.getContext('2d');
 
+  const isCanvasVisible = canvas => Boolean(canvas?.isConnected && canvas.getClientRects().length);
+
   function renderLoop() {
     updateLiveAudioAnalysis();
 
@@ -3038,7 +3881,7 @@ function initAvatarCanvas() {
 
     // 1. LiveTalking Studio Step 1 Training Screen
     const step1Canvas = $('lt-train-video-canvas');
-    if (step1Canvas && step1Canvas.style.display !== 'none') {
+    if (isCanvasVisible(step1Canvas)) {
       const s1Ctx = step1Canvas.getContext('2d');
       if (s1Ctx) {
         renderLiveTalkingStep1Preview(s1Ctx, step1Canvas.width, step1Canvas.height);
@@ -3046,7 +3889,7 @@ function initAvatarCanvas() {
     }
 
     // 2. LiveTalking Studio Step 2 Screen
-    if (liveStreamCanvas && liveStreamCtx) {
+    if (isCanvasVisible(liveStreamCanvas) && liveStreamCtx) {
       renderLiveTalkingLipSync(liveStreamCtx, liveStreamCanvas.width, liveStreamCanvas.height, App.isAiSpeaking, LiveTalkingStudio);
     }
 
@@ -3056,7 +3899,7 @@ function initAvatarCanvas() {
       const monBadge = $('mon-w2l-badge');
       const isTrained = (LiveTalkingStudio.isTrainedReady || App.avatar.videoEl);
 
-      if (isTalkingActive && isTrained) {
+      if (isTalkingActive && isTrained && isCanvasVisible(monW2lCanvas)) {
         renderLiveTalkingLipSync(monCtx, monW2lCanvas.width, monW2lCanvas.height, App.isAiSpeaking, App.avatar);
         monW2lCanvas.classList.add('is-visible');
         if (monBadge) monBadge.classList.add('is-visible');
@@ -3088,9 +3931,10 @@ function updateVoiceStatusUI(status, label = '', progressPct = 0) {
 
   if (engineTag) {
     const speedStr = `${(App.voice.speed || 1.0).toFixed(2)}x`;
-    engineTag.textContent = App.voice.provider === 'elevenlabs' 
-      ? `ElevenLabs Turbo v2.5 (VI · ${speedStr})` 
-      : `WebSpeech (VI · ${speedStr})`;
+    const providerName = App.voice.provider === 'qwentts'
+      ? 'Qwen TTS Vietnamese'
+      : App.voice.provider === 'omnivoice' ? 'OmniVoice Female' : 'ElevenLabs Turbo v2.5';
+    engineTag.textContent = `${providerName} (VI · ${speedStr})`;
   }
 
   if (status === 'generating') {
@@ -3110,8 +3954,10 @@ function updateVoiceStatusUI(status, label = '', progressPct = 0) {
     if (voiceViz) voiceViz.classList.remove('speaking');
   } else {
     if (dot) dot.className = 'vstatus-pulse-dot';
-    const activeV = $('quick-voice-id-input')?.value || App.voice.elevenLabsVoiceId;
-    if (title) title.textContent = `AI voice: Ready (${activeV ? activeV.slice(0, 8) : 'WebSpeech'}...)`;
+    const readyVoice = App.voice.provider === 'qwentts'
+      ? 'Qwen TTS · Vietnamese'
+      : App.voice.provider === 'omnivoice' ? 'OmniVoice · Vietnamese Female' : 'ElevenLabs';
+    if (title) title.textContent = `AI voice: Ready (${readyVoice})`;
     if (fill) fill.style.width = '0%';
     if (voiceViz) voiceViz.classList.remove('speaking');
   }
@@ -3145,7 +3991,7 @@ function stopLiveSpeech() {
 async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
   if (!LiveTalkingWebRTCClient.sessionId) throw new Error('Activate a LiveTalking avatar first');
   const runId = ++liveTalkingSpeechRun;
-  const runtimeProvider = ['webspeech', 'elevenlabs', 'openai'].includes(provider) ? provider : 'webspeech';
+  const runtimeProvider = ['webspeech', 'qwentts', 'elevenlabs', 'openai', 'omnivoice'].includes(provider) ? provider : 'qwentts';
   const normalizedEmotion = ['neutral', 'happy', 'excited', 'surprised', 'sad', 'angry', 'playful', 'focused', 'grateful', 'laughing'].includes(emotion)
     ? emotion
     : 'happy';
@@ -3177,7 +4023,7 @@ async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
         playbackStarted = true;
         App.isAiSpeaking = true;
         await LiveTalkingWebRTCClient.ensureAudioPlayback();
-        setVisualState('TALKING', 3, 'runtime-speech-started', true);
+        if (!runtimeRealtimeConnected) setVisualState('TALKING', 3, 'runtime-speech-started', true);
         const subBox = $('mon-subtitles');
         const subTxt = $('mon-sub-text');
         if (subBox && subTxt) { subTxt.textContent = text; subBox.classList.add('visible'); }
@@ -3188,10 +4034,9 @@ async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
       App.isAiSpeaking = false;
       updateVoiceStatusUI('idle');
       $('mon-subtitles')?.classList.remove('visible');
-      if (App.currentState === 'TALKING' && App.autoMix) {
+      if (!runtimeRealtimeConnected && App.currentState === 'TALKING' && App.autoMix) {
         requestStateTransition('GAMEPLAY_IDLE', 7, 'runtime-speech-ended', App.globalRandom, false);
       }
-      if (App.pendingChatBatch?.length) setTimeout(() => processPendingChatBatch(), 800);
       return;
     } else if (speech.state === 'ERROR') {
       throw new Error(speech.error || 'Runtime speech failed');
@@ -3207,7 +4052,7 @@ async function speakAI(text, emotion = 'happy') {
   stopLiveSpeech();
 
   // Read current provider from Step 2 if open, else App.voice (defaulting to webspeech)
-  const prov = $('lt-voice-provider-select')?.value || App.voice.provider || 'webspeech';
+  const prov = $('lt-voice-provider-select')?.value || App.voice.provider || 'qwentts';
   const speed = (parseFloat($('lt-voice-speed-slider')?.value || '105') / 100) || App.voice.speed || 1.05;
 
   if (App.talkingEngine.provider === 'livetalking') {
@@ -3229,7 +4074,9 @@ async function speakAI(text, emotion = 'happy') {
     }
   }
 
-  if (prov === 'elevenlabs') {
+  if (prov === 'qwentts') {
+    return await speakWithQwenTts(text, emotion, App.voice.elevenLabsVoiceId || 'qwen-default', speed);
+  } else if (prov === 'elevenlabs') {
     const voiceSelectVal = $('lt-eleven-voice-select')?.value || App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
     const voiceId = (voiceSelectVal === 'custom' ? $('lt-eleven-custom-voice-id')?.value.trim() : voiceSelectVal) || App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
     const modelId = $('lt-eleven-model-select')?.value || 'eleven_turbo_v2_5';
@@ -3237,6 +4084,9 @@ async function speakAI(text, emotion = 'happy') {
   } else if (prov === 'openai') {
     const voice = $('lt-openai-voice-select')?.value || 'nova';
     return await speakWithOpenAI(text, emotion, voice, speed);
+  } else if (prov === 'omnivoice') {
+    const voice = $('lt-omnivoice-voice-select')?.value || 'vi-female';
+    return await speakWithOmniVoice(text, emotion, voice, speed);
   } else {
     const voiceURI = $('lt-webspeech-voice-select')?.value || '';
     if (App.talkingEngine.provider === 'livetalking') {
@@ -3252,7 +4102,7 @@ let liveTalkingSpeechRun = 0;
 
 async function speakWithLiveTalkingText(text, emotion, voiceURI, speed) {
   void voiceURI;
-  return submitRuntimeSpeechCommand(text, emotion, speed, App.voice.provider || 'webspeech');
+  return submitRuntimeSpeechCommand(text, emotion, speed, App.voice.provider || 'qwentts');
 }
 
 async function startSynchronizedPlayback(audioElement, text, emotion, voiceLabel, durMs) {
@@ -3324,6 +4174,25 @@ async function speakWithElevenLabs(text, emotion = 'happy', customVoiceId = null
   }
 }
 
+async function speakWithQwenTts(text, emotion = 'happy', voiceId = 'qwen-default', speed = 1.05) {
+  updateVoiceStatusUI('generating', 'Qwen TTS is generating Vietnamese voice…', 30);
+  try {
+    const blob = await requestProviderAudio({
+      provider: 'qwentts',
+      text,
+      emotion,
+      voiceId,
+      modelId: 'gwen-tts-0.6B-vi-8bit',
+      speed,
+    });
+    App.voice.providerConfigured = true;
+    await handleAudioResponse(new Response(blob, { headers: { 'Content-Type': blob.type } }), text, emotion, `Qwen-${voiceId}`);
+  } catch (error) {
+    updateVoiceStatusUI('error', error.message);
+    return speakWithOmniVoice(text, emotion, 'vi-female', speed);
+  }
+}
+
 async function speakWithOpenAI(text, emotion = 'happy', voice = 'nova', speed = 1.05) {
   updateVoiceStatusUI('generating', `Runtime TTS [${voice}]...`, 30);
   addLog(`Runtime is generating OpenAI voice [${voice}].`, 'hi');
@@ -3335,6 +4204,24 @@ async function speakWithOpenAI(text, emotion = 'happy', voice = 'nova', speed = 
   } catch (err) {
     console.error('[Runtime OpenAI TTS Error]:', err);
     addLog(`OpenAI voice unavailable: ${err.message}. Using the LiveTalking voice fallback.`, 'err');
+    if (App.talkingEngine.provider === 'livetalking') {
+      return speakWithLiveTalkingText(text, emotion, '', speed);
+    }
+    return speakWithWebSpeech(text, emotion, '', speed);
+  }
+}
+
+async function speakWithOmniVoice(text, emotion = 'happy', voice = 'vi-female', speed = 1.05) {
+  updateVoiceStatusUI('generating', `Runtime TTS [OmniVoice · ${voice}]...`, 30);
+  addLog(`Runtime is generating OmniVoice audio [${voice}].`, 'hi');
+
+  try {
+    const blob = await requestProviderAudio({ provider: 'omnivoice', text, emotion, voiceId: voice, modelId: 'omnivoice', speed });
+    App.voice.providerConfigured = true;
+    await handleAudioResponse(new Response(blob, { headers: { 'Content-Type': blob.type } }), text, emotion, `OmniVoice-${voice}`);
+  } catch (err) {
+    console.error('[Runtime OmniVoice TTS Error]:', err);
+    addLog(`OmniVoice unavailable: ${err.message}. Using the LiveTalking voice fallback.`, 'err');
     if (App.talkingEngine.provider === 'livetalking') {
       return speakWithLiveTalkingText(text, emotion, '', speed);
     }
@@ -3377,13 +4264,8 @@ async function handleAudioResponse(res, text, emotion, voiceLabel) {
         if (App.currentState === 'TALKING' && !App.isAiSpeaking) {
           requestStateTransition('GAMEPLAY_IDLE', 7, 'speech-ended-return', App.globalRandom, false);
           addLog('🗣️ Reply complete → returning to GAMEPLAY_IDLE', 'ok');
-          if (App.pendingChatBatch && App.pendingChatBatch.length > 0) {
-            setTimeout(() => processPendingChatBatch(), 800);
-          }
         }
       }, 1000);
-    } else if (App.pendingChatBatch && App.pendingChatBatch.length > 0) {
-      setTimeout(() => processPendingChatBatch(), 1000);
     }
   };
 
@@ -3489,9 +4371,6 @@ function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', custom
         updateVoiceStatusUI('idle');
         const subBox = $('mon-subtitles');
         if (subBox) subBox.classList.remove('visible');
-        if (App.pendingChatBatch && App.pendingChatBatch.length > 0) {
-          processPendingChatBatch();
-        }
       }
     }, estDurMs + 2000);
 
@@ -3511,13 +4390,8 @@ function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', custom
           if (App.currentState === 'TALKING' && !App.isAiSpeaking) {
             requestStateTransition('GAMEPLAY_IDLE', 7, 'speech-ended-return', App.globalRandom, false);
             addLog('🗣️ Reply complete → returning to GAMEPLAY_IDLE', 'ok');
-            if (App.pendingChatBatch && App.pendingChatBatch.length > 0) {
-              setTimeout(() => processPendingChatBatch(), 800);
-            }
           }
         }, 1000);
-      } else if (App.pendingChatBatch && App.pendingChatBatch.length > 0) {
-        setTimeout(() => processPendingChatBatch(), 1000);
       }
     };
 
@@ -3529,9 +4403,6 @@ function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', custom
       App.isAiSpeaking = false;
       updateVoiceStatusUI('idle');
       console.warn('WebSpeech Error:', e);
-      if (App.pendingChatBatch && App.pendingChatBatch.length > 0) {
-        setTimeout(() => processPendingChatBatch(), 600);
-      }
     };
   } catch (err) {
     App.isAiSpeaking = false;
@@ -3571,7 +4442,74 @@ function getGroupForState(state) {
   return 'cta';
 }
 
+function getActiveTalkingAvatarClip() {
+  const avatarId = [AvatarSession.selected[0], LiveTalkingStudio.avatarId]
+    .find(id => id && TRAINED_AVATARS.has(id))
+    || TRAINED_AVATARS.keys().next().value;
+  if (!avatarId) return null;
+  const avatar = TRAINED_AVATARS.get(avatarId);
+  return {
+    id: `live_avatar_${avatarId}`,
+    avatarId,
+    kind: 'live-avatar',
+    label: avatar.name || avatarId,
+    dur: 0,
+    mode: 'loop',
+    loop: true,
+    state: 'TALKING',
+  };
+}
+
+function normalizeClipAssetKey(value = '') {
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/\\.[a-z0-9]+$/i, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function isPlayableClip(clip) {
+  if (!clip?.blobUrl) return false;
+  const mode = clip.mode || (clip.loop ? 'loop' : 'once');
+  return mode !== 'off';
+}
+
+function resolveRuntimeClip(state, serverAsset = null, forceRandom = false) {
+  // Live avatar playback is owned by the WebRTC/canvas layer. Keep a runtime
+  // asset with a real browser URL intact, but never replace a local clip with
+  // metadata-only catalog data from the server.
+  if (serverAsset?.blobUrl) return serverAsset;
+  if (!serverAsset || state === 'TALKING') return pickClipForState(state, forceRandom);
+
+  const assetKeys = new Set([
+    serverAsset.id,
+    serverAsset.file,
+    serverAsset.fileName,
+    serverAsset.label,
+  ].map(normalizeClipAssetKey).filter(Boolean));
+  const stateClips = CLIP_LIBRARY[state] || [];
+  const matchingClip = stateClips.find(clip => {
+    if (!isPlayableClip(clip)) return false;
+    return [clip.id, clip.fileName, clip.label]
+      .map(normalizeClipAssetKey)
+      .some(key => assetKeys.has(key));
+  });
+  if (matchingClip) return matchingClip;
+
+  // The runtime can select an asset that has not been uploaded into the
+  // browser library yet. Keep the monitor live with the first usable clip in
+  // the requested state, then fall back to the normal idle clip policy.
+  const activeStateClip = stateClips.find(isPlayableClip);
+  if (activeStateClip) return activeStateClip;
+  return pickClipForState(state, forceRandom);
+}
+
 function pickClipForState(state, forceRandom = false) {
+  if (state === 'TALKING') {
+    const liveAvatar = getActiveTalkingAvatarClip();
+    if (liveAvatar) return liveAvatar;
+  }
   let clips = CLIP_LIBRARY[state] || [];
   
   if (clips.length === 0) {
@@ -3639,11 +4577,44 @@ function renderStateHistory() {
   }).join('');
 }
 
+let lastLibraryRenderSignature = '';
+
+function createLibraryRenderSignature() {
+  const clips = Object.entries(CLIP_LIBRARY).flatMap(([state, entries]) =>
+    entries.map(clip => [state, clip.id, clip.label, clip.dur, clip.mode, clip.blobUrl]),
+  );
+  const avatars = [...TRAINED_AVATARS.values()].map(avatar => [
+    avatar.id,
+    avatar.status,
+    avatar.thumbnailUrl,
+  ]);
+  return JSON.stringify({
+    clips,
+    avatars,
+    ratio: App.libraryRatio,
+    filter: App.activeFilter,
+  });
+}
+
 function renderLibraryUI() {
   const groupGameplay = $('list-group-gameplay');
   const groupTalking = $('list-group-talking');
   const groupReaction = $('list-group-reaction');
   const groupCta = $('list-group-cta');
+  const libraryBody = $('lib-body');
+  const ratio = App.libraryRatio === '9:16' ? '9:16' : '16:9';
+  const renderSignature = createLibraryRenderSignature();
+  const groupsReady = groupGameplay && groupTalking && groupReaction && groupCta;
+  if (groupsReady && renderSignature === lastLibraryRenderSignature) {
+    updateLibraryTransientState();
+    return;
+  }
+  const previousScrollTop = libraryBody?.scrollTop || 0;
+
+  if (libraryBody) libraryBody.dataset.previewRatio = ratio;
+  document.querySelectorAll('.lib-ratio-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.libraryRatio === ratio);
+  });
 
   let totalCount = 0;
 
@@ -3659,12 +4630,17 @@ function renderLibraryUI() {
 
   // 2. Talking & Chat
   const talkingClips = CLIP_LIBRARY.TALKING || [];
-  totalCount += talkingClips.length;
-  if ($('cnt-group-talking')) $('cnt-group-talking').textContent = talkingClips.length;
+  const talkingAvatars = [...TRAINED_AVATARS.values()];
+  const talkingItemCount = talkingClips.length + talkingAvatars.length;
+  totalCount += talkingItemCount;
+  if ($('cnt-group-talking')) $('cnt-group-talking').textContent = talkingItemCount;
   if (groupTalking) {
-    groupTalking.innerHTML = talkingClips.length === 0
+    groupTalking.innerHTML = talkingItemCount === 0
       ? '<div class="lib-empty-notice" data-target-group="TALKING">No Talking clips. Select <b>＋</b> to upload.</div>'
-      : talkingClips.map(clip => renderClipCardHTML(clip, 'TALKING')).join('');
+      : [
+          ...talkingAvatars.map(renderTalkingAvatarCardHTML),
+          ...talkingClips.map(clip => renderClipCardHTML(clip, 'TALKING')),
+        ].join('');
   }
 
   // 3. Reactions
@@ -3698,7 +4674,7 @@ function renderLibraryUI() {
       : ctaClips.map(clip => renderClipCardHTML(clip, clip.state || 'CTA')).join('');
   }
 
-  if ($('lib-total-count')) $('lib-total-count').textContent = `${totalCount} clips`;
+  if ($('lib-total-count')) $('lib-total-count').textContent = `${totalCount} items`;
 
   initLibraryThumbnails();
 
@@ -3716,6 +4692,36 @@ function renderLibraryUI() {
   document.querySelectorAll('.lib-group-card').forEach(card => {
     const cat = card.dataset.cat;
     card.style.display = (filter === 'all' || filter === cat) ? 'flex' : 'none';
+  });
+  if (libraryBody) libraryBody.scrollTop = previousScrollTop;
+  lastLibraryRenderSignature = renderSignature;
+  updateLibraryTransientState();
+}
+
+function updateLibraryTransientState() {
+  document.querySelectorAll('.clip-card[data-clip-id]').forEach(card => {
+    const isPlaying = App.currentClip?.id === card.dataset.clipId;
+    card.classList.toggle('active', isPlaying);
+    card.classList.toggle('playing', isPlaying);
+    const badge = card.querySelector('.now-badge');
+    if (badge) badge.style.display = isPlaying ? 'block' : 'none';
+  });
+  document.querySelectorAll('.live-avatar-card[data-avatar-id]').forEach(card => {
+    const isActive = card.dataset.avatarId === LiveTalkingStudio.avatarId
+      && Boolean(LiveTalkingWebRTCClient.sessionId);
+    card.classList.toggle('active', isActive);
+    card.classList.toggle('playing', isActive);
+    const badge = card.querySelector('.now-badge');
+    if (badge) badge.style.display = isActive ? 'block' : 'none';
+    const playIcon = card.querySelector('.clip-play');
+    if (playIcon) playIcon.textContent = isActive ? 'graphic_eq' : 'play_arrow';
+  });
+  document.querySelectorAll('.btn-group-random').forEach(btn => {
+    const grp = btn.dataset.randGroup;
+    const isAct = App.groupRandom && App.groupRandom[grp] !== false;
+    btn.classList.toggle('is-active', isAct);
+    btn.classList.toggle('is-inactive', !isAct);
+    btn.title = isAct ? 'Random: ON' : 'Random: OFF';
   });
 }
 
@@ -3769,6 +4775,29 @@ function renderClipCardHTML(clip, state) {
   `;
 }
 
+function renderTalkingAvatarCardHTML(avatar) {
+  const isActive = avatar.id === LiveTalkingStudio.avatarId && Boolean(LiveTalkingWebRTCClient.sessionId);
+  const thumbnail = avatar.thumbnailUrl
+    ? `<img class="clip-thumb-media live-avatar-thumb" src="${avatar.thumbnailUrl}" alt="" loading="lazy" />`
+    : '<span class="material-symbols-rounded live-avatar-fallback" aria-hidden="true">person</span>';
+  return `
+    <div class="clip-card live-avatar-card ${isActive ? 'active playing' : ''}" data-avatar-id="${avatar.id}" data-state="TALKING">
+      <div class="clip-thumb live-avatar-preview">
+        ${thumbnail}
+        <span class="clip-lbl">AVATAR</span>
+        <span class="clip-play material-symbols-rounded" aria-hidden="true">${isActive ? 'graphic_eq' : 'play_arrow'}</span>
+      </div>
+      <div class="clip-meta">
+        <span class="clip-n">${avatar.id}</span>
+        <span class="clip-d">AI Profile · Live</span>
+      </div>
+      <div class="clip-actions">
+        <div class="now-badge" style="display:${isActive ? 'block' : 'none'};">ACTIVE</div>
+      </div>
+    </div>
+  `;
+}
+
 function cycleStateClip(direction = 1) {
   const clips = (CLIP_LIBRARY[App.currentState] || []).filter(c => {
     const m = c.mode || (c.loop ? 'loop' : 'once');
@@ -3792,6 +4821,11 @@ let autoReturnTimer = null;
 
 // State changes wait for the current video to finish
 function requestStateTransition(targetState, priority = 5, reason = '', forceRandom = false, immediate = false) {
+  if (runtimeRealtimeConnected) {
+    window.RuntimeApi.post('/api/operator/command', { action: 'FORCE_STATE', state: targetState })
+      .catch(error => addLog(`Runtime state command failed: ${error.message}`, 'hi'));
+    return;
+  }
   const videoEl = currentVideoSlot === 'a'
     ? ($('monitor-video-a') || $('monitor-video'))
     : ($('monitor-video-b') || $('monitor-video'));
@@ -3819,7 +4853,88 @@ function clearQueuedTransition() {
   if (banner) banner.style.display = 'none';
 }
 
-function setVisualState(state, priority = 5, reason = '', forceRandom = false) {
+function getActiveMonitorVideo() {
+  const videoA = $('monitor-video-a');
+  const videoB = $('monitor-video-b');
+  if (videoA?.classList.contains('active-layer')) return videoA;
+  if (videoB?.classList.contains('active-layer')) return videoB;
+  return currentVideoSlot === 'a'
+    ? (videoA || $('monitor-video'))
+    : (videoB || $('monitor-video'));
+}
+
+async function waitForTalkingVideoFrame(timeoutMs = 2500) {
+  const video = LiveTalkingWebRTCClient?.videoEl || App.avatar.videoEl;
+  if (!video) return;
+  const hasFrame = () => video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+    && video.videoWidth > 0
+    && video.videoHeight > 0;
+  if (hasFrame()) return;
+
+  await new Promise(resolve => {
+    let settled = false;
+    let timer = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      video.removeEventListener('loadeddata', check);
+      video.removeEventListener('canplay', check);
+      video.removeEventListener('playing', check);
+      resolve();
+    };
+    const check = () => { if (hasFrame()) finish(); };
+    timer = setTimeout(finish, timeoutMs);
+    video.addEventListener('loadeddata', check);
+    video.addEventListener('canplay', check);
+    video.addEventListener('playing', check);
+  });
+}
+
+async function commitRuntimeSpeechPlayback(commandId) {
+  if (!commandId || commandId !== pendingRuntimePlaybackCommandId) return;
+  await waitForTalkingVideoFrame();
+  if (commandId !== pendingRuntimePlaybackCommandId) return;
+  setVisualState('TALKING', 7, 'idle-complete-speech-ready', true, true);
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  try {
+    await window.RuntimeApi.post(`/api/speech/${encodeURIComponent(commandId)}/playback-ready`, {});
+  } catch (error) {
+    addLog(`Could not release queued speech: ${error.message}`, 'err');
+  }
+}
+
+function queueRuntimeSpeechPlayback(commandId) {
+  pendingRuntimePlaybackCommandId = commandId;
+  const activeVideo = getActiveMonitorVideo();
+  const hasTimeRemaining = activeVideo
+    && !activeVideo.paused
+    && Number.isFinite(activeVideo.duration)
+    && activeVideo.duration > 0
+    && activeVideo.duration - activeVideo.currentTime > 0.08;
+
+  if (App.currentState === 'GAMEPLAY_IDLE' && hasTimeRemaining) {
+    App.queuedTransition = {
+      state: 'TALKING',
+      priority: 7,
+      reason: 'idle-complete-speech-ready',
+      forceRandom: true,
+      commandId,
+    };
+    const banner = $('queued-transition-banner');
+    const targetLabel = $('queued-target-state');
+    if (banner && targetLabel) {
+      targetLabel.textContent = 'TALKING';
+      banner.style.display = 'flex';
+    }
+    updateMonitorScreen(App.currentState, App.currentClip);
+    return;
+  }
+
+  void commitRuntimeSpeechPlayback(commandId);
+}
+
+function setVisualState(state, priority = 5, reason = '', forceRandom = false, serverOwned = false, serverAsset = null) {
   App.currentState = state;
 
   App.stateHistory.push({
@@ -3830,7 +4945,7 @@ function setVisualState(state, priority = 5, reason = '', forceRandom = false) {
   if (App.stateHistory.length > 20) App.stateHistory.shift();
   renderStateHistory();
 
-  const clipToPlay = pickClipForState(state, forceRandom);
+  const clipToPlay = resolveRuntimeClip(state, serverAsset, forceRandom);
 
   App.currentClip = clipToPlay;
   App.clipStartedAt = Date.now();
@@ -3849,7 +4964,7 @@ function setVisualState(state, priority = 5, reason = '', forceRandom = false) {
   
   // Single-play return handler (Exact duration for 1-Time clips with safety timeout)
   const isLoop = (clipToPlay && (clipToPlay.mode ? clipToPlay.mode === 'loop' : clipToPlay.loop));
-  if (App.autoMix && state !== 'GAMEPLAY_IDLE' && !isLoop) {
+  if (!serverOwned && App.autoMix && state !== 'GAMEPLAY_IDLE' && !isLoop) {
     const dur = (clipToPlay && clipToPlay.dur) ? clipToPlay.dur + 300 : 5300;
     autoReturnTimer = setTimeout(() => {
       if (App.currentState === state) {
@@ -3895,7 +5010,9 @@ function updateMonitorScreen(state, clip) {
     $('monitor-state-tag').style.color = color;
   }
   if ($('monitor-clip-name')) {
-    $('monitor-clip-name').textContent = clip ? `${clip.label || clip.id}.mp4` : 'No video clip';
+    $('monitor-clip-name').textContent = clip
+      ? (clip.kind === 'live-avatar' ? `${clip.avatarId} · Neural avatar` : `${clip.label || clip.id}.mp4`)
+      : 'No video clip';
   }
   if ($('mon-state-name')) {
     $('mon-state-name').textContent = state;
@@ -3919,16 +5036,35 @@ function updateMonitorScreen(state, clip) {
 
   const isCanvasTrained = (LiveTalkingStudio.isTrainedReady || App.avatar.videoEl);
   if ((state === 'TALKING' || App.isAiSpeaking) && isCanvasTrained) {
+    setMonitorCanvasVisible(true);
+    setMonitorVideoLayer(videoA, false);
+    setMonitorVideoLayer(videoB, false);
+    setMonitorVideoLayer(singleVideo, false);
+    setMonitorBackgroundVisible(false);
     return;
   }
 
   if (clip && clip.blobUrl && (videoA || singleVideo)) {
     if (videoA && videoB) {
-      const activeEl = currentVideoSlot === 'a' ? videoA : videoB;
-      const standbyEl = currentVideoSlot === 'a' ? videoB : videoA;
+      const visibleEl = videoA.classList.contains('active-layer')
+        ? videoA
+        : videoB.classList.contains('active-layer') ? videoB : null;
+      const activeEl = visibleEl || (currentVideoSlot === 'a' ? videoA : videoB);
+      const standbyEl = activeEl === videoA ? videoB : videoA;
+      currentVideoSlot = activeEl === videoA ? 'a' : 'b';
+      const playbackLibraryState = clip.state || state;
+      const playableClips = (CLIP_LIBRARY[playbackLibraryState] || []).filter(candidate => {
+        const mode = candidate.mode || (candidate.loop ? 'loop' : 'once');
+        return mode !== 'off';
+      });
+      const shouldNativeLoop = isLoop && playableClips.length <= 1 && !App.queuedTransition;
 
       const setupEndHandler = (el) => {
-        el.onended = () => {
+        let didAdvance = false;
+        const advance = () => {
+          if (didAdvance) return;
+          didAdvance = true;
+          el.ontimeupdate = null;
           if (autoReturnTimer) {
             clearTimeout(autoReturnTimer);
             autoReturnTimer = null;
@@ -3936,6 +5072,10 @@ function updateMonitorScreen(state, clip) {
           if (App.queuedTransition) {
             const next = App.queuedTransition;
             clearQueuedTransition();
+            if (next.commandId) {
+              void commitRuntimeSpeechPlayback(next.commandId);
+              return;
+            }
             setVisualState(next.state, next.priority, next.reason || 'queued-complete', next.forceRandom);
             return;
           }
@@ -3947,7 +5087,7 @@ function updateMonitorScreen(state, clip) {
           }
           const grp = getGroupForState(App.currentState);
           const isGrpRandom = (App.groupRandom && App.groupRandom[grp] !== false);
-          const activeClipsInState = (CLIP_LIBRARY[App.currentState] || []).filter(c => {
+          const activeClipsInState = (CLIP_LIBRARY[playbackLibraryState] || []).filter(c => {
             const m = c.mode || (c.loop ? 'loop' : 'once');
             return m !== 'off';
           });
@@ -3970,6 +5110,22 @@ function updateMonitorScreen(state, clip) {
             setVisualState('GAMEPLAY_IDLE', 7, 'clip-ended-return', App.globalRandom);
           }
         };
+
+        el.loop = shouldNativeLoop;
+        if (shouldNativeLoop) {
+          el.onended = null;
+          el.ontimeupdate = null;
+          return;
+        }
+
+        el.onended = advance;
+        el.ontimeupdate = () => {
+          if (el.paused || !Number.isFinite(el.duration) || el.duration <= 0) return;
+          if (App.queuedTransition?.commandId) return;
+          // Start the ready-frame swap just before decode reaches EOF. Waiting
+          // for `ended` lets some browsers briefly clear the last video frame.
+          if (el.duration - el.currentTime <= 0.32) advance();
+        };
       };
 
       setupEndHandler(activeEl);
@@ -3984,9 +5140,8 @@ function updateMonitorScreen(state, clip) {
         return;
       }
 
-      // Preload the next clip offscreen. Crossfade only after canplay confirms
-      // that the browser has enough buffered media to avoid a blank frame.
-      standbyEl.loop = false;
+      // Preload offscreen and switch only after the first decoded frame is ready.
+      standbyEl.loop = shouldNativeLoop;
       standbyEl.muted = true;
       standbyEl.preload = 'auto';
       setMonitorVideoLayer(standbyEl, false);
@@ -4003,6 +5158,8 @@ function updateMonitorScreen(state, clip) {
         if (didCommit || switchToken !== monitorSwitchToken) return;
         didCommit = true;
         standbyEl.removeEventListener('canplay', commitSwap);
+        standbyEl.removeEventListener('loadeddata', commitSwap);
+        standbyEl.removeEventListener('playing', commitSwap);
         try {
           await standbyEl.play();
         } catch (_) {
@@ -4010,25 +5167,34 @@ function updateMonitorScreen(state, clip) {
           return;
         }
         if (switchToken !== monitorSwitchToken) {
-          standbyEl.pause();
+          setTimeout(() => {
+            if (!standbyEl.classList.contains('active-layer')) standbyEl.pause();
+          }, 220);
           return;
         }
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          if (switchToken !== monitorSwitchToken) return;
-          setMonitorVideoLayer(standbyEl, true);
-          setMonitorVideoLayer(activeEl, false);
-          setMonitorCanvasVisible(false);
-          setMonitorBackgroundVisible(false);
-        }));
-        setTimeout(() => { activeEl.pause(); }, 220);
-        currentVideoSlot = currentVideoSlot === 'a' ? 'b' : 'a';
+        // play() resolves only after the new layer has a decoded frame. Commit
+        // synchronously so a second state update cannot leave both layers hidden.
+        setMonitorVideoLayer(standbyEl, true);
+        setMonitorVideoLayer(activeEl, false);
+        setMonitorCanvasVisible(false);
+        setMonitorBackgroundVisible(false);
+        setTimeout(() => {
+          if (!activeEl.classList.contains('active-layer')) activeEl.pause();
+        }, 220);
+        currentVideoSlot = standbyEl === videoA ? 'a' : 'b';
       };
 
       if (standbyEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
         commitSwap();
       } else {
         standbyEl.addEventListener('canplay', commitSwap, { once: true });
+        standbyEl.addEventListener('loadeddata', commitSwap, { once: true });
+        standbyEl.addEventListener('playing', commitSwap, { once: true });
       }
+
+      // Keep the fallback visible while the new layer is decoding. Some
+      // WebViews delay canplay even after the first frame is available.
+      setMonitorBackgroundVisible(true);
 
       standbyEl.onloadedmetadata = () => {
         if (standbyEl.duration && !isNaN(standbyEl.duration) && standbyEl.duration > 0) {
@@ -4078,12 +5244,16 @@ function updateStateChipsUI(state) {
 function handleVideoUpload(files, targetState = 'GAMEPLAY_IDLE', playMode = 'loop') {
   if (!files || files.length === 0) return;
 
-  Array.from(files).forEach((file) => {
+  Array.from(files).forEach((file, index) => {
     persistProjectFile(file, 'uploads')
       .then(saved => saved && addLog(`Saved project file: ${saved.filename}`, 'ok'))
       .catch(err => addLog(`Could not save project file: ${err.message}`, 'warn'));
     const blobUrl = URL.createObjectURL(file);
     const cleanId = file.name.replace(/\.[^/.]+$/, "").toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    const clipId = (CLIP_LIBRARY[targetState] || []).some(clip => clip.id === cleanId)
+      ? `${cleanId}_${Date.now().toString(36)}_${index}`
+      : cleanId;
+    const storageId = `${targetState}:${clipId}`;
     
     // Create temporary video element to extract EXACT duration
     const tempVid = document.createElement('video');
@@ -4091,8 +5261,10 @@ function handleVideoUpload(files, targetState = 'GAMEPLAY_IDLE', playMode = 'loo
     tempVid.src = blobUrl;
 
     const newClip = {
-      id: cleanId,
+      id: clipId,
+      storageId,
       label: file.name.replace(/\.[^/.]+$/, "").slice(0, 18),
+      fileName: file.name,
       dur: 5000, // Provisional until metadata resolves
       mode: playMode, // 'loop' | 'once' | 'off'
       loop: playMode === 'loop',
@@ -4103,17 +5275,26 @@ function handleVideoUpload(files, targetState = 'GAMEPLAY_IDLE', playMode = 'loo
     tempVid.onloadedmetadata = () => {
       if (tempVid.duration && !isNaN(tempVid.duration) && tempVid.duration > 0) {
         newClip.dur = Math.round(tempVid.duration * 1000);
+        IdolDB.updateClipMeta(storageId, { dur: newClip.dur }).catch(() => {});
         renderLibraryUI();
-        if (App.currentClip && App.currentClip.id === cleanId) {
+        if (App.currentClip && App.currentClip.id === clipId) {
           updateMonitorScreen(targetState, newClip);
         }
       }
     };
 
-    UPLOADED_BLOBS.set(cleanId, blobUrl);
+    UPLOADED_BLOBS.set(storageId, blobUrl);
 
     if (!CLIP_LIBRARY[targetState]) CLIP_LIBRARY[targetState] = [];
     CLIP_LIBRARY[targetState].unshift(newClip);
+    IdolDB.saveClip(storageId, file, {
+      id: clipId,
+      fileName: file.name,
+      label: newClip.label,
+      dur: newClip.dur,
+      mode: newClip.mode,
+      state: targetState,
+    }).catch(err => console.warn('Could not persist uploaded clip:', err));
 
     addLog(`Uploaded video: ${file.name} to state ${targetState} (${playMode.toUpperCase()})`, 'ok');
   });
@@ -4128,115 +5309,7 @@ function handleVideoUpload(files, targetState = 'GAMEPLAY_IDLE', playMode = 'loo
   setVisualState(targetState, 4, 'video-uploaded', true);
 }
 
-// ──────────────────────────────────────────────────────────
-// 5. LIVE CHAT CONTEXT ANALYZER & INTELLIGENT REPLIES
-// ──────────────────────────────────────────────────────────
-
-function generateContextualChatReply(viewerName, messageText, streamContext, chatHistory) {
-  const raw = messageText.toLowerCase().trim();
-  const name = viewerName || 'bạn';
-  const pick = replies => replies[Math.floor(Math.random() * replies.length)];
-
-  if (['game gì', 'tên gì', 'game nào', 'tải', 'chơi sao', 'luật', 'ở đâu', 'what game', 'how to play'].some(term => raw.includes(term))) {
-    return { text: pick([
-      `${name} ơi, Mimi đang chơi game nổ hũ trực tiếp nè. Bạn xem link trên màn hình để tham gia nhé!`,
-      `Game này chơi đơn giản lắm ${name} ơi, mở link trong phần mô tả rồi chọn phòng của Mimi nha!`,
-    ]), emotion: 'happy', topic: 'game_inquiry' };
-  }
-
-  if (['chơi chung', 'chơi cùng', 'vào phòng', 'cho chơi với', 'room', 'join'].some(term => raw.includes(term))) {
-    return { text: pick([
-      `Vào chơi cùng Mimi nha ${name}, link phòng đang ở phần mô tả đó!`,
-      `Hoan nghênh ${name} vào phòng, cùng Mimi săn jackpot nào!`,
-    ]), emotion: 'excited', topic: 'coop_request' };
-  }
-
-  if (['tăng cược', 'giảm cược', 'đổi phòng', 'mức cược', 'chiến thuật', 'tất tay', 'all in'].some(term => raw.includes(term))) {
-    return { text: pick([
-      `Ý kiến hay đó ${name}, Mimi thử chiến thuật này ở ván tiếp theo nha!`,
-      `Mimi ghi nhận gợi ý của ${name}, mình đổi chiến thuật xem vận may thế nào nhé!`,
-    ]), emotion: 'excited', topic: 'strategy_advice' };
-  }
-
-  if (['đen', 'thua', 'tiếc', 'không nổ', 'gỡ', 'cháy', 'unlucky', 'lose'].some(term => raw.includes(term))) {
-    return { text: pick([
-      `Tiếc thật đó ${name}, nhưng ván sau Mimi sẽ gỡ lại nha!`,
-      `Suýt trúng rồi ${name} ơi, cùng chờ một màn trở lại thật đẹp nhé!`,
-    ]), emotion: 'neutral', topic: 'loss_empathy' };
-  }
-
-  if (['thắng', 'nổ hũ', 'jackpot', 'chúc mừng', 'đỉnh', 'ăn đậm', 'win'].some(term => raw.includes(term))) {
-    return { text: pick([
-      `Cảm ơn ${name} nha, ván vừa rồi thắng quá đẹp luôn!`,
-      `Jackpot rực rỡ quá ${name} ơi, mình giữ đà may mắn này nhé!`,
-    ]), emotion: 'excited', topic: 'win_celebrate' };
-  }
-
-  if (['chào', 'mimi ơi', 'hé lô', 'hi', 'hello', 'mấy giờ', 'lịch live'].some(term => raw.includes(term))) {
-    return { text: pick([
-      `Mimi chào ${name} nha, cảm ơn bạn đã ghé livestream!`,
-      `Chào ${name}, ở lại xem ván tiếp theo cùng Mimi nhé!`,
-    ]), emotion: 'happy', topic: 'greeting' };
-  }
-
-  if (['xinh', 'dễ thương', 'đẹp', 'cute', 'hát', 'yêu', 'tuổi'].some(term => raw.includes(term))) {
-    return { text: pick([
-      `Cảm ơn ${name} nha, bạn khen làm Mimi ngại quá!`,
-      `${name} dễ thương quá, Mimi gửi bạn một trái tim nè!`,
-    ]), emotion: 'happy', topic: 'compliment' };
-  }
-
-  const cleanSnippet = messageText.length > 25 ? `${messageText.slice(0, 22)}…` : messageText;
-  return { text: pick([
-    `Mimi vừa đọc bình luận “${cleanSnippet}” của ${name} nè, cảm ơn bạn đã tương tác nha!`,
-    `Ý kiến của ${name} về “${cleanSnippet}” thú vị đó, mình cùng xem tiếp ván này nhé!`,
-  ]), emotion: 'happy', topic: 'general_context' };
-}
-
-function processPendingChatBatch() {
-  if (App.isPaused || App.pendingChatBatch.length === 0) return;
-
-  if (App.isAiSpeaking) {
-    if (App.chatProcessTimer) clearTimeout(App.chatProcessTimer);
-    App.chatProcessTimer = setTimeout(() => processPendingChatBatch(), 1000);
-    return;
-  }
-
-  const currentItem = App.pendingChatBatch.shift();
-  if (!currentItem) return;
-
-  const { viewerName, messageText, isGift, giftIcon } = currentItem;
-
-  if (isGift) {
-    updateVoiceStatusUI('generating', `🎁 Gift from [${viewerName}]: Preparing a thank-you...`, 30);
-    setTimeout(() => {
-      setVisualState('THANK_DONATION', 2, 'gift', true);
-      const giftResponse = `Cảm ơn ${viewerName} rất nhiều vì món quà ${giftIcon} nha!`;
-      speakAI(giftResponse, 'excited');
-    }, 600);
-    return;
-  }
-
-  // Phase 1: Natural Reading Pause (Streamer eyes reading the chat)
-  updateVoiceStatusUI('generating', `👀 Mimi is reading chat from [${viewerName}]...`, 15);
-  addLog(`💬 AI is reading chat from ${viewerName}: "${messageText.slice(0, 30)}..."`, 'hi');
-
-  setTimeout(() => {
-    // Phase 2: Context Analysis & Thinking Pause
-    updateVoiceStatusUI('generating', `🧠 Analyzing context and drafting a reply...`, 45);
-
-    setTimeout(() => {
-      // Phase 3: Generate Context-Aware Reply
-      const reply = generateContextualChatReply(viewerName, messageText, App.streamContext, App.chatHistory);
-
-      // Phase 4: Speak AI (Generates audio & LipSync, synchronizes subtitle and speech)
-      addLog(`🗣️ Mimi is preparing a reply for [${viewerName}]: "${reply.text}"`, 'ok');
-      speakAI(reply.text, reply.emotion);
-
-    }, 400); // 400ms context analysis
-
-  }, 600); // 600ms reading pause
-}
+// Chat replies are generated by the runtime Director and Dialogue Agent.
 
 function addChatMessage(viewerName, messageText, isGift = false, giftIcon = '') {
   const chatList = $('chat-queue');
@@ -4256,7 +5329,7 @@ function addChatMessage(viewerName, messageText, isGift = false, giftIcon = '') 
   chatList.prepend(li);
   while (chatList.children.length > 30) chatList.lastElementChild?.remove();
 
-  // Save into Chat History for Context
+  // Keep the visible chat history for operator context only. Reply generation stays server-owned.
   App.chatHistory.push({
     viewerName,
     messageText,
@@ -4282,16 +5355,7 @@ function addChatMessage(viewerName, messageText, isGift = false, giftIcon = '') 
     }).catch(() => {});
   } catch {}
 
-  // The production LiveTalking path is server-owned: chat → Qwen → TTS →
-  // MuseTalk. Keep the local canned responder only for the offline file demo.
-  if (!App.isPaused && (location.protocol === 'file:' || App.talkingEngine.provider !== 'livetalking')) {
-    App.pendingChatBatch.push({ viewerName, messageText, isGift, giftIcon });
-
-    if (App.chatProcessTimer) clearTimeout(App.chatProcessTimer);
-    App.chatProcessTimer = setTimeout(() => {
-      processPendingChatBatch();
-    }, 400);
-  }
+  // Runtime is the only owner of chat reply generation and speech orchestration.
 }
 
 // ──────────────────────────────────────────────────────────
@@ -4307,7 +5371,7 @@ function injectJackpot() {
 
 function injectDonation() {
   setVisualState('THANK_DONATION', 2, 'donation', true);
-  speakAI('Cảm ơn bạn rất nhiều vì đã ủng hộ livestream của Mimi nha!', 'grateful');
+  speakAI(`Cảm ơn bạn rất nhiều vì đã ủng hộ livestream của ${activeIdolName()} nha!`, 'grateful');
 }
 
 function injectWin() {
@@ -4320,7 +5384,7 @@ function injectWin() {
 function injectGoal() {
   setVisualState('INVITE_PLAY', 5, 'goal', true);
   if ($('b-goal')) $('b-goal').textContent = 'invite_viewers';
-  speakAI('Mọi người vào link trong phần mô tả để chơi cùng Mimi nha!', 'happy');
+  speakAI(`Mọi người vào link trong phần mô tả để chơi cùng ${activeIdolName()} nha!`, 'happy');
   App.lastCtaAt = Date.now();
   setTimeout(() => { if ($('b-goal')) $('b-goal').textContent = '—'; }, 6000);
 }
@@ -4343,35 +5407,86 @@ function simSlotSpin() {
 // 7. SETTINGS & SESSION PERSISTENCE
 // ──────────────────────────────────────────────────────────
 
+function applyLiveSessionSettingsUI(settings = {}) {
+  if ($('live-session-goal')) $('live-session-goal').value = settings.goal || '';
+  if ($('live-session-persona')) $('live-session-persona').value = settings.personaBrief || '';
+  if ($('live-session-context')) $('live-session-context').value = settings.context || '';
+  if ($('live-session-save-status')) $('live-session-save-status').textContent = settings.skillMarkdown
+    ? 'Reply skill is ready for this session.'
+    : 'Runtime will generate a reply skill.';
+}
+
+function applyRuntimeSettingsUI(settings = {}) {
+  if (settings.voice) {
+    const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(settings.voice.provider)
+      ? settings.voice.provider
+      : 'qwentts';
+    App.voice.provider = provider;
+    App.voice.language = settings.voice.languageCode || 'vi';
+    if (settings.voice.voiceId) App.voice.elevenLabsVoiceId = settings.voice.voiceId;
+    if (Number.isFinite(Number(settings.voice.speed))) App.voice.speed = Number(settings.voice.speed);
+    localStorage.setItem(STORAGE_KEYS.VOICE_PROVIDER, App.voice.provider);
+    localStorage.setItem(STORAGE_KEYS.VOICE_LANG, App.voice.language);
+    localStorage.setItem(STORAGE_KEYS.VOICE_SPEED, String(App.voice.speed));
+    localStorage.setItem(STORAGE_KEYS.ELEVENLABS_VOICE, App.voice.elevenLabsVoiceId);
+    const omniVoice = $('lt-omnivoice-voice-select');
+    if (omniVoice && [...omniVoice.options].some(option => option.value === settings.voice.voiceId)) {
+      omniVoice.value = settings.voice.voiceId;
+    }
+  }
+  applyAiProfileUI(settings);
+  if (settings.talkingEngine) {
+    App.talkingEngine.provider = settings.talkingEngine.provider || App.talkingEngine.provider;
+    App.talkingEngine.endpoint = settings.talkingEngine.endpoint || App.talkingEngine.endpoint;
+    App.talkingEngine.model = settings.talkingEngine.model || App.talkingEngine.model;
+  }
+  if (settings.liveSession) applyLiveSessionSettingsUI(settings.liveSession);
+  loadPersistedSettings();
+}
+
+async function loadLiveSessionSettings() {
+  if (location.protocol === 'file:') return;
+  try {
+    const payload = await window.RuntimeApi.get('/api/settings/all');
+    applyRuntimeSettingsUI(payload);
+  } catch (error) {
+    if ($('live-session-save-status')) $('live-session-save-status').textContent = `Could not load session: ${error.message}`;
+  }
+}
+
+async function saveLiveSessionSettings() {
+  const settings = {
+    goal: $('live-session-goal')?.value.trim() || '',
+    personaBrief: $('live-session-persona')?.value.trim() || '',
+    context: $('live-session-context')?.value.trim() || '',
+  };
+  const status = $('live-session-save-status');
+  if (location.protocol === 'file:') {
+    if (status) status.textContent = 'Open the dashboard through the runtime server to save this skill.';
+    return;
+  }
+  if (status) status.textContent = 'Generating reply skill...';
+  try {
+    const payload = await window.RuntimeApi.post('/api/settings/live-session', settings);
+    applyLiveSessionSettingsUI(payload.settings || settings);
+    addLog('Live Session reply skill generated and saved.', 'ok');
+  } catch (error) {
+    if (status) status.textContent = `Could not save session: ${error.message}`;
+    addLog(`Live Session skill failed: ${error.message}`, 'err');
+  }
+}
+
 function loadPersistedSettings() {
   const quickProv = $('quick-voice-provider');
   if (quickProv) quickProv.value = App.voice.provider;
+  syncQuickVoiceIdVisibility(App.voice.provider);
+  const liveTalkingProv = $('lt-voice-provider-select');
+  if (liveTalkingProv) liveTalkingProv.value = App.voice.provider;
+  updateLiveTalkingVoiceUI();
 
   const quickLang = $('quick-voice-lang');
   if (quickLang) quickLang.value = App.voice.language;
 
-  const quickTalking = $('quick-talking-provider');
-  if (quickTalking) quickTalking.value = App.talkingEngine.provider;
-
-  const ltEndpoint = $('livetalking-endpoint');
-  if (ltEndpoint) ltEndpoint.value = App.talkingEngine.endpoint;
-
-  const ltModel = $('livetalking-model');
-  if (ltModel) ltModel.value = App.talkingEngine.model;
-
-  const ltBadge = $('talking-provider-status-badge');
-  if (ltBadge) {
-    if (App.talkingEngine.provider === 'livetalking') {
-      ltBadge.textContent = `LiveTalking (${App.talkingEngine.model.toUpperCase()})`;
-      ltBadge.style.color = 'var(--green)';
-    } else if (App.talkingEngine.provider === 'off') {
-      ltBadge.textContent = 'Disabled';
-      ltBadge.style.color = 'var(--t3)';
-    } else {
-      ltBadge.textContent = 'Live Ready';
-      ltBadge.style.color = 'var(--green)';
-    }
-  }
 
   const apikeyGroup = $('group-quick-apikey');
   const isEleven = App.voice.provider === 'elevenlabs';
@@ -4382,7 +5497,10 @@ function loadPersistedSettings() {
 
   const voiceSelect = $('quick-saved-voice-list');
   if (voiceSelect) {
-    voiceSelect.value = App.voice.elevenLabsVoiceId;
+    renderQuickVoiceOptions(App.voice.provider);
+    if ([...voiceSelect.options].some(option => option.value === App.voice.elevenLabsVoiceId)) {
+      voiceSelect.value = App.voice.elevenLabsVoiceId;
+    }
   }
 
   const speedSlider = $('quick-voice-speed');
@@ -4394,10 +5512,16 @@ function loadPersistedSettings() {
 
   const speedStr = `${(App.voice.speed || 1.0).toFixed(2)}x`;
   if ($('sys-tts-engine')) {
-    $('sys-tts-engine').textContent = (isEleven ? 'ElevenLabs' : 'WebSpeech') + ' (VI)';
+    const engineName = App.voice.provider === 'qwentts'
+      ? 'Qwen TTS 0.6B'
+      : App.voice.provider === 'omnivoice' ? 'OmniVoice Female' : 'ElevenLabs';
+    $('sys-tts-engine').textContent = `${engineName} (VI)`;
   }
   if ($('vstatus-engine-tag')) {
-    $('vstatus-engine-tag').textContent = isEleven ? `ElevenLabs Turbo v2.5 (VI · ${speedStr})` : `WebSpeech (VI · ${speedStr})`;
+    const providerLabel = App.voice.provider === 'qwentts'
+      ? 'Qwen TTS Local · MLX'
+      : App.voice.provider === 'omnivoice' ? 'OmniVoice Local' : 'ElevenLabs Turbo v2.5';
+    $('vstatus-engine-tag').textContent = `${providerLabel} (VI · ${speedStr})`;
   }
   if ($('sys-talking-engine')) {
     $('sys-talking-engine').textContent = App.talkingEngine.provider === 'off' ? 'Talking: Off' : 'Stream: Active';
@@ -4462,6 +5586,565 @@ function saveVoiceSettings(newSettings = {}) {
   loadPersistedSettings();
 }
 
+function activeIdolName() {
+  return String(App.voice.personaName || $('profile-idol-name')?.value || 'Mimi').trim() || 'Mimi';
+}
+
+function idolPreviewLine(name = activeIdolName()) {
+  return `Chào cả nhà, ${name} đã sẵn sàng livestream rồi nè!`;
+}
+
+function syncPersonaPreviewCopy(name = activeIdolName()) {
+  const preview = idolPreviewLine(name);
+  if ($('profile-voice-preview-text')) $('profile-voice-preview-text').value = preview;
+  if ($('quick-test-voice-text')) $('quick-test-voice-text').value = preview;
+  if ($('lt-test-speech-input')) $('lt-test-speech-input').value = preview;
+  const designPreview = document.querySelector('#voice-profile-design-form textarea[name="previewText"]');
+  if (designPreview) designPreview.value = preview;
+}
+
+function setReplySkillStatus(message, isError = false) {
+  const status = $('reply-skill-status');
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle('error', isError);
+}
+
+function renderReplySkillLibrary() {
+  const list = $('reply-skill-list');
+  if (!list) return;
+  list.replaceChildren();
+  const activeSkill = ReplySkillState.items.find(skill => skill.id === ReplySkillState.activeSkillId);
+  if ($('reply-skill-active-name')) $('reply-skill-active-name').textContent = activeSkill?.name || 'No skill selected';
+
+  if (!ReplySkillState.items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'reply-skill-empty';
+    empty.textContent = ReplySkillState.busy ? 'Loading saved skills...' : 'No reply skills are available.';
+    list.append(empty);
+    return;
+  }
+
+  for (const skill of ReplySkillState.items) {
+    const isActive = skill.id === ReplySkillState.activeSkillId;
+    const item = document.createElement('article');
+    item.className = `reply-skill-item${isActive ? ' active' : ''}`;
+
+    const select = document.createElement('button');
+    select.type = 'button';
+    select.className = 'reply-skill-select';
+    select.setAttribute('role', 'radio');
+    select.setAttribute('aria-checked', String(isActive));
+    select.disabled = ReplySkillState.busy;
+    select.addEventListener('click', () => selectReplySkill(skill.id));
+
+    const icon = document.createElement('span');
+    icon.className = 'material-symbols-rounded';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = isActive ? 'radio_button_checked' : 'radio_button_unchecked';
+    const copy = document.createElement('span');
+    const name = document.createElement('strong');
+    name.textContent = skill.name;
+    const meta = document.createElement('small');
+    meta.textContent = skill.source === 'generated' ? 'Live Session Setting' : skill.fileName;
+    copy.append(name, meta);
+    select.append(icon, copy);
+    item.append(select);
+
+    if (isActive) {
+      const badge = document.createElement('span');
+      badge.className = 'reply-skill-active-badge';
+      badge.textContent = 'Active';
+      item.append(badge);
+    }
+
+    if (skill.deletable) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'reply-skill-delete';
+      remove.title = `Delete ${skill.name}`;
+      remove.setAttribute('aria-label', `Delete ${skill.name}`);
+      remove.disabled = ReplySkillState.busy;
+      const removeIcon = document.createElement('span');
+      removeIcon.className = 'material-symbols-rounded';
+      removeIcon.setAttribute('aria-hidden', 'true');
+      removeIcon.textContent = 'delete';
+      remove.append(removeIcon);
+      remove.addEventListener('click', () => deleteReplySkill(skill));
+      item.append(remove);
+    }
+    list.append(item);
+  }
+}
+
+function applyReplySkillPayload(payload = {}) {
+  ReplySkillState.items = Array.isArray(payload.items) ? payload.items : [];
+  ReplySkillState.activeSkillId = payload.activeSkillId || '';
+  ReplySkillState.busy = false;
+  renderReplySkillLibrary();
+}
+
+async function loadReplySkills() {
+  if (location.protocol === 'file:' || !window.RuntimeApi) return;
+  ReplySkillState.busy = true;
+  renderReplySkillLibrary();
+  try {
+    const payload = await window.RuntimeApi.get('/api/settings/reply-skills');
+    applyReplySkillPayload(payload);
+    setReplySkillStatus('Saved skills are ready.');
+  } catch (error) {
+    ReplySkillState.busy = false;
+    renderReplySkillLibrary();
+    setReplySkillStatus(`Could not load skills: ${error.message}`, true);
+  }
+}
+
+async function selectReplySkill(id) {
+  if (ReplySkillState.busy || id === ReplySkillState.activeSkillId) return;
+  ReplySkillState.busy = true;
+  renderReplySkillLibrary();
+  setReplySkillStatus('Applying reply skill...');
+  try {
+    const payload = await window.RuntimeApi.post('/api/settings/reply-skills/select', { id });
+    applyReplySkillPayload(payload);
+    setReplySkillStatus('Reply skill selected for the next live response.');
+  } catch (error) {
+    ReplySkillState.busy = false;
+    renderReplySkillLibrary();
+    setReplySkillStatus(error.message, true);
+  }
+}
+
+async function uploadReplySkill(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.md')) {
+    setReplySkillStatus('Choose a Markdown file ending in .md.', true);
+    return;
+  }
+  ReplySkillState.busy = true;
+  renderReplySkillLibrary();
+  setReplySkillStatus(`Uploading ${file.name}...`);
+  try {
+    const markdown = await file.text();
+    const payload = await window.RuntimeApi.post('/api/settings/reply-skills', { fileName: file.name, markdown });
+    applyReplySkillPayload(payload);
+    setReplySkillStatus(`${file.name} is saved and active.`);
+  } catch (error) {
+    ReplySkillState.busy = false;
+    renderReplySkillLibrary();
+    setReplySkillStatus(error.message, true);
+  }
+}
+
+async function deleteReplySkill(skill) {
+  if (ReplySkillState.busy) return;
+  const confirmed = await showAppConfirm({
+    title: 'Delete reply skill?',
+    message: `${skill.name} will be removed from this project.`,
+    confirmLabel: 'Delete',
+  });
+  if (!confirmed) return;
+  ReplySkillState.busy = true;
+  renderReplySkillLibrary();
+  setReplySkillStatus(`Deleting ${skill.name}...`);
+  try {
+    const payload = await window.RuntimeApi.delete(`/api/settings/reply-skills/${encodeURIComponent(skill.id)}`);
+    applyReplySkillPayload(payload);
+    setReplySkillStatus('Reply skill deleted.');
+  } catch (error) {
+    ReplySkillState.busy = false;
+    renderReplySkillLibrary();
+    setReplySkillStatus(error.message, true);
+  }
+}
+
+function applyAiProfileUI(settings = {}) {
+  const persona = settings.persona || {};
+  const voice = settings.voice || {};
+  if (persona.name) {
+    App.voice.personaName = persona.name;
+    localStorage.setItem(STORAGE_KEYS.PERSONA_NAME, persona.name);
+  }
+  if (persona.systemPrompt) {
+    App.voice.personaPrompt = persona.systemPrompt;
+    localStorage.setItem(STORAGE_KEYS.PERSONA_PROMPT, persona.systemPrompt);
+  }
+  const name = persona.name || App.voice.personaName || 'Mimi';
+  if ($('profile-idol-name')) $('profile-idol-name').value = name;
+  if ($('profile-idol-personality')) $('profile-idol-personality').value = persona.personality || '';
+  if ($('profile-idol-prompt')) $('profile-idol-prompt').value = persona.systemPrompt || App.voice.personaPrompt || '';
+  syncPersonaPreviewCopy(name);
+  const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(voice.provider) ? voice.provider : 'qwentts';
+  if ($('profile-voice-provider')) $('profile-voice-provider').value = provider;
+  updateVoiceProfileBuilder(provider);
+}
+
+function updateVoiceProfileBuilder(provider) {
+  const supportsProfiles = provider === 'qwentts' || provider === 'omnivoice';
+  $('voice-profile-builder')?.toggleAttribute('hidden', !supportsProfiles);
+  const designTab = document.querySelector('[data-voice-profile-mode="design"]');
+  const cloneTab = document.querySelector('[data-voice-profile-mode="clone"]');
+  if (designTab) designTab.hidden = provider !== 'omnivoice';
+  if (provider === 'qwentts') {
+    designTab?.classList.remove('active');
+    cloneTab?.classList.add('active');
+    if ($('voice-profile-design-form')) $('voice-profile-design-form').hidden = true;
+    if ($('voice-profile-clone-form')) $('voice-profile-clone-form').hidden = false;
+  } else if (provider === 'omnivoice') {
+    designTab?.classList.add('active');
+    cloneTab?.classList.remove('active');
+    if ($('voice-profile-design-form')) $('voice-profile-design-form').hidden = false;
+    if ($('voice-profile-clone-form')) $('voice-profile-clone-form').hidden = true;
+  }
+}
+
+function voiceProfileKey(profile) {
+  return profile ? `${profile.provider}:${profile.voiceId}` : '';
+}
+
+function voiceProviderLabel(provider) {
+  if (provider === 'qwentts') return 'Qwen TTS';
+  if (provider === 'omnivoice') return 'Omni Voice';
+  return 'ElevenLabs';
+}
+
+function voiceProfileDescription(profile) {
+  if (profile.description) return profile.description;
+  if (profile.kind === 'clone') return 'Cloned voice';
+  if (profile.kind === 'design') return 'Designed voice';
+  return profile.provider === 'qwentts' ? 'Vietnamese preset' : 'Provider preset';
+}
+
+function stopVoiceProfilePreview() {
+  if (VoiceProfileState.previewAudio) {
+    VoiceProfileState.previewAudio.pause();
+    VoiceProfileState.previewAudio.src = '';
+    VoiceProfileState.previewAudio = null;
+  }
+  if (VoiceProfileState.previewUrl) {
+    URL.revokeObjectURL(VoiceProfileState.previewUrl);
+    VoiceProfileState.previewUrl = '';
+  }
+}
+
+function updateVoiceProfileActions() {
+  const selected = VoiceProfileState.selected;
+  const previewButton = $('preview-selected-voice');
+  const saveButton = $('save-selected-voice');
+  const selectedKey = voiceProfileKey(selected);
+  const isActive = Boolean(selected)
+    && selected.provider === App.voice.provider
+    && selected.voiceId === App.voice.elevenLabsVoiceId;
+  if (previewButton) previewButton.disabled = !selected || selected.status === 'setup-required';
+  if (saveButton) saveButton.disabled = !selected || isActive || VoiceProfileState.previewedKey !== selectedKey;
+}
+
+function selectVoiceProfile(profile, { preservePreview = false } = {}) {
+  VoiceProfileState.selected = profile || null;
+  if (!preservePreview || VoiceProfileState.previewedKey !== voiceProfileKey(profile)) {
+    VoiceProfileState.previewedKey = '';
+  }
+  if (profile?.previewText && $('profile-voice-preview-text')) {
+    $('profile-voice-preview-text').value = profile.previewText;
+  }
+  renderVoiceProfileList();
+}
+
+function renderQuickVoiceOptions(provider = App.voice.provider) {
+  syncQuickVoiceIdVisibility(provider);
+  const select = $('quick-saved-voice-list');
+  if (!select) return;
+  const profiles = VoiceProfileState.profiles.filter(profile => profile.provider === provider);
+  select.replaceChildren();
+  if (!profiles.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No saved voices';
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  profiles.forEach(profile => {
+    const option = document.createElement('option');
+    option.value = profile.voiceId;
+    option.textContent = `${profile.name} · ${voiceProfileDescription(profile)}`;
+    select.appendChild(option);
+  });
+  const activeId = App.voice.provider === provider ? App.voice.elevenLabsVoiceId : '';
+  select.value = profiles.some(profile => profile.voiceId === activeId) ? activeId : profiles[0].voiceId;
+  if ($('quick-voice-id-input')) $('quick-voice-id-input').value = select.value;
+}
+
+function syncQuickVoiceIdVisibility(provider = App.voice.provider) {
+  const section = $('quick-voice-id-section');
+  if (!section) return;
+  const supportsExternalVoiceId = provider === 'elevenlabs' || provider === 'omnivoice';
+  section.hidden = !supportsExternalVoiceId;
+  section.setAttribute('aria-hidden', String(!supportsExternalVoiceId));
+}
+
+function renderVoiceProfileList() {
+  const list = $('ai-voice-profile-list');
+  if (!list) return;
+  const provider = $('profile-voice-provider')?.value || App.voice.provider || 'qwentts';
+  const profiles = VoiceProfileState.profiles.filter(profile => profile.provider === provider);
+  const selectedKey = voiceProfileKey(VoiceProfileState.selected);
+  list.replaceChildren(...profiles.map(profile => {
+    const item = document.createElement('article');
+    const profileKey = voiceProfileKey(profile);
+    const isActive = profile.provider === App.voice.provider && profile.voiceId === App.voice.elevenLabsVoiceId;
+    item.className = `ai-voice-profile-item${profileKey === selectedKey ? ' selected' : ''}${isActive ? ' active' : ''}`;
+
+    const selectButton = document.createElement('button');
+    selectButton.type = 'button';
+    selectButton.className = 'ai-voice-profile-select';
+    selectButton.setAttribute('aria-label', `Select ${profile.name}`);
+    const icon = document.createElement('span');
+    icon.className = 'material-symbols-rounded';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = profile.kind === 'clone' ? 'graphic_eq' : 'record_voice_over';
+    const copy = document.createElement('span');
+    const name = document.createElement('strong');
+    name.textContent = profile.name;
+    const detail = document.createElement('small');
+    detail.textContent = `${voiceProfileDescription(profile)}${isActive ? ' · Active' : ''}`;
+    copy.append(name, detail);
+    selectButton.append(icon, copy);
+    selectButton.addEventListener('click', () => selectVoiceProfile(profile));
+
+    const previewButton = document.createElement('button');
+    previewButton.type = 'button';
+    previewButton.className = 'ai-voice-preview-button';
+    previewButton.title = profile.status === 'setup-required' ? 'Configure this provider before previewing' : `Preview ${profile.name}`;
+    previewButton.setAttribute('aria-label', `Preview ${profile.name}`);
+    previewButton.disabled = profile.status === 'setup-required';
+    previewButton.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">play_arrow</span>';
+    previewButton.addEventListener('click', async () => {
+      selectVoiceProfile(profile);
+      await previewSelectedVoice();
+    });
+    item.append(selectButton, previewButton);
+    return item;
+  }));
+  if (!profiles.length) {
+    const empty = document.createElement('div');
+    empty.className = 'ai-voice-profile-empty';
+    empty.textContent = 'No voices available for this provider.';
+    list.appendChild(empty);
+  }
+  if ($('ai-voice-profile-count')) $('ai-voice-profile-count').textContent = `${profiles.length} voice${profiles.length === 1 ? '' : 's'}`;
+  const active = VoiceProfileState.profiles.find(profile => profile.provider === App.voice.provider && profile.voiceId === App.voice.elevenLabsVoiceId);
+  if ($('ai-voice-profile-summary')) {
+    $('ai-voice-profile-summary').textContent = active
+      ? `${active.name} · ${voiceProviderLabel(active.provider)} · Active`
+      : `${voiceProviderLabel(App.voice.provider)} · ${App.voice.elevenLabsVoiceId || 'No voice selected'}`;
+  }
+  const providerNotice = $('voice-provider-notice');
+  if (providerNotice) {
+    const availableProfiles = profiles.filter(profile => profile.status !== 'setup-required' && profile.status !== 'offline');
+    providerNotice.classList.toggle('needs-setup', profiles.length > 0 && !availableProfiles.length);
+    providerNotice.textContent = provider === 'elevenlabs' && !availableProfiles.length
+      ? 'Connect ElevenLabs before previewing or saving a voice.'
+      : provider === 'omnivoice'
+        ? 'Omni Voice is available for voice design, cloning, and preview.'
+        : 'Qwen TTS runs locally and is optimized for fast Vietnamese replies.';
+  }
+  updateVoiceProfileActions();
+}
+
+async function previewSelectedVoice() {
+  const profile = VoiceProfileState.selected;
+  const status = $('voice-profile-status');
+  if (!profile) return;
+  const text = $('profile-voice-preview-text')?.value.trim() || idolPreviewLine();
+  const previewButton = $('preview-selected-voice');
+  if (previewButton) previewButton.disabled = true;
+  stopVoiceProfilePreview();
+  unlockAudio();
+  if (status) status.textContent = `Generating ${profile.name} preview...`;
+  try {
+    const blob = await requestProviderAudio({
+      provider: profile.provider,
+      text,
+      emotion: 'happy',
+      voiceId: profile.voiceId,
+      modelId: profile.provider === 'qwentts'
+        ? 'gwen-tts-0.6B-vi-8bit'
+        : profile.provider === 'elevenlabs' ? 'eleven_turbo_v2_5' : 'omnivoice',
+      speed: App.voice.speed || 1.05,
+    });
+    VoiceProfileState.previewUrl = URL.createObjectURL(blob);
+    VoiceProfileState.previewAudio = new Audio(VoiceProfileState.previewUrl);
+    await VoiceProfileState.previewAudio.play();
+    VoiceProfileState.previewedKey = voiceProfileKey(profile);
+    if (status) status.textContent = `Previewing ${profile.name}. Save it when the voice sounds right.`;
+    VoiceProfileState.previewAudio.onended = () => {
+      if (status) status.textContent = `${profile.name} preview complete. Ready to save.`;
+    };
+  } catch (error) {
+    VoiceProfileState.previewedKey = '';
+    if (status) status.textContent = `Preview unavailable: ${error.message}`;
+  } finally {
+    updateVoiceProfileActions();
+  }
+}
+
+async function saveSelectedVoice() {
+  const profile = VoiceProfileState.selected;
+  const status = $('voice-profile-status');
+  if (!profile || VoiceProfileState.previewedKey !== voiceProfileKey(profile)) return;
+  const saveButton = $('save-selected-voice');
+  if (saveButton) saveButton.disabled = true;
+  try {
+    await window.LiveTalkingApi.setVoice({
+      provider: profile.provider,
+      voiceId: profile.voiceId,
+      languageCode: 'vi',
+      speed: App.voice.speed,
+    });
+    saveVoiceSettings({ provider: profile.provider, elevenLabsVoiceId: profile.voiceId });
+    if ($('profile-voice-provider')) $('profile-voice-provider').value = profile.provider;
+    if (status) status.textContent = `${profile.name} is saved and active for live replies.`;
+    renderQuickVoiceOptions(profile.provider);
+    renderVoiceProfileList();
+  } catch (error) {
+    if (status) status.textContent = `Could not save voice: ${error.message}`;
+  } finally {
+    updateVoiceProfileActions();
+  }
+}
+
+async function loadVoiceProfiles(provider = $('profile-voice-provider')?.value || App.voice.provider || 'qwentts', preferredVoiceId = '') {
+  if (location.protocol === 'file:') return [];
+  try {
+    const payload = await window.RuntimeApi.get('/api/voice/profiles');
+    const profiles = payload.profiles || [];
+    VoiceProfileState.profiles = profiles;
+    renderQuickVoiceOptions(App.voice.provider || 'qwentts');
+    const providerProfiles = profiles.filter(profile => profile.provider === provider);
+    const requestedId = preferredVoiceId || (App.voice.provider === provider ? App.voice.elevenLabsVoiceId : '');
+    const selection = providerProfiles.find(profile => profile.voiceId === requestedId) || providerProfiles[0] || null;
+    VoiceProfileState.selected = selection;
+    VoiceProfileState.previewedKey = '';
+    renderVoiceProfileList();
+    return profiles;
+  } catch (error) {
+    if ($('voice-profile-status')) $('voice-profile-status').textContent = `Voice service is not ready: ${error.message}`;
+    return [];
+  }
+}
+
+function bindAiProfileControls() {
+  $('upload-reply-skill')?.addEventListener('click', () => $('reply-skill-file-input')?.click());
+  $('reply-skill-file-input')?.addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    try {
+      await uploadReplySkill(file);
+    } finally {
+      event.target.value = '';
+    }
+  });
+
+  $('save-ai-profile')?.addEventListener('click', async () => {
+    const status = $('profile-save-status');
+    const name = $('profile-idol-name')?.value.trim() || 'Mimi';
+    const personality = $('profile-idol-personality')?.value.trim() || '';
+    const systemPrompt = $('profile-idol-prompt')?.value.trim() || '';
+    try {
+      const payload = await window.RuntimeApi.post('/api/settings/persona', { name, personality, systemPrompt });
+      const savedPersona = payload.settings || { name, personality, systemPrompt };
+      applyAiProfileUI({ persona: savedPersona, voice: { provider: App.voice.provider } });
+      saveVoiceSettings({ personaName: savedPersona.name || name, personaPrompt: savedPersona.systemPrompt || systemPrompt });
+      syncPersonaPreviewCopy(savedPersona.name || name);
+      if (status) status.textContent = 'Idol profile saved.';
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    }
+  });
+
+  $('profile-voice-provider')?.addEventListener('change', async event => {
+    const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(event.target.value) ? event.target.value : 'qwentts';
+    updateVoiceProfileBuilder(provider);
+    stopVoiceProfilePreview();
+    await loadVoiceProfiles(provider);
+    if ($('voice-profile-status')) $('voice-profile-status').textContent = provider === App.voice.provider
+      ? 'Select a voice to preview, or keep the active voice.'
+      : `Select and preview a ${voiceProviderLabel(provider)} voice before saving.`;
+  });
+
+  $('preview-selected-voice')?.addEventListener('click', previewSelectedVoice);
+  $('save-selected-voice')?.addEventListener('click', saveSelectedVoice);
+
+  document.querySelectorAll('[data-voice-profile-mode]').forEach(button => button.addEventListener('click', () => {
+    const mode = button.dataset.voiceProfileMode;
+    document.querySelectorAll('[data-voice-profile-mode]').forEach(item => item.classList.toggle('active', item === button));
+    if ($('voice-profile-design-form')) $('voice-profile-design-form').hidden = mode !== 'design';
+    if ($('voice-profile-clone-form')) $('voice-profile-clone-form').hidden = mode !== 'clone';
+  }));
+
+  $('voice-profile-design-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const status = $('voice-profile-status');
+    const submit = event.submitter;
+    if (submit) submit.disabled = true;
+    if (status) status.textContent = 'Designing voice and generating preview…';
+    try {
+      const values = Object.fromEntries(new FormData(event.currentTarget));
+      const payload = await window.RuntimeApi.post('/api/voice/profiles/design', {
+        name: values.name,
+        gender: values.gender,
+        age: values.age,
+        pitch: values.pitch,
+        accent: values.accent,
+        style: values.style,
+        previewText: values.previewText,
+        performanceMode: false,
+      });
+      if (status) status.textContent = `${payload.profile.name} was created. Generating a preview...`;
+      await loadVoiceProfiles('omnivoice', payload.profile.voiceId);
+      await previewSelectedVoice();
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  });
+
+  $('voice-profile-clone-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const status = $('voice-profile-status');
+    const submit = event.submitter;
+    const file = $('ai-voice-clone-file')?.files?.[0];
+    if (!file) return;
+    if (submit) submit.disabled = true;
+    if (status) status.textContent = 'Analyzing audio and creating cloned voice…';
+    try {
+      const values = Object.fromEntries(new FormData(event.currentTarget));
+      const provider = App.voice.provider === 'omnivoice' ? 'omnivoice' : 'qwentts';
+      if (provider === 'qwentts' && !String(values.transcript || '').trim()) {
+        throw new Error('Qwen TTS requires the exact reference transcript for fast, accurate cloning.');
+      }
+      const stored = await persistProjectFile(file, 'uploads');
+      const payload = await window.RuntimeApi.post('/api/voice/profiles/clone', {
+        name: values.name,
+        sourcePath: stored.path,
+        transcript: values.transcript || '',
+        filename: file.name,
+        provider,
+      });
+      if (status) status.textContent = `${payload.profile.name} was created. Generating a preview...`;
+      event.currentTarget.reset();
+      await loadVoiceProfiles(provider, payload.profile.voiceId);
+      await previewSelectedVoice();
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  });
+}
+
 // ──────────────────────────────────────────────────────────
 // 8. MAIN TICK & LIFECYCLE
 // ──────────────────────────────────────────────────────────
@@ -4516,6 +6199,64 @@ function openModal(id) {
 function closeModal(id) {
   const m = $(id);
   if (m) m.style.display = 'none';
+}
+
+function showAppConfirm({ title = 'Confirm action', message = '', confirmLabel = 'Confirm' } = {}) {
+  return new Promise(resolve => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop app-confirm-backdrop';
+    backdrop.style.display = 'flex';
+    backdrop.style.zIndex = '100000';
+
+    const card = document.createElement('div');
+    card.className = 'modal-card app-confirm-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-labelledby', 'app-confirm-title');
+
+    const header = document.createElement('div');
+    header.className = 'modal-hdr';
+    const heading = document.createElement('h3');
+    heading.id = 'app-confirm-title';
+    heading.textContent = title;
+    header.append(heading);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body app-confirm-body';
+    body.textContent = message;
+
+    const footer = document.createElement('div');
+    footer.className = 'modal-ftr';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn-secondary';
+    cancel.textContent = 'Cancel';
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = 'btn-primary app-confirm-danger';
+    confirm.textContent = confirmLabel;
+    footer.append(cancel, confirm);
+    card.append(header, body, footer);
+    backdrop.append(card);
+    document.body.append(backdrop);
+
+    const finish = result => {
+      document.removeEventListener('keydown', onKeyDown);
+      backdrop.remove();
+      resolve(result);
+    };
+    const onKeyDown = event => {
+      if (event.key === 'Escape') finish(false);
+      if (event.key === 'Enter') finish(true);
+    };
+    cancel.addEventListener('click', () => finish(false));
+    confirm.addEventListener('click', () => finish(true));
+    backdrop.addEventListener('click', event => {
+      if (event.target === backdrop) finish(false);
+    });
+    document.addEventListener('keydown', onKeyDown);
+    confirm.focus();
+  });
 }
 
 function openUploadModalForTargetState(targetState = 'GAMEPLAY_IDLE') {
@@ -4584,6 +6325,10 @@ function bindEventListeners() {
     if (App.queuedTransition) {
       const q = App.queuedTransition;
       clearQueuedTransition();
+      if (q.commandId) {
+        void commitRuntimeSpeechPlayback(q.commandId);
+        return;
+      }
       setVisualState(q.state, q.priority, q.reason || 'skip-queue-now', q.forceRandom);
       addLog(`⏭️ Switched immediately to [${q.state}] (queue skipped)`, 'ok');
     }
@@ -4621,6 +6366,15 @@ function bindEventListeners() {
     });
   });
 
+  // Library preview ratio
+  document.querySelectorAll('.lib-ratio-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      App.libraryRatio = tab.dataset.libraryRatio === '9:16' ? '9:16' : '16:9';
+      localStorage.setItem(STORAGE_KEYS.LIBRARY_RATIO, App.libraryRatio);
+      renderLibraryUI();
+    });
+  });
+
   // 1. Group Direct File Inputs (Instant file upload)
   document.querySelectorAll('.group-file-input').forEach(input => {
     input.addEventListener('change', (e) => {
@@ -4648,21 +6402,6 @@ function bindEventListeners() {
     });
   });
 
-  // 3. Click on Empty Notices in Group List
-  document.querySelectorAll('.lib-empty-notice').forEach(notice => {
-    notice.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const targetState = notice.dataset.targetGroup || 'GAMEPLAY_IDLE';
-      const parentCard = notice.closest('.lib-group-card');
-      const directInput = parentCard ? parentCard.querySelector('.group-file-input') : null;
-      if (directInput) {
-        directInput.click();
-      } else {
-        openUploadModalForTargetState(targetState);
-      }
-    });
-  });
-
   // Target State Radio Click in Modal
   document.querySelectorAll('input[name="uploadTargetState"]').forEach(input => {
     input.addEventListener('change', () => {
@@ -4678,6 +6417,9 @@ function bindEventListeners() {
   // ══════════════════════════════════════════════════════════════
 
   // Modal Open / Close
+  $('btn-livetalking-worker')?.addEventListener('click', () => {
+    startLiveTalkingWorker().catch(() => {});
+  });
   $('btn-modal-avatar')?.addEventListener('click', () => {
     openModal('modal-avatar');
     updateLiveTalkingUI();
@@ -4698,15 +6440,37 @@ function bindEventListeners() {
   });
   $('btn-avatar-create-upload')?.addEventListener('click', () => $('input-avatar-create-file')?.click());
   $('input-avatar-create-file')?.addEventListener('change', async event => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    await loadAvatarTrainingFile(file);
+    if (!event.target.files?.length) return;
+    try {
+      await loadAvatarTrainingFiles(event.target.files);
+    } catch (error) {
+      AvatarCreateFlow.status = 'upload';
+      AvatarCreateFlow.files = [];
+      AvatarCreateFlow.items = [];
+      LiveTalkingStudio.videoFile = null;
+      renderAvatarBatchQueue();
+      updateAvatarCreateUI();
+      if ($('avatar-create-message')) $('avatar-create-message').textContent = `Upload failed: ${error.message}`;
+      console.warn('[Avatar] Could not load training media:', error);
+    }
   });
   $('avatar-create-id')?.addEventListener('input', event => {
     const cleanId = event.target.value.replace(/[^a-zA-Z0-9_-]/g, '_');
     if (cleanId !== event.target.value) event.target.value = cleanId;
     if ($('lt-avatar-id-input')) $('lt-avatar-id-input').value = cleanId;
     LiveTalkingStudio.avatarId = cleanId;
+    syncAvatarBatchIds(cleanId);
+  });
+  $('avatar-batch-queue')?.addEventListener('input', event => {
+    const index = Number(event.target.dataset.batchAvatarId);
+    if (!Number.isInteger(index) || !AvatarCreateFlow.items[index]) return;
+    const cleanId = cleanAvatarId(event.target.value, `avatar_${index + 1}`);
+    AvatarCreateFlow.items[index].avatarId = cleanId;
+  });
+  $('avatar-batch-queue')?.addEventListener('change', event => {
+    const index = Number(event.target.dataset.batchModel);
+    if (!Number.isInteger(index) || !AvatarCreateFlow.items[index]) return;
+    AvatarCreateFlow.items[index].model = event.target.value === 'wav2lip' ? 'wav2lip' : 'musetalk';
   });
   $('btn-avatar-create-train')?.addEventListener('click', async () => {
     if (AvatarCreateFlow.status === 'done') {
@@ -4716,15 +6480,16 @@ function bindEventListeners() {
       return;
     }
     const avatarId = $('avatar-create-id')?.value.trim();
-    if (!AvatarCreateFlow.file) return alert('Upload avatar media first.');
+    if (!AvatarCreateFlow.files.length) return alert('Upload avatar media first.');
     if (!avatarId) return alert('Enter an Avatar ID.');
     if ($('lt-avatar-id-input')) $('lt-avatar-id-input').value = avatarId;
     LiveTalkingStudio.avatarId = avatarId;
-    await startLiveTalkingTraining();
+    await startAvatarBatchTraining();
     updateAvatarCreateUI();
   });
   $('avatar-page-random-toggle')?.addEventListener('change', event => {
-    AvatarSession.random = event.target.checked;
+    event.target.checked = false;
+    AvatarSession.random = false;
     saveAvatarSession().catch(err => addLog(`Could not save avatar session: ${err.message}`, 'warn'));
   });
 
@@ -4769,7 +6534,8 @@ function bindEventListeners() {
   });
 
   $('lt-random-avatar-toggle')?.addEventListener('change', (event) => {
-    AvatarSession.random = event.target.checked;
+    event.target.checked = false;
+    AvatarSession.random = false;
   });
   $('btn-save-avatar-pool')?.addEventListener('click', () => {
     saveAvatarSession().catch(err => addLog(`Could not save avatar session: ${err.message}`, 'warn'));
@@ -5086,7 +6852,7 @@ function bindEventListeners() {
   });
 
   $('btn-reset-sample-text')?.addEventListener('click', () => {
-    if ($('lt-test-speech-input')) $('lt-test-speech-input').value = 'Chào cả nhà, Mimi đã sẵn sàng livestream rồi nè!';
+    if ($('lt-test-speech-input')) $('lt-test-speech-input').value = idolPreviewLine();
   });
 
   // Realtime LipSync Speech Test
@@ -5097,8 +6863,8 @@ function bindEventListeners() {
     }
 
     unlockAudio();
-    const text = $('lt-test-speech-input')?.value.trim() || 'Chào cả nhà, Mimi đã sẵn sàng livestream rồi nè!';
-    const provider = $('lt-voice-provider-select')?.value || App.voice.provider || 'elevenlabs';
+    const text = $('lt-test-speech-input')?.value.trim() || idolPreviewLine();
+    const provider = $('lt-voice-provider-select')?.value || App.voice.provider || 'qwentts';
 
     logLiveTalkingTerminal(`🎙️ Generating voice (${provider.toUpperCase()}) and Live LipSync...`, 'info');
     addLog(`🎙️ Testing LiveTalking voice (${provider.toUpperCase()})...`, 'ok');
@@ -5192,7 +6958,12 @@ function bindEventListeners() {
 
   // ── Full avatar reset ──────────────────────────────────────
   $('btn-delete-full-avatar')?.addEventListener('click', async () => {
-    if (!confirm('Delete all avatar data and restore defaults?')) return;
+    const confirmed = await showAppConfirm({
+      title: 'Reset avatar data?',
+      message: 'Delete all avatar data and restore defaults?',
+      confirmLabel: 'Reset',
+    });
+    if (!confirmed) return;
 
     LiveTalkingStudio.videoFile = null;
     LiveTalkingStudio.videoBlobUrl = null;
@@ -5264,7 +7035,7 @@ function bindEventListeners() {
   // ── Voice & Persona Modal ─────────────────────────────────
   $('btn-modal-voice')?.addEventListener('click', () => {
     // Populate modal inputs from App.voice
-    if ($('cfg-voice-provider')) $('cfg-voice-provider').value = App.voice.provider || 'elevenlabs';
+    if ($('cfg-voice-provider')) $('cfg-voice-provider').value = App.voice.provider || 'qwentts';
     if ($('cfg-voice-id')) $('cfg-voice-id').value = App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
     if ($('cfg-voice-speed')) $('cfg-voice-speed').value = App.voice.speed || 1.0;
     if ($('val-voice-speed')) $('val-voice-speed').textContent = `${(App.voice.speed || 1.0).toFixed(2)}x`;
@@ -5324,7 +7095,7 @@ function bindEventListeners() {
   });
 
   $('btn-rst-test-voice-text')?.addEventListener('click', () => {
-    if ($('cfg-test-voice-text')) $('cfg-test-voice-text').value = 'Chào bạn nha! Cảm ơn bạn đã xem livestream của Mimi!';
+    if ($('cfg-test-voice-text')) $('cfg-test-voice-text').value = idolPreviewLine();
   });
   $('btn-clear-test-voice-text')?.addEventListener('click', () => {
     if ($('cfg-test-voice-text')) $('cfg-test-voice-text').value = '';
@@ -5332,7 +7103,7 @@ function bindEventListeners() {
 
   $('btn-test-voice-speak')?.addEventListener('click', () => {
     unlockAudio();
-    const text = $('cfg-test-voice-text')?.value.trim() || 'Chào bạn nha! Cảm ơn bạn đã xem livestream của Mimi!';
+    const text = $('cfg-test-voice-text')?.value.trim() || idolPreviewLine();
     const provider = $('cfg-voice-provider')?.value || App.voice.provider;
     const voiceId = $('cfg-voice-id')?.value.trim() || App.voice.elevenLabsVoiceId;
     const speed = parseFloat($('cfg-voice-speed')?.value || App.voice.speed || 1.0);
@@ -5378,36 +7149,6 @@ function bindEventListeners() {
     addLog(`💾 Voice and persona settings saved.`, 'ok');
   });
 
-  // Talking Engine Provider Selector
-  $('quick-talking-provider')?.addEventListener('change', (e) => {
-    App.talkingEngine.provider = e.target.value;
-    localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, e.target.value);
-    if ($('sys-talking-engine')) {
-      $('sys-talking-engine').textContent = e.target.value === 'off' ? 'Talking: Off' : 'Stream: Active';
-    }
-    loadPersistedSettings();
-    addLog(`Changed talking video engine: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
-    if (e.target.value === 'livetalking') {
-      LiveTalkingWebRTCClient.connect(App.talkingEngine.endpoint, LiveTalkingStudio.avatarId)
-        .then(({ sessionId }) => addLog(`✅ LiveTalking neural WebRTC connected (${sessionId || 'session active'})`, 'ok'))
-        .catch(err => addLog(`⚠️ LiveTalking worker: ${err.message}`, 'hi'));
-    } else {
-      LiveTalkingWebRTCClient.disconnect();
-    }
-  });
-
-  // LiveTalking Endpoint & Model inputs
-  $('livetalking-endpoint')?.addEventListener('input', (e) => {
-    App.talkingEngine.endpoint = e.target.value.trim();
-    localStorage.setItem(STORAGE_KEYS.LIVETALKING_ENDPOINT, App.talkingEngine.endpoint);
-  });
-
-  $('livetalking-model')?.addEventListener('change', (e) => {
-    App.talkingEngine.model = e.target.value;
-    localStorage.setItem(STORAGE_KEYS.LIVETALKING_MODEL, e.target.value);
-    loadPersistedSettings();
-  });
-
   // Language Code Change
   $('quick-voice-lang')?.addEventListener('change', (e) => {
     saveVoiceSettings({ language: e.target.value });
@@ -5420,19 +7161,33 @@ function bindEventListeners() {
   });
 
   // Voice Presets Selection
-  $('quick-saved-voice-list')?.addEventListener('change', (e) => {
+  $('quick-saved-voice-list')?.addEventListener('change', async (e) => {
     const selectedVoiceId = e.target.value;
     if (selectedVoiceId) {
       const input = $('quick-voice-id-input');
       if (input) input.value = selectedVoiceId;
       saveVoiceSettings({ elevenLabsVoiceId: selectedVoiceId });
-      addLog(`Selected voice: ${e.target.options[e.target.selectedIndex]?.text.split('—')[0]} (${selectedVoiceId})`, 'ok');
+      await window.LiveTalkingApi.setVoice({
+        provider: App.voice.provider,
+        voiceId: selectedVoiceId,
+        languageCode: App.voice.language || 'vi',
+        speed: App.voice.speed,
+      }).catch(error => addLog(`Voice selection could not be saved: ${error.message}`, 'err'));
+      addLog(`Selected voice: ${e.target.options[e.target.selectedIndex]?.text || selectedVoiceId}`, 'ok');
+      renderVoiceProfileList();
     }
   });
 
-  $('quick-voice-id-input')?.addEventListener('input', (e) => {
+  $('quick-voice-id-input')?.addEventListener('change', async (e) => {
     const val = e.target.value.trim();
+    if (!val) return;
     saveVoiceSettings({ elevenLabsVoiceId: val });
+    await window.LiveTalkingApi.setVoice({
+      provider: App.voice.provider,
+      voiceId: val,
+      languageCode: App.voice.language || 'vi',
+      speed: App.voice.speed,
+    }).catch(error => addLog(`Voice ID could not be saved: ${error.message}`, 'err'));
   });
 
   // Voice Speed Slider
@@ -5472,13 +7227,21 @@ function bindEventListeners() {
   // Test Sound & Controls
   $('btn-test-sound')?.addEventListener('click', () => {
     unlockAudio();
-    speakAI('Chào bạn nha! Âm thanh livestream của Mimi đã sẵn sàng rồi nè!', 'happy');
+    speakAI(idolPreviewLine(), 'happy');
   });
   $('btn-stop-voice')?.addEventListener('click', stopLiveSpeech);
 
   $('btn-pause')?.addEventListener('click', () => {
     App.isPaused = !App.isPaused;
-    $('btn-pause').textContent = App.isPaused ? 'Resume AI' : 'Pause AI';
+    const button = $('btn-pause');
+    const actionLabel = App.isPaused ? 'Resume AI' : 'Pause AI';
+    if (button) {
+      button.querySelector('.material-symbols-rounded').textContent = App.isPaused ? 'play_arrow' : 'pause';
+      button.querySelector('.topbar-control-label').textContent = actionLabel;
+      button.title = actionLabel;
+      button.setAttribute('aria-label', actionLabel);
+      button.setAttribute('aria-pressed', String(App.isPaused));
+    }
     addLog(App.isPaused ? 'AI paused' : 'AI resumed', 'hi');
   });
 
@@ -5489,17 +7252,38 @@ function bindEventListeners() {
       LiveTalkingWebRTCClient.audioEl.muted = App.isMuted;
       if (!App.isMuted) LiveTalkingWebRTCClient.ensureAudioPlayback();
     }
-    $('btn-mute').textContent = App.isMuted ? 'Unmute' : 'Mute';
+    const button = $('btn-mute');
+    const actionLabel = App.isMuted ? 'Unmute voice' : 'Mute voice';
+    if (button) {
+      button.querySelector('.material-symbols-rounded').textContent = App.isMuted ? 'volume_up' : 'volume_off';
+      button.querySelector('.topbar-control-label').textContent = actionLabel;
+      button.title = actionLabel;
+      button.setAttribute('aria-label', actionLabel);
+      button.setAttribute('aria-pressed', String(App.isMuted));
+    }
     addLog(App.isMuted ? '🔇 Voice Muted' : '🔊 Voice Unmuted', 'hi');
   });
 
-  $('quick-voice-provider')?.addEventListener('change', (e) => {
-    saveVoiceSettings({ provider: e.target.value });
-    addLog(`Switched to ${e.target.value.toUpperCase()}`, 'ok');
+  $('quick-voice-provider')?.addEventListener('change', async (e) => {
+    const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(e.target.value) ? e.target.value : 'qwentts';
+    syncQuickVoiceIdVisibility(provider);
+    renderQuickVoiceOptions(provider);
+    const voiceId = $('quick-saved-voice-list')?.value || $('quick-voice-id-input')?.value.trim() || App.voice.elevenLabsVoiceId;
+    saveVoiceSettings({ provider, elevenLabsVoiceId: voiceId });
+    await window.LiveTalkingApi.setVoice({
+      provider,
+      voiceId,
+      languageCode: App.voice.language || 'vi',
+      speed: App.voice.speed,
+    }).catch(error => addLog(`${voiceProviderLabel(provider)} is not ready: ${error.message}`, 'err'));
+    if ($('profile-voice-provider')) $('profile-voice-provider').value = provider;
+    updateVoiceProfileBuilder(provider);
+    await loadVoiceProfiles(provider, voiceId);
+    addLog(`Switched to ${voiceProviderLabel(provider)}`, 'ok');
   });
 
   $('btn-quick-voice-speak')?.addEventListener('click', () => {
-    const text = $('quick-test-voice-text')?.value || 'Chào bạn nha! Mimi là AI Idol livestream người Việt Nam nè!';
+    const text = $('quick-test-voice-text')?.value || idolPreviewLine();
     speakAI(text, 'happy');
   });
 
@@ -5533,6 +7317,17 @@ function bindEventListeners() {
 
   // Library Card Clicks, Mode Toggles (OFF / Loop / 1) & Delete Clip
   $('lib-body')?.addEventListener('click', (e) => {
+    const emptyNotice = e.target.closest('.lib-empty-notice');
+    if (emptyNotice) {
+      e.stopPropagation();
+      const targetState = emptyNotice.dataset.targetGroup || 'GAMEPLAY_IDLE';
+      const parentCard = emptyNotice.closest('.lib-group-card');
+      const directInput = parentCard?.querySelector('.group-file-input');
+      if (directInput) directInput.click();
+      else openUploadModalForTargetState(targetState);
+      return;
+    }
+
     // 1. Mode Toggle button click (Loop -> 1x -> OFF -> Loop)
     const modeBtn = e.target.closest('.btn-clip-mode');
     if (modeBtn) {
@@ -5550,6 +7345,7 @@ function bindEventListeners() {
 
         clip.mode = nextMode;
         clip.loop = (nextMode === 'loop');
+        if (clip.storageId) IdolDB.updateClipMeta(clip.storageId, { mode: nextMode }).catch(() => {});
         renderLibraryUI();
         addLog(`Changed mode [${clip.label}]: ${nextMode.toUpperCase()}`, 'ok');
       }
@@ -5563,6 +7359,12 @@ function bindEventListeners() {
       const clipId = delBtn.dataset.delId;
       const state = delBtn.dataset.delState;
       if (CLIP_LIBRARY[state]) {
+        const clip = CLIP_LIBRARY[state].find(item => item.id === clipId);
+        if (clip?.blobUrl) URL.revokeObjectURL(clip.blobUrl);
+        if (clip?.storageId) {
+          UPLOADED_BLOBS.delete(clip.storageId);
+          IdolDB.deleteClip(clip.storageId).catch(() => {});
+        }
         CLIP_LIBRARY[state] = CLIP_LIBRARY[state].filter(c => c.id !== clipId);
         renderLibraryUI();
         addLog(`Deleted clip ${clipId} from ${state}`, 'hi');
@@ -5570,7 +7372,25 @@ function bindEventListeners() {
       return;
     }
 
-    // 3. Card click (Manual Play)
+    // 3. Trained neural avatar click
+    const avatarCard = e.target.closest('.live-avatar-card');
+    if (avatarCard) {
+      const avatarId = avatarCard.dataset.avatarId;
+      if (!avatarId) return;
+      void (async () => {
+        try {
+          await ensureLiveTalkingWorkerReady();
+          await activateLiveTalkingAvatar(avatarId);
+          setVisualState('TALKING', 0, 'manual-avatar-select', false);
+        } catch (error) {
+          console.warn(`[Avatar] Could not activate ${avatarId}:`, error);
+          addLog(`Could not activate avatar ${avatarId}: ${error.message}`, 'err');
+        }
+      })();
+      return;
+    }
+
+    // 4. Video card click (Manual Play)
     const card = e.target.closest('.clip-card');
     if (card) {
       const state = card.dataset.state;
@@ -5662,55 +7482,143 @@ function setupMonitorFirstStudio() {
   const stage = document.createElement('section');
   stage.className = 'monitor-first-stage';
   stage.appendChild(monitor);
-  if (voiceStatus) stage.appendChild(voiceStatus);
 
-  const director = document.createElement('section');
-  director.className = 'monitor-first-director';
-  director.innerHTML = `
-    <div class="monitor-first-director-head">
-      <span class="sec-label">Director</span>
-      <div class="monitor-first-tabs" role="tablist" aria-label="Director tools">
-        <button type="button" class="active" role="tab" aria-selected="true" data-director-tab="actions">Actions</button>
-        <button type="button" role="tab" aria-selected="false" data-director-tab="script">Live Script</button>
-      </div>
+  const center = document.createElement('section');
+  center.className = 'fcp-center-workspace';
+  const chatForm = chat.querySelector('.chat-input-form');
+  if (chatForm) chat.appendChild(chatForm);
+  voiceStatus.classList.add('fcp-voice-status-strip');
+  states.classList.add('fcp-avatar-state-strip');
+  center.append(stage, voiceStatus, states, chat);
+
+  const controls = document.createElement('section');
+  controls.className = 'monitor-first-controls';
+  controls.setAttribute('aria-label', 'Live controls');
+  controls.innerHTML = `
+    <div class="monitor-first-controls-head">
+      <span class="material-symbols-rounded" aria-hidden="true">tune</span>
+      <span class="sec-label">Live Control</span>
     </div>
-    <div class="monitor-first-director-body">
-      <div class="monitor-first-director-pane active" data-director-pane="actions"></div>
-      <div class="monitor-first-director-pane" data-director-pane="script"></div>
-    </div>`;
-  director.querySelector('[data-director-pane="actions"]').append(game, states);
-  director.querySelector('[data-director-pane="script"]').appendChild(goals);
+    <div class="monitor-first-controls-grid"></div>`;
+  const controlsGrid = controls.querySelector('.monitor-first-controls-grid');
+  controlsGrid.append(game, goals);
 
-  const bottom = document.createElement('section');
-  bottom.className = 'monitor-first-bottom';
-  bottom.append(chat, library, director);
+  const inspector = document.createElement('aside');
+  inspector.className = 'fcp-right-inspector';
+  inspector.append(controls);
 
-  appBody.replaceChildren(stage, bottom);
-  appBody.classList.add('monitor-first-layout');
+  const leftSplitter = document.createElement('div');
+  leftSplitter.className = 'studio-column-splitter studio-column-splitter-left';
+  leftSplitter.dataset.splitter = 'left';
+  leftSplitter.setAttribute('role', 'separator');
+  leftSplitter.setAttribute('aria-label', 'Resize Library and Monitor');
+  leftSplitter.setAttribute('aria-orientation', 'vertical');
+  leftSplitter.tabIndex = 0;
 
-  director.querySelectorAll('[data-director-tab]').forEach(tab => {
-    tab.addEventListener('click', () => {
-      const name = tab.dataset.directorTab;
-      director.querySelectorAll('[data-director-tab]').forEach(item => {
-        const active = item === tab;
-        item.classList.toggle('active', active);
-        item.setAttribute('aria-selected', String(active));
-      });
-      director.querySelectorAll('[data-director-pane]').forEach(pane => pane.classList.toggle('active', pane.dataset.directorPane === name));
+  const rightSplitter = document.createElement('div');
+  rightSplitter.className = 'studio-column-splitter studio-column-splitter-right';
+  rightSplitter.dataset.splitter = 'right';
+  rightSplitter.setAttribute('role', 'separator');
+  rightSplitter.setAttribute('aria-label', 'Resize Monitor and Live Control');
+  rightSplitter.setAttribute('aria-orientation', 'vertical');
+  rightSplitter.tabIndex = 0;
+
+  library.classList.add('fcp-library-browser');
+  appBody.replaceChildren(library, center, inspector, leftSplitter, rightSplitter);
+  appBody.classList.add('monitor-first-layout', 'fcp-editor-layout', 'svg-reference-layout');
+  setupStudioColumnResize(appBody);
+}
+
+function setupStudioColumnResize(layout) {
+  const defaults = { left: 28.49, center: 43.02, right: 28.49 };
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  let columns = { ...defaults };
+
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEYS.STUDIO_COLUMNS) || 'null');
+    const total = Number(saved?.left) + Number(saved?.center) + Number(saved?.right);
+    if (
+      Number.isFinite(total) && Math.abs(total - 100) < 0.1
+      && saved.left >= 25 && saved.left <= 40
+      && saved.center >= 40 && saved.center <= 50
+      && saved.right >= 25 && saved.right <= 40
+    ) {
+      columns = { left: Number(saved.left), center: Number(saved.center), right: Number(saved.right) };
+    }
+  } catch {
+    localStorage.removeItem(STORAGE_KEYS.STUDIO_COLUMNS);
+  }
+
+  const applyColumns = (persist = false) => {
+    layout.style.setProperty('--studio-left', `${columns.left.toFixed(2)}%`);
+    layout.style.setProperty('--studio-center', `${columns.center.toFixed(2)}%`);
+    layout.style.setProperty('--studio-right', `${columns.right.toFixed(2)}%`);
+    layout.querySelector('[data-splitter="left"]')?.setAttribute('aria-valuenow', columns.left.toFixed(1));
+    layout.querySelector('[data-splitter="right"]')?.setAttribute('aria-valuenow', columns.right.toFixed(1));
+    if (persist) localStorage.setItem(STORAGE_KEYS.STUDIO_COLUMNS, JSON.stringify(columns));
+  };
+
+  const resizeAt = (side, clientX, persist = false) => {
+    const bounds = layout.getBoundingClientRect();
+    if (!bounds.width) return;
+    const pointer = clamp(((clientX - bounds.left) / bounds.width) * 100, 0, 100);
+
+    if (side === 'left') {
+      const minLeft = Math.max(25, 100 - columns.right - 50);
+      const maxLeft = Math.min(40, 100 - columns.right - 40);
+      columns.left = clamp(pointer, minLeft, maxLeft);
+      columns.center = 100 - columns.right - columns.left;
+    } else {
+      const centerAtPointer = pointer - columns.left;
+      const minCenter = Math.max(40, 100 - columns.left - 40);
+      const maxCenter = Math.min(50, 100 - columns.left - 25);
+      columns.center = clamp(centerAtPointer, minCenter, maxCenter);
+      columns.right = 100 - columns.left - columns.center;
+    }
+    applyColumns(persist);
+  };
+
+  layout.querySelectorAll('.studio-column-splitter').forEach(splitter => {
+    const side = splitter.dataset.splitter;
+    splitter.addEventListener('pointerdown', event => {
+      event.preventDefault();
+      splitter.setPointerCapture(event.pointerId);
+      layout.classList.add('is-resizing-columns');
+      resizeAt(side, event.clientX);
+    });
+    splitter.addEventListener('pointermove', event => {
+      if (!splitter.hasPointerCapture(event.pointerId)) return;
+      resizeAt(side, event.clientX);
+    });
+    const finishResize = event => {
+      if (splitter.hasPointerCapture(event.pointerId)) splitter.releasePointerCapture(event.pointerId);
+      layout.classList.remove('is-resizing-columns');
+      applyColumns(true);
+    };
+    splitter.addEventListener('pointerup', finishResize);
+    splitter.addEventListener('pointercancel', finishResize);
+    splitter.addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === 'Home') {
+        columns = { ...defaults };
+        applyColumns(true);
+        return;
+      }
+      const direction = event.key === 'ArrowRight' ? 1 : -1;
+      const bounds = layout.getBoundingClientRect();
+      const currentEdge = side === 'left' ? columns.left : columns.left + columns.center;
+      resizeAt(side, bounds.left + ((currentEdge + direction) / 100) * bounds.width, true);
     });
   });
+
+  applyColumns();
 }
 
 function setupStudioShell() {
   const providerSlot = $('web-settings-provider-slot') || $('settings-provider-slot');
   const providerPanel = document.querySelector('.voice-config-panel');
-
-  // Preserve the existing provider controls and event IDs, but move the whole
-  // configuration surface out of the live control rail into Settings.
-  if (providerSlot && providerPanel && !providerPanel.classList.contains('settings-mounted')) {
-    providerSlot.appendChild(providerPanel);
-    providerPanel.classList.add('settings-mounted');
-  }
+  if (providerSlot) providerSlot.closest('.settings-bento-card')?.setAttribute('hidden', '');
 
   // Keep every setting on the same page. Existing form IDs and save handlers
   // are preserved by moving the modal contents into aligned bento cards.
@@ -5728,6 +7636,14 @@ function setupStudioShell() {
   mountSettingsForm('modal-voice', 'web-settings-voice-slot', 'web-settings-voice-actions', 'save-modal-voice');
   mountSettingsForm('modal-obs', 'web-settings-obs-slot', 'web-settings-obs-actions', 'save-modal-obs');
   setupMonitorFirstStudio();
+  const controlsGrid = document.querySelector('.monitor-first-controls-grid');
+  if (controlsGrid && providerPanel && !providerPanel.classList.contains('live-control-mounted')) {
+    controlsGrid.prepend(providerPanel);
+    providerPanel.classList.add('live-control-mounted');
+  }
+  // The legacy engineering workspace is deliberately not part of the product
+  // surface. Avatar creation remains available through the AI Profile flow.
+  $('modal-avatar')?.remove();
 
   const navigateAppView = (name = 'studio', updateHash = true) => {
     if (!['studio', 'avatar', 'settings'].includes(name)) name = 'studio';
@@ -5815,9 +7731,63 @@ function setupStudioShell() {
   };
   bindSessionToggle('quick-session-auto-mix', 'chk-auto-mix');
   bindSessionToggle('quick-session-random', 'chk-global-random');
+  const quickSessionVoice = $('quick-session-voice');
+  const quickSessionVoiceSpeed = $('quick-session-voice-speed');
+  if (quickSessionVoice) {
+    quickSessionVoice.value = ['qwentts', 'elevenlabs', 'omnivoice'].includes(App.voice.provider) ? App.voice.provider : 'qwentts';
+    quickSessionVoice.addEventListener('change', async event => {
+      const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(event.target.value) ? event.target.value : 'qwentts';
+      const providerProfiles = VoiceProfileState.profiles.filter(profile => profile.provider === provider);
+      const voiceId = providerProfiles.some(profile => profile.voiceId === App.voice.elevenLabsVoiceId)
+        ? App.voice.elevenLabsVoiceId
+        : providerProfiles[0]?.voiceId || App.voice.elevenLabsVoiceId;
+      saveVoiceSettings({ provider, elevenLabsVoiceId: voiceId });
+      if ($('quick-voice-provider')) $('quick-voice-provider').value = provider;
+      syncQuickVoiceIdVisibility(provider);
+      renderQuickVoiceOptions(provider);
+      if ($('profile-voice-provider')) $('profile-voice-provider').value = provider;
+      updateVoiceProfileBuilder(provider);
+      await window.LiveTalkingApi.setVoice({ provider, voiceId, languageCode: 'vi', speed: App.voice.speed }).catch(() => {});
+      await loadVoiceProfiles(provider, voiceId);
+    });
+  }
+  if (quickSessionVoiceSpeed) {
+    quickSessionVoiceSpeed.value = String(App.voice.speed || 1.05);
+    if ($('quick-session-voice-speed-value')) $('quick-session-voice-speed-value').textContent = `${Number(quickSessionVoiceSpeed.value).toFixed(2)}x`;
+    quickSessionVoiceSpeed.addEventListener('input', event => {
+      const speed = Number(event.target.value);
+      saveVoiceSettings({ speed });
+      if ($('quick-session-voice-speed-value')) $('quick-session-voice-speed-value').textContent = `${speed.toFixed(2)}x`;
+      window.LiveTalkingApi.setVoice({ speed }).catch(() => {});
+    });
+  }
   $('quick-session-captions')?.addEventListener('change', event => {
     $('monitor-screen')?.classList.toggle('captions-disabled', !event.target.checked);
   });
+
+  const liveSessionPanel = $('live-session-settings-panel');
+  const liveSessionButton = $('btn-live-session-settings');
+  const setLiveSessionPanelOpen = open => {
+    liveSessionPanel?.classList.toggle('open', open);
+    liveSessionPanel?.setAttribute('aria-hidden', String(!open));
+    liveSessionButton?.setAttribute('aria-expanded', String(open));
+    if (open) {
+      setQuickPanelOpen(false);
+      loadLiveSessionSettings();
+    }
+  };
+  liveSessionButton?.addEventListener('click', event => {
+    event.stopPropagation();
+    setLiveSessionPanelOpen(!liveSessionPanel?.classList.contains('open'));
+  });
+  $('close-live-session-settings')?.addEventListener('click', () => setLiveSessionPanelOpen(false));
+  liveSessionPanel?.addEventListener('click', event => event.stopPropagation());
+  $('save-live-session-settings')?.addEventListener('click', () => {
+    saveLiveSessionSettings().catch(error => {
+      if ($('live-session-save-status')) $('live-session-save-status').textContent = error.message;
+    });
+  });
+  document.addEventListener('click', () => setLiveSessionPanelOpen(false));
 
   $('settings-open-avatar')?.addEventListener('click', () => navigateAppView('avatar'));
   $('save-project-storage')?.addEventListener('click', () => {
@@ -5831,28 +7801,49 @@ function setupStudioShell() {
       if ($('local-ai-install-progress')) $('local-ai-install-progress').textContent = error.message;
     });
   });
+  $('local-ai-model-name')?.addEventListener('input', () => {
+    const button = $('install-local-ai-model');
+    if (!button) return;
+    button.disabled = false;
+    button.innerHTML = '<span class="material-symbols-rounded">download</span>Cài đặt Show Director';
+  });
 
   window.openStudioSettings = openSettingsCenter;
 }
 
-function init() {
+async function init() {
   try {
     setupStudioShell();
   } catch (e) {
     console.warn('setupStudioShell error:', e);
   }
 
+  // Bind static controls immediately. Media restoration can involve a large
+  // IndexedDB migration and must never make upload/settings controls inert.
   try {
-    loadPersistedAvatar();
+    bindEventListeners();
+    bindAiProfileControls();
   } catch (e) {
-    console.warn('loadPersistedAvatar error:', e);
+    console.warn('bindEventListeners error:', e);
   }
+
+  const persistedMedia = await Promise.allSettled([
+    loadPersistedAvatar(),
+    loadPersistedClips(),
+  ]);
+  persistedMedia.forEach(result => {
+    if (result.status === 'rejected') console.warn('Persisted media load error:', result.reason);
+  });
 
   try {
     loadPersistedSettings();
   } catch (e) {
     console.warn('loadPersistedSettings error:', e);
   }
+
+  loadLiveSessionSettings();
+  loadReplySkills();
+  loadVoiceProfiles();
 
   loadProjectStorageConfig();
 
@@ -5874,22 +7865,34 @@ function init() {
     console.warn('initAvatarCanvas error:', e);
   }
 
-  try {
-    bindEventListeners();
-  } catch (e) {
-    console.warn('bindEventListeners error:', e);
-  }
-
-  localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, App.talkingEngine.provider);
-  refreshLiveTalkingAvatarList().then(async avatars => {
+  App.talkingEngine.provider = 'livetalking';
+  localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, 'livetalking');
+  const startupOverlay = $('app-startup-overlay');
+  const startupStatus = $('app-startup-status');
+  if (startupStatus) startupStatus.textContent = 'Preparing realtime avatar…';
+  await ensureLiveTalkingWorkerReady().catch(error => {
+    if (startupStatus) startupStatus.textContent = `Live workspace will reconnect automatically: ${error.message}`;
+  });
+  clearInterval(LiveTalkingWorker.pollTimer);
+  LiveTalkingWorker.pollTimer = setInterval(() => refreshLiveTalkingWorkerStatus({ silent: true }), 3000);
+  await refreshLiveTalkingAvatarList().then(async avatars => {
     if (App.talkingEngine.provider !== 'livetalking') return;
-    const preferredAvatar = AvatarSession.selected[0] || LiveTalkingStudio.avatarId || avatars[0]?.id;
+    const savedActiveAvatar = localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) || LiveTalkingStudio.avatarId;
+    const selectedAvatar = AvatarSession.selected[0];
+    const preferredAvatar = avatars.some(avatar => avatar.id === selectedAvatar)
+      ? selectedAvatar
+      : (avatars.some(avatar => avatar.id === savedActiveAvatar) ? savedActiveAvatar : avatars[0]?.id);
     if (!preferredAvatar) {
-      addLog('No trained LiveTalking avatar is available yet.', 'hi');
+      addLog('No trained avatar is available yet.', 'hi');
       return;
     }
-    await activateLiveTalkingAvatar(preferredAvatar);
-  }).catch(err => addLog(`LiveTalking auto-connect failed: ${err.message}`, 'hi'));
+    AvatarSession.selected = [preferredAvatar];
+    await saveAvatarSession();
+    await reconnectLiveTalkingAvatar(preferredAvatar);
+  }).catch(err => addLog(`Live avatar auto-connect failed: ${err.message}`, 'hi'));
+  if (startupStatus) startupStatus.textContent = 'Live workspace ready';
+  startupOverlay?.classList.add('is-ready');
+  setTimeout(() => startupOverlay?.remove(), 450);
   
   try {
     setVisualState('GAMEPLAY_IDLE', 7, 'boot');
@@ -5897,8 +7900,10 @@ function init() {
     console.warn('setVisualState error:', e);
   }
 
+  connectRuntimeRealtime();
+
   addLog('AI Idol Operator Dashboard started.', 'ok');
-  addLog('Level 3 Talking Video: Realtime Live Video Pipeline Active', 'ok');
+  addLog('Realtime avatar pipeline active.', 'ok');
 
   tick();
   setInterval(tick, 200);

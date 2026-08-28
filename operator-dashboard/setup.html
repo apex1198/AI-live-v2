@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI IDOL STREAMER Setup</title>
+  <link rel="stylesheet" href="setup.css" />
+</head>
+<body>
+  <main class="setup-shell" aria-labelledby="setup-title">
+    <section class="setup-visual" aria-hidden="true">
+      <div class="setup-grid"></div>
+      <div class="setup-signal">
+        <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <div class="setup-frame"><div></div></div>
+    </section>
+    <section class="setup-content">
+      <div class="setup-brand"><span class="setup-brand-mark">AI</span><span>AI IDOL STREAMER</span></div>
+      <p class="setup-kicker" id="setup-kicker">MAGIC SETUP</p>
+      <h1 id="setup-title">Preparing your private studio</h1>
+      <p class="setup-copy" id="setup-message">Creating an isolated workspace for models, engines, and projects.</p>
+      <div class="setup-progress" role="progressbar" aria-label="Setup progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="setup-progress">
+        <span id="setup-progress-fill"></span>
+      </div>
+      <div class="setup-meta"><span id="setup-step">Creating sandbox</span><strong id="setup-percent">0%</strong></div>
+      <ol class="setup-steps" id="setup-steps">
+        <li data-step="sandbox"><span></span>Private sandbox</li>
+        <li data-step="runtime"><span></span>Native runtime</li>
+        <li data-step="python"><span></span>Python environments</li>
+        <li data-step="models"><span></span>AI models</li>
+        <li data-step="warmup"><span></span>Engine warm-up</li>
+      </ol>
+      <div class="setup-error" id="setup-error" hidden>
+        <strong>Setup needs attention</strong>
+        <p id="setup-error-message"></p>
+        <button type="button" id="setup-retry">Retry setup</button>
+      </div>
+      <p class="setup-footnote">Everything stays inside one local app sandbox.</p>
+    </section>
+  </main>
+  <script src="setup.js"></script>
+</body>
+</html>

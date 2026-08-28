@@ -34,9 +34,32 @@
     return payload;
   }
 
+  function connectRealtime(onMessage, onStateChange = () => {}) {
+    const protocol = global.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const token = global.sessionStorage.getItem(TOKEN_KEY) || '';
+    const protocols = ['idol-runtime-v2'];
+    if (token) {
+      const bytes = new TextEncoder().encode(token);
+      let binary = '';
+      bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+      protocols.push(`auth.${btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`);
+    }
+    const socket = new WebSocket(`${protocol}//${global.location.host}/`, protocols);
+    socket.addEventListener('open', () => onStateChange('open'));
+    socket.addEventListener('close', () => onStateChange('closed'));
+    socket.addEventListener('error', () => onStateChange('error'));
+    socket.addEventListener('message', event => {
+      try { onMessage(JSON.parse(event.data)); } catch (error) {
+        console.warn('[Runtime] Invalid realtime payload:', error.message);
+      }
+    });
+    return socket;
+  }
+
   global.RuntimeApi = Object.freeze({
     fetch: authenticatedFetch,
     request,
+    connectRealtime,
     get: (path) => request(path),
     post: (path, body) => request(path, {
       method: 'POST',

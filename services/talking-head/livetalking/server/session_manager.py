@@ -13,6 +13,11 @@ class MaxSessionError(Exception):
     """会话数达到上限时抛出"""
     pass
 
+
+class SessionReplacedError(Exception):
+    """A pending session was replaced before its avatar finished loading."""
+    pass
+
 def _rand_session_id() -> str:
     """生成 UUID session ID"""
     return str(uuid.uuid4())
@@ -33,9 +38,12 @@ class SessionManager:
     def __init__(self):
         if not hasattr(self, "initialized"):
             self.sessions: Dict[str, BaseAvatar] = {}
+            self._session_tokens: Dict[str, object] = {}
             self.build_session_fn = None
             self.max_session = 1   # default, override via set_max_session()
             self.initialized = True
+        elif not hasattr(self, "_session_tokens"):
+            self._session_tokens = {}
 
     def set_max_session(self, n: int):
         """设置最大并发会话数"""
@@ -65,26 +73,40 @@ class SessionManager:
             sessionid = _rand_session_id()
             
         # 检查是否达到最大会话数
-        active_count = sum(1 for s in self.sessions.values() if s is not None)
+        active_count = len(self.sessions)
         if active_count >= self.max_session:
             raise MaxSessionError(
                 f"Maximum session limit reached ({active_count}/{self.max_session})"
             )
 
         logger.info('Creating sessionid=%s, current session num=%d', sessionid, active_count)
-        # 预先占位防止重复
+        # Reserve this ID with a unique token. A replacement offer can remove the
+        # reservation while the expensive avatar build is still in the executor.
+        token = object()
         self.sessions[sessionid] = None
+        self._session_tokens[sessionid] = token
 
         # 在线程池中构建 session（加载模型非常耗时）
-        avatar_session = await asyncio.get_event_loop().run_in_executor(
-            None, self.build_session_fn, sessionid, params
-        )
+        try:
+            avatar_session = await asyncio.get_event_loop().run_in_executor(
+                None, self.build_session_fn, sessionid, params
+            )
+        except Exception:
+            if self._session_tokens.get(sessionid) is token:
+                self.sessions.pop(sessionid, None)
+                self._session_tokens.pop(sessionid, None)
+            raise
+
+        if self._session_tokens.get(sessionid) is not token:
+            logger.info("Discarding replaced pending session %s", sessionid)
+            raise SessionReplacedError(f"Session {sessionid} was replaced while loading")
         self.sessions[sessionid] = avatar_session
         return sessionid
         
     def add_session(self, sessionid: str, avatar_session: BaseAvatar):
         """同步添加静态或外部管理的会话（供非服务端入口调用）"""
         self.sessions[sessionid] = avatar_session
+        self._session_tokens[sessionid] = object()
         
     def remove_session(self, sessionid: str):
         """销毁会话资源"""
@@ -92,6 +114,7 @@ class SessionManager:
             logger.info(f"Removing session {sessionid}")
             # todo: 还可以主动调 avatar_session 释放
             self.sessions.pop(sessionid, None)
+        self._session_tokens.pop(sessionid, None)
 
 # 单例抛出
 session_manager = SessionManager()

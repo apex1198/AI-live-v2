@@ -24,6 +24,7 @@ import numpy as np
 
 import subprocess
 import os
+import json
 import time
 import torch.nn.functional as F
 import cv2
@@ -88,8 +89,17 @@ def load_avatar(avatar_id):
         mask_coords_list_cycle = pickle.load(f)
     input_mask_list = glob.glob(os.path.join(mask_out_path, '*.[jpJP][pnPN]*[gG]'))
     input_mask_list = sorted(input_mask_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    mask_list_cycle = read_imgs(input_mask_list)
-    return frame_list_cycle,mask_list_cycle,coord_list_cycle,mask_coords_list_cycle,input_latent_list_cycle
+    mask_list_cycle = [
+        cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        for mask in read_imgs(input_mask_list)
+    ]
+    source_fps = 25.0
+    try:
+        with open(avatar_info_path, 'r', encoding='utf-8') as info_file:
+            source_fps = max(1.0, float(json.load(info_file).get('source_fps', source_fps)))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return frame_list_cycle,mask_list_cycle,coord_list_cycle,mask_coords_list_cycle,input_latent_list_cycle,source_fps
 
 @torch.no_grad()
 def warm_up(batch_size,model):
@@ -122,12 +132,17 @@ class MuseReal(BaseAvatar):
 
         self.vae, self.unet, self.pe, self.timesteps, self.audio_processor = model
 
-        self.frame_list_cycle,self.mask_list_cycle,self.coord_list_cycle,self.mask_coords_list_cycle, self.input_latent_list_cycle = avatar
+        self.frame_list_cycle,self.mask_list_cycle,self.coord_list_cycle,self.mask_coords_list_cycle, self.input_latent_list_cycle,self.source_fps = avatar
 
         self.asr = WhisperASR(opt,self,self.audio_processor)
         self.asr.warm_up()
+
+    def map_frame_index(self, length, index):
+        source_step = self.source_fps / max(1.0, float(self.opt.fps))
+        return int(round(index * source_step)) % max(1, length)
     
 
+    @torch.no_grad()
     def inference_batch(self, index, audiofeat_batch):
         # 这里的 index 是针对当前 avatar 的索引
         # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
@@ -135,7 +150,7 @@ class MuseReal(BaseAvatar):
         whisper_batch = np.stack(audiofeat_batch)
         latent_batch = []
         for i in range(self.batch_size):
-            idx = mirror_index(length, index + i)
+            idx = self.map_frame_index(length, index + i)
             latent = self.input_latent_list_cycle[idx]
             latent_batch.append(latent)
         latent_batch = torch.cat(latent_batch, dim=0)

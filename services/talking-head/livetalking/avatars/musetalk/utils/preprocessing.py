@@ -91,7 +91,7 @@ def read_imgs(img_list):
 #     return text_range
     
 
-def get_landmark_and_bbox(img_list,upperbondrange =0):
+def get_landmark_and_bbox(img_list, upperbondrange=0, progress_callback=None):
     frames = read_imgs(img_list)
     batch_size_fa = 1
     batches = [frames[i:i + batch_size_fa] for i in range(0, len(frames), batch_size_fa)]
@@ -103,7 +103,7 @@ def get_landmark_and_bbox(img_list,upperbondrange =0):
         print('get key_landmark and face bounding boxes with the default value')
     average_range_minus = []
     average_range_plus = []
-    for fb in tqdm(batches):
+    for batch_index, fb in enumerate(tqdm(batches)):
         # results = inference_topdown(model, np.asarray(fb)[0])
         # results = merge_data_samples(results)
         # keypoints = results.pred_instances.keypoints
@@ -158,6 +158,9 @@ def get_landmark_and_bbox(img_list,upperbondrange =0):
                 print("error bbox:",f)
             else:
                 coords_list += [f_landmark]
+
+        if progress_callback and batches:
+            progress_callback(batch_index + 1, len(batches))
     
     print("********************************************bbox_shift parameter adjustment**********************************************************")
     print(f"Total frame:「{len(frames)}」 Manually adjust range : [ -{int(sum(average_range_minus) / len(average_range_minus))}~{int(sum(average_range_plus) / len(average_range_plus))} ] , the current value: {upperbondrange}")

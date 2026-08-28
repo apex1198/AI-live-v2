@@ -12,11 +12,35 @@ if [[ -f "$repo_dir/.env" ]]; then
 fi
 
 model="${LIVETALKING_MODEL:-musetalk}"
-avatar_id="${LIVETALKING_AVATAR_ID:-musetalk_avatar1}"
+avatar_id="${LIVETALKING_AVATAR_ID:-}"
 port="${LIVETALKING_PORT:-8011}"
-batch_size="${LIVETALKING_BATCH_SIZE:-4}"
 max_session="${LIVETALKING_MAX_SESSION:-1}"
 stun_url="${LIVETALKING_STUN_URL:-stun:stun.l.google.com:19302}"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  batch_size="${LIVETALKING_BATCH_SIZE:-8}"
+  fps="${LIVETALKING_FPS:-25}"
+  output_fps="${LIVETALKING_OUTPUT_FPS:-25}"
+else
+  batch_size="${LIVETALKING_BATCH_SIZE:-12}"
+  fps="${LIVETALKING_FPS:-25}"
+  output_fps="${LIVETALKING_OUTPUT_FPS:-25}"
+fi
+
+avatar_asset="latents.pt"
+if [[ "$model" != "musetalk" ]]; then
+  avatar_asset="coords.pkl"
+fi
+if [[ -z "$avatar_id" || ! -f "data/avatars/$avatar_id/$avatar_asset" ]]; then
+  for candidate in data/avatars/*/"$avatar_asset"; do
+    [[ -f "$candidate" ]] || continue
+    avatar_id="$(basename "$(dirname "$candidate")")"
+    break
+  done
+fi
+if [[ -z "$avatar_id" ]]; then
+  echo "No trained avatar is available for model: $model"
+  exit 1
+fi
 
 if [[ ! -x .venv/bin/python ]]; then
   echo "LiveTalking Python environment is missing. Run: pnpm livetalking:setup"
@@ -47,6 +71,8 @@ for file in "${required[@]}"; do
 done
 
 export PYTORCH_ENABLE_MPS_FALLBACK=1
+export PYTORCH_MPS_FAST_MATH="${PYTORCH_MPS_FAST_MATH:-1}"
+export PYTORCH_MPS_PREFER_METAL="${PYTORCH_MPS_PREFER_METAL:-1}"
 export LIVETALKING_HOST="${LIVETALKING_HOST:-127.0.0.1}"
 export LIVETALKING_ALLOWED_MEDIA_ROOTS="${LIVETALKING_ALLOWED_MEDIA_ROOTS:-$worker_dir/data/tmp,$worker_dir/data/avatars,$repo_dir/local-projects}"
 export LIVETALKING_ALLOWED_AVATAR_ROOTS="${LIVETALKING_ALLOWED_AVATAR_ROOTS:-$worker_dir/data/avatars,$repo_dir/local-projects}"
@@ -55,6 +81,8 @@ exec .venv/bin/python app.py \
   --model "$model" \
   --avatar_id "$avatar_id" \
   --batch_size "$batch_size" \
+  --fps "$fps" \
+  --output_fps "$output_fps" \
   --max_session "$max_session" \
   --stun "$stun_url" \
   --listenport "$port"

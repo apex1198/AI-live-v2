@@ -48,7 +48,13 @@ class BaseASR:
         #self.warm_up()
 
     def flush_talk(self):
-        self.queue.queue.clear()
+        for target in (self.queue, self.output_queue, self.feat_queue):
+            while True:
+                try:
+                    target.get_nowait()
+                except queue.Empty:
+                    break
+        self.frames.clear()
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
         self.queue.put(AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))

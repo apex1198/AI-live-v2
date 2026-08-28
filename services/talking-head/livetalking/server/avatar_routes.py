@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import shutil
+import mimetypes
 from aiohttp import web
 from server.task_manager import task_manager
 from server.security import require_safe_id, secure_filename, resolve_existing_media, resolve_avatar_output, resolve_avatar_entry
@@ -141,6 +142,18 @@ async def list_trained_avatars(request):
         try:
             avatar_id = require_safe_id(entry.name, "avatar_id")
             avatar_dir = os.path.realpath(entry.path)
+            required_files = ('avator_info.json', 'latents.pt', 'coords.pkl', 'mask_coords.pkl')
+            required_dirs = ('full_imgs', 'mask')
+            if not all(os.path.isfile(os.path.join(avatar_dir, name)) for name in required_files):
+                logger.warning(f"Skipping incomplete avatar {avatar_id}: required model files are missing")
+                continue
+            if not all(
+                os.path.isdir(os.path.join(avatar_dir, name))
+                and any(os.scandir(os.path.join(avatar_dir, name)))
+                for name in required_dirs
+            ):
+                logger.warning(f"Skipping incomplete avatar {avatar_id}: generated frame data is missing")
+                continue
             info_path = os.path.join(avatar_dir, 'avator_info.json')
             info = {}
             if os.path.isfile(info_path):
@@ -148,30 +161,74 @@ async def list_trained_avatars(request):
                     parsed = json.load(info_file)
                     if isinstance(parsed, dict):
                         info = parsed
-            model_type = 'musetalk' if os.path.isfile(os.path.join(avatar_dir, 'latents.pt')) else 'wav2lip'
+            thumbnail_path = find_avatar_thumbnail(avatar_dir)
             avatars.append({
                 "id": avatar_id,
                 "avatar_id": avatar_id,
-                "model_type": model_type,
+                "model_type": "musetalk",
                 "status": "ready",
                 "source_name": os.path.basename(str(info.get('video_path') or '')) or avatar_id,
+                "thumbnail_url": f"/api/avatars/{avatar_id}/thumbnail" if thumbnail_path else None,
             })
         except Exception as exc:
             logger.warning(f"Skipping invalid avatar entry {entry.name}: {exc}")
     return json_ok(data={"avatars": avatars})
 
-async def delete_trained_avatar(request):
-    """DELETE /api/avatars/{avatar_id} — remove one inactive trained avatar."""
+
+def find_avatar_thumbnail(avatar_dir):
+    frame_dir = os.path.join(avatar_dir, 'full_imgs')
+    if not os.path.isdir(frame_dir):
+        return None
+    preferred = ('First Frame.png', '00000000.png', '00000000.jpg', '00000000.jpeg')
+    for filename in preferred:
+        candidate = os.path.join(frame_dir, filename)
+        if os.path.isfile(candidate):
+            return candidate
+    for filename in sorted(os.listdir(frame_dir)):
+        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+            candidate = os.path.join(frame_dir, filename)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+async def get_avatar_thumbnail(request):
+    """Serve a trained avatar's first real frame as its library thumbnail."""
     try:
         avatar_id = require_safe_id(request.match_info.get('avatar_id'), "avatar_id")
-        for avatar_session in session_manager.sessions.values():
-            if avatar_session is None:
-                continue
-            if str(getattr(getattr(avatar_session, 'opt', None), 'avatar_id', '')) == avatar_id:
-                return json_error("avatar is in use by an active session", code=409)
+        _entry, target = resolve_avatar_entry(avatar_id)
+        avatar_dir = os.path.realpath(str(target))
+        thumbnail_path = find_avatar_thumbnail(avatar_dir)
+        if not thumbnail_path:
+            return json_error("avatar thumbnail not found", code=404)
+        content_type = mimetypes.guess_type(thumbnail_path)[0] or 'image/png'
+        return web.FileResponse(
+            thumbnail_path,
+            headers={
+                'Content-Type': content_type,
+                'Cache-Control': 'private, max-age=60',
+                'X-Content-Type-Options': 'nosniff',
+            },
+        )
+    except FileNotFoundError as exc:
+        return json_error(str(exc), code=404)
+    except ValueError as exc:
+        return json_error(str(exc), code=400)
+    except Exception as exc:
+        logger.exception("get_avatar_thumbnail error:")
+        return json_error(str(exc))
+
+async def delete_trained_avatar(request):
+    """DELETE /api/avatars/{avatar_id} — release its live session and remove it."""
+    try:
+        avatar_id = require_safe_id(request.match_info.get('avatar_id'), "avatar_id")
         for task in task_manager.list_tasks():
             if task.get('avatar_id') == avatar_id and task.get('status') in ('pending', 'running'):
                 return json_error("avatar training is still active", code=409)
+
+        rtc_manager = request.app.get("rtc_manager")
+        if rtc_manager is not None:
+            await rtc_manager.close_sessions_for_avatar(avatar_id)
 
         entry, target = resolve_avatar_entry(avatar_id)
         if entry.is_symlink():
@@ -186,7 +243,9 @@ async def delete_trained_avatar(request):
             entry.unlink()
         return json_ok(data={"avatar_id": avatar_id, "deleted": True})
     except FileNotFoundError as exc:
-        return json_error(str(exc), code=404)
+        # DELETE is intentionally idempotent. The runtime also owns a local
+        # manifest/project copy, so a missing worker entry is successful.
+        return json_ok(data={"avatar_id": avatar_id, "deleted": True, "worker_artifact_found": False})
     except ValueError as exc:
         return json_error(str(exc), code=400)
     except Exception as exc:
@@ -212,4 +271,5 @@ def setup_avatar_routes(app):
     app.router.add_delete("/api/avatar/task/{task_id}", delete_avatar_task)
     app.router.add_get("/api/avatar/tasks", list_avatar_tasks)
     app.router.add_get("/api/avatars", list_trained_avatars)
+    app.router.add_get("/api/avatars/{avatar_id}/thumbnail", get_avatar_thumbnail)
     app.router.add_delete("/api/avatars/{avatar_id}", delete_trained_avatar)

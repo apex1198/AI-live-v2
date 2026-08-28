@@ -135,6 +135,7 @@ export type ChatClassification = z.infer<typeof ChatClassification>;
 export const ChatMessage = z.object({
   type: z.literal('chat.message'),
   platform: ChatPlatform,
+  liveSessionId: z.string().trim().min(1).max(160).optional(),
   viewerId: z.string(),
   viewerName: z.string(),
   avatarUrl: z.string().optional(),
@@ -188,6 +189,7 @@ export const DirectorIntent = z.object({
   emotion: Emotion.optional(),
   visualState: VisualState.optional(),
   speechText: z.string().optional(),        // pre-generated or hint
+  dialogueProvider: z.string().trim().min(1).max(120).optional(),
   maxSpeechSeconds: z.number().optional(),
   priority: Priority,
   goalId: z.string().optional(),

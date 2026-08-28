@@ -792,7 +792,7 @@ ul, ol { list-style: none; }
   backface-visibility: hidden;
   transform: translate3d(0, 0, 0);
   will-change: opacity;
-  transition: opacity 0.18s ease-out;
+  transition: none;
 }
 .monitor-video.active-layer {
   z-index: 2;
@@ -879,6 +879,29 @@ ul, ol { list-style: none; }
   z-index: 5;
 }
 .monitor-w2l-canvas.is-visible { opacity: 1; }
+
+.live-avatar-preview {
+  background: #0c1017;
+}
+
+.live-avatar-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.live-avatar-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--t3);
+  font-size: 28px;
+}
+
+.live-avatar-card.active .live-avatar-preview {
+  box-shadow: inset 0 0 0 2px var(--green);
+}
 
 .mon-w2l-badge {
   position: absolute;
@@ -1459,6 +1482,10 @@ ul, ol { list-style: none; }
   display: flex; justify-content: flex-end; gap: 6px; padding: 10px 14px;
   border-top: 1px solid var(--border); background: var(--bg-subtle);
 }
+.app-confirm-card { width: min(420px, calc(100vw - 32px)); }
+.app-confirm-body { color: var(--t2); line-height: 1.55; }
+.app-confirm-danger { background: #ef4444; color: #fff; border-color: #ef4444; }
+.app-confirm-danger:hover { background: #dc2626; border-color: #dc2626; }
 .btn-primary { background: var(--accent); color: #fff; border: none; padding: 4px 12px; border-radius: var(--r-xs); font-size:11px; font-weight: 600; }
 .btn-secondary { background: var(--bg-el2); color: var(--t2); border: 1px solid var(--border-s); padding: 4px 10px; border-radius: var(--r-xs); font-size:11px; }
 

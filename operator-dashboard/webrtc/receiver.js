@@ -4,12 +4,32 @@
   global.createLiveTalkingWebRTCClient = function createLiveTalkingWebRTCClient(options) {
     const getApp = options.getApp;
     const getStudio = options.getStudio;
-    return {
+    const client = {
       pc: null,
       sessionId: null,
       videoEl: null,
       audioEl: null,
       endpoint: null,
+      operation: Promise.resolve(),
+      connectionStartedAt: 0,
+
+      isConnected() {
+        if (!this.sessionId || !this.pc) return false;
+        return this.pc.connectionState === 'connected'
+          || ['connected', 'completed'].includes(this.pc.iceConnectionState);
+      },
+
+      isViable() {
+        if (!this.sessionId || !this.pc) return false;
+        return !['failed', 'closed'].includes(this.pc.connectionState)
+          && !['failed', 'closed'].includes(this.pc.iceConnectionState);
+      },
+
+      needsServerProbe() {
+        if (!this.sessionId || !this.pc) return false;
+        return this.pc.connectionState === 'disconnected'
+          || this.pc.iceConnectionState === 'disconnected';
+      },
 
       async ensureAudioPlayback() {
         const audio = this.audioEl;
@@ -27,8 +47,22 @@
         }
       },
 
-      async connect(endpoint, avatarId = 'avatar_main') {
-        this.disconnect();
+      connect(endpoint, avatarId = 'avatar_main') {
+        const operation = this.operation.then(async () => {
+          try {
+            return await this._connect(endpoint, avatarId);
+          } catch (error) {
+            await this._disconnect();
+            throw error;
+          }
+        });
+        this.operation = operation.catch(() => {});
+        return operation;
+      },
+
+      async _connect(endpoint, avatarId) {
+        await this._disconnect();
+        this.connectionStartedAt = Date.now();
         this.endpoint = String(endpoint || 'http://localhost:8011').replace(/\/$/, '');
         if (global.location.protocol === 'file:') throw new Error('Open the dashboard through the runtime server');
         const health = await global.LiveTalkingApi.health();
@@ -86,14 +120,41 @@
         const answer = await global.LiveTalkingApi.offer(pc.localDescription.sdp, 'offer', avatarId);
         if (!answer.sdp) throw new Error(answer.error || 'Worker returned no WebRTC SDP');
         this.sessionId = answer.sessionid || null;
-        await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+        let remoteDescriptionTimer;
+        try {
+          await Promise.race([
+            pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp }),
+            new Promise((_, reject) => {
+              remoteDescriptionTimer = setTimeout(
+                () => reject(new Error('LiveTalking WebRTC answer timed out')),
+                10_000,
+              );
+            }),
+          ]);
+        } finally {
+          clearTimeout(remoteDescriptionTimer);
+        }
         return { sessionId: this.sessionId, health: health.health };
       },
 
       disconnect() {
+        const operation = this.operation.then(() => this._disconnect());
+        this.operation = operation.catch(() => {});
+        return operation;
+      },
+
+      async _disconnect() {
+        const sessionId = this.sessionId;
+        this.sessionId = null;
+        if (sessionId) {
+          try {
+            await global.LiveTalkingApi.closeSession(sessionId);
+          } catch (error) {
+            console.warn('[LiveTalking] Could not release worker session:', error.message);
+          }
+        }
         if (this.pc) this.pc.close();
         this.pc = null;
-        this.sessionId = null;
         if (this.videoEl) this.videoEl.srcObject = null;
         if (this.audioEl) {
           this.audioEl.pause();
@@ -102,7 +163,10 @@
         }
         this.videoEl = null;
         this.audioEl = null;
+        this.connectionStartedAt = 0;
       },
     };
+    global.addEventListener('pagehide', () => client.disconnect());
+    return client;
   };
 })(window);

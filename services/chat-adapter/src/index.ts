@@ -144,9 +144,14 @@ export interface IChatPlatformAdapter {
 
 export class MockChatGenerator implements IChatPlatformAdapter {
   readonly platform: ChatPlatform = 'mock';
+  readonly liveSessionId: string;
   private _interval: ReturnType<typeof setInterval> | null = null;
   private _listeners: Array<(msg: ChatMessage) => void> = [];
   private _giftListeners: Array<(gift: GiftEvent) => void> = [];
+
+  constructor(liveSessionId = `mock_live_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`) {
+    this.liveSessionId = liveSessionId;
+  }
 
   private readonly _sampleViewers = [
     { name: 'Hoàng Anh', tier: 'vip' as ViewerTier, sub: true },
@@ -198,6 +203,7 @@ export class MockChatGenerator implements IChatPlatformAdapter {
     const msg: ChatMessage = {
       type: 'chat.message',
       platform: 'youtube',
+      liveSessionId: this.liveSessionId,
       viewerId: `mock_${viewer.name.toLowerCase().replace(/\s+/g, '_')}`,
       viewerName: viewer.name,
       message: text,
@@ -293,6 +299,7 @@ export class ChatManager {
     const processed: ChatMessage = {
       type: 'chat.message',
       platform: rawMsg.platform || 'youtube',
+      liveSessionId: rawMsg.liveSessionId,
       viewerId: rawMsg.viewerId || `user_${Date.now()}`,
       viewerName: rawMsg.viewerName,
       avatarUrl: rawMsg.avatarUrl,

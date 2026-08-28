@@ -9,16 +9,22 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env services/runtime-server/dist/index.js",
-    "test": "npx tsc test_audit.ts --module NodeNext --moduleResolution NodeNext --target ES2022 --lib ES2022,DOM --skipLibCheck && node test_audit.js",
+    "desktop:dev": "pnpm --filter @idol/talking-head build && pnpm --filter @idol/runtime-server build && pnpm desktop:prepare && tauri dev",
+    "desktop:prepare": "node scripts/prepare-desktop-runtime.mjs",
+    "desktop:build": "pnpm --filter @idol/talking-head build && pnpm --filter @idol/runtime-server build && pnpm desktop:prepare && tauri build",
+    "test": "pnpm --filter @idol/dialogue-agent build && pnpm --filter @idol/talking-head build && pnpm --filter @idol/runtime-server build && npx tsc test_audit.ts --module NodeNext --moduleResolution NodeNext --target ES2022 --lib ES2022,DOM --skipLibCheck && node test_audit.js",
     "build": "pnpm -r build",
     "dev": "pnpm -r --parallel dev",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "clean": "pnpm -r clean",
     "livetalking:setup": "bash services/talking-head/livetalking/setup_macos.sh",
-    "livetalking:start": "bash services/talking-head/livetalking/run_worker.sh"
+    "livetalking:start": "bash services/talking-head/livetalking/run_worker.sh",
+    "qwen-tts:setup": "bash services/qwen-tts/setup_macos.sh",
+    "qwen-tts:start": "bash services/qwen-tts/run_worker.sh"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^22.20.1",
     "typescript": "^5.5.4"
   }

@@ -58,19 +58,25 @@ class WhisperASR(BaseASR):
     def run_step(self):
         ############################################## extract audio feature ##############################################
         start_time = time.time()
+        is_all_silence = True
         for _ in range(self.batch_size*2):
             audio_frame = self.get_audio_frame()
+            if audio_frame.type == 0:
+                is_all_silence = False
             self.frames.append(audio_frame.data)
             self.output_queue.put(audio_frame)
         
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
             return
         
-        inputs = np.concatenate(self.frames) # [N * chunk]
-        whisper_feature = self.audio_processor.audio2feat(inputs)
-        whisper_chunks = self._feature2chunks(feature_array=whisper_feature,batch_size=self.batch_size,
-                                              audio_feat_win = [0,5],start=self.stride_left_size/2,
-                                              feature_idx_multiplier=2)
+        if is_all_silence:
+            whisper_chunks = [np.zeros((50, 384), dtype=np.float32) for _ in range(self.batch_size)]
+        else:
+            inputs = np.concatenate(self.frames) # [N * chunk]
+            whisper_feature = self.audio_processor.audio2feat(inputs)
+            whisper_chunks = self._feature2chunks(feature_array=whisper_feature,batch_size=self.batch_size,
+                                                  audio_feat_win = [2,3],start=self.stride_left_size/2,
+                                                  feature_idx_multiplier=50.0/self.fps)
         self.feat_queue.put(whisper_chunks)
         # discard the old part to save memory
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]

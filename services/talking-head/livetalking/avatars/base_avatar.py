@@ -72,10 +72,16 @@ class BaseAvatar:
         self.pipeline_state_sequence = 0
         self.pipeline_state_updated_at = time.time()
         self.pipeline_state_details = {}
+        self.current_frame_index = 0
         self.recording = False
         self._record_video_pipe = None
         self._record_audio_pipe = None
         self.width = self.height = 0
+        self.inference_fps = 0.0
+        self.output_fps = 0.0
+        self.dropped_video_frames = 0
+        self.repeated_video_frames = 0
+        self._flush_epoch = 0
 
         self.custom_audiotype = 0 # 0: normal, 1: sinlence, >1: custom audio
         self.custom_img_cycle = {}
@@ -137,41 +143,44 @@ class BaseAvatar:
         if hasattr(self, 'asr'):
             self.asr.put_audio_frame(audio_chunk, datainfo)
 
-    def put_audio_file(self, filebyte, datainfo:dict={}): 
+    def put_audio_file(self, filebyte, datainfo=None):
         self.set_pipeline_state("GENERATING", {"source": "audio_upload"})
-        input_stream = BytesIO(filebyte)
-        stream = self.__create_bytes_stream(input_stream)
-        streamlen = stream.shape[0]
-        idx = 0
-        first = True
-        while streamlen >= self.chunk:
-            eventpoint = {}
-            if first:
-                eventpoint = {'status': 'start'}
-                first = False
-            if streamlen - self.chunk < self.chunk:
-                eventpoint = {'status': 'end'}
-            eventpoint.update(**datainfo) 
-            self.put_audio_frame(stream[idx:idx+self.chunk], eventpoint)
-            streamlen -= self.chunk
-            idx += self.chunk
+        try:
+            input_stream = BytesIO(filebyte)
+            stream = self.__create_bytes_stream(input_stream)
+            self.__queue_audio_stream(stream, datainfo or {})
+        except Exception as exc:
+            self.set_pipeline_state("ERROR", {"error": str(exc)[:500]})
+            raise
 
-    def put_audio_filepath(self, filepath, datainfo:dict={}): 
-        stream = self.__create_bytes_stream(filepath)
-        streamlen = stream.shape[0]
-        idx = 0
-        first = True
-        while streamlen >= self.chunk:
-            eventpoint = {}
-            if first:
-                eventpoint = {'status': 'start'}
-                first = False
-            if streamlen - self.chunk < self.chunk:
-                eventpoint = {'status': 'end'}
-            eventpoint.update(**datainfo) 
-            self.put_audio_frame(stream[idx:idx+self.chunk], eventpoint)
-            streamlen -= self.chunk
-            idx += self.chunk
+    def put_audio_filepath(self, filepath, datainfo=None):
+        self.set_pipeline_state("GENERATING", {"source": "audio_file"})
+        try:
+            stream = self.__create_bytes_stream(filepath)
+            self.__queue_audio_stream(stream, datainfo or {})
+        except Exception as exc:
+            self.set_pipeline_state("ERROR", {"error": str(exc)[:500]})
+            raise
+
+    def __queue_audio_stream(self, stream, datainfo):
+        """Queue all PCM samples without dropping the final partial 20 ms chunk."""
+        if stream.shape[0] == 0:
+            raise ValueError("audio contains no samples")
+
+        chunk_count = int(np.ceil(stream.shape[0] / self.chunk))
+        for chunk_index in range(chunk_count):
+            start = chunk_index * self.chunk
+            chunk = stream[start:start + self.chunk]
+            if chunk.shape[0] < self.chunk:
+                chunk = np.pad(chunk, (0, self.chunk - chunk.shape[0]))
+            eventpoint = dict(datainfo)
+            if chunk_index == 0:
+                eventpoint['status'] = 'start'
+            self.put_audio_frame(chunk.astype(np.float32, copy=False), eventpoint)
+
+        end_event = dict(datainfo)
+        end_event['status'] = 'end'
+        self.put_audio_frame(np.zeros(self.chunk, np.float32), end_event)
     
     def __create_bytes_stream(self, byte_stream):
         stream, sample_rate = sf.read(byte_stream) # [T*sample_rate,] float64
@@ -189,10 +198,19 @@ class BaseAvatar:
         return stream
 
     def flush_talk(self):
+        self._flush_epoch += 1
         if hasattr(self, 'tts') and hasattr(self.tts, 'flush_talk'):
             self.tts.flush_talk()
         if hasattr(self, 'asr') and hasattr(self.asr, 'flush_talk'):
             self.asr.flush_talk()
+        while True:
+            try:
+                self.res_frame_queue.get_nowait()
+            except queue.Empty:
+                break
+        if hasattr(self, 'output') and hasattr(self.output, 'clear_buffers'):
+            self.output.clear_buffers()
+        self.speaking = False
         self.custom_audiotype = 0  
         self.set_pipeline_state("IDLE", {"reason": "interrupted"})
 
@@ -224,13 +242,26 @@ class BaseAvatar:
         }))
 
     def get_pipeline_status(self):
+        frame_count = max(1, int(self.get_avatar_length()))
+        source_fps = max(1.0, float(getattr(self, 'source_fps', self.opt.fps)))
+        buffer_size = self.output.get_buffer_size() if hasattr(self, 'output') and hasattr(self.output, 'get_buffer_size') else 0
+        buffered_source_frames = int(round(max(0, buffer_size) * source_fps / max(1.0, float(self.opt.fps))))
+        display_frame_index = (int(self.current_frame_index) - buffered_source_frames) % frame_count
+        details = dict(self.pipeline_state_details)
+        details['playback'] = {
+            'frame_index': int(self.current_frame_index),
+            'display_frame_index': display_frame_index,
+            'frame_count': frame_count,
+            'source_fps': source_fps,
+            'buffer_size': int(max(0, buffer_size)),
+        }
         return {
             "sessionid": self.sessionid,
             "state": self.pipeline_state,
             "speaking": bool(self.speaking),
             "sequence": self.pipeline_state_sequence,
             "updated_at": self.pipeline_state_updated_at,
-            "details": self.pipeline_state_details,
+            "details": details,
         }
     
     def __loadcustom(self):
@@ -281,7 +312,7 @@ class BaseAvatar:
                     '-vcodec','rawvideo',
                     '-pix_fmt', 'bgr24',
                     '-s', "{}x{}".format(self.width, self.height),
-                    '-r', str(25),
+                    '-r', str(self.opt.fps),
                     '-i', '-',
                     '-pix_fmt', 'yuv420p', 
                     '-vcodec', "h264",
@@ -366,6 +397,9 @@ class BaseAvatar:
         if hasattr(self, 'frame_list_cycle'):
             return len(self.frame_list_cycle)
         return 1
+
+    def map_frame_index(self, length, index):
+        return mirror_index(length, index)
         
     def inference(self, quit_event):
         length = self.get_avatar_length()
@@ -381,6 +415,7 @@ class BaseAvatar:
         while not quit_event.is_set():
             starttime = time.perf_counter()
             audiofeat_batch = []
+            batch_epoch = self._flush_epoch
             try:
                 audiofeat_batch = self.asr.feat_queue.get(block=True, timeout=1)
             except queue.Empty:
@@ -399,8 +434,8 @@ class BaseAvatar:
 
             if is_all_silence: #全为静音数据，只需要取fullimg，不需要推理
                 for i in range(self.batch_size):
-                    idx = mirror_index(length, index)
-                    self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx))
+                    idx = self.map_frame_index(length, index)
+                    self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx, batch_epoch))
                     index = index + 1
             else:
                 if current_speaking and not last_speaking and self.custom_index.get(1) is not None: #从静音到说话切换,并且有自定义静态视频
@@ -409,14 +444,20 @@ class BaseAvatar:
 
                 pred = self.inference_batch(index, audiofeat_batch)
 
-                counttime += (time.perf_counter() - t)
+                batch_time = time.perf_counter() - t
+                counttime += batch_time
                 count += self.batch_size
+                if batch_time > 0:
+                    batch_fps = self.batch_size / batch_time
+                    self.inference_fps = batch_fps if self.inference_fps <= 0 else (
+                        self.inference_fps * 0.8 + batch_fps * 0.2
+                    )
                 if count >= 100:
-                    logger.info(f"------actual avg infer fps:{count/counttime:.4f}")
+                    logger.info(f"------actual avg infer fps:{self.inference_fps:.4f}")
                     count = 0
                     counttime = 0
                 for i, res_frame in enumerate(pred):
-                    self.res_frame_queue.put((res_frame, audio_frames[i*2:i*2+2], mirror_index(length, index)))
+                    self.res_frame_queue.put((res_frame, audio_frames[i*2:i*2+2], self.map_frame_index(length, index), batch_epoch))
                     index = index + 1
                     
             if current_speaking != last_speaking:
@@ -439,16 +480,27 @@ class BaseAvatar:
         while not quit_event.is_set():
             try:
                 audio_frames: list[AudioFrameData]
-                res_frame,audio_frames,idx = self.res_frame_queue.get(block=True, timeout=1)
+                item = self.res_frame_queue.get(block=True, timeout=1)
             except queue.Empty:
                 continue
+            if len(item) == 4:
+                res_frame, audio_frames, idx, batch_epoch = item
+                if batch_epoch != self._flush_epoch:
+                    continue
+            else:
+                res_frame, audio_frames, idx = item
             
             # 检测状态变化
             current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
             if current_speaking != _last_speaking:
                 logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
                 _transition_start = time.time()
+                self.set_pipeline_state(
+                    "SPEAKING" if current_speaking else "IDLE",
+                    {"reason": "audio_frames_active" if current_speaking else "audio_frames_drained"},
+                )
             _last_speaking = current_speaking
+            self.current_frame_index = int(idx)
 
             if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
                 self.speaking = False
@@ -528,6 +580,7 @@ class BaseAvatar:
         totaltime=0
         _starttime=time.perf_counter()
         _totalframe=0
+        frame_interval = 1.0 / max(1, self.opt.fps)
         while not quit_event.is_set(): 
             t = time.perf_counter()
             self.asr.run_step()
@@ -535,7 +588,7 @@ class BaseAvatar:
             buffer_size = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0
             if buffer_size >= 5:
                 logger.debug('sleep qsize=%d', buffer_size)
-                time.sleep(0.04 * buffer_size * 0.8)
+                time.sleep(frame_interval * buffer_size * 0.8)
         logger.info('baseavatar render thread stop')
 
         infer_quit_event.set()

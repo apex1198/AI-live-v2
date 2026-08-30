@@ -52,7 +52,7 @@
         speechStartedAt: 0,
       },
       voice: {
-        provider: ['qwentts', 'elevenlabs', 'omnivoice'].includes(storage.getItem(storageKeys.VOICE_PROVIDER))
+        provider: ['qwentts', 'omnivoice'].includes(storage.getItem(storageKeys.VOICE_PROVIDER))
           ? storage.getItem(storageKeys.VOICE_PROVIDER)
           : 'qwentts',
         language: (() => {
@@ -60,7 +60,7 @@
           return !storedLanguage || storedLanguage === 'auto' ? 'vi' : storedLanguage;
         })(),
         providerConfigured: false,
-        elevenLabsVoiceId: storage.getItem(storageKeys.ELEVENLABS_VOICE) || 'qwen-default',
+        voiceId: storage.getItem(storageKeys.VOICE_ID) || 'qwen-default',
         customVoices: JSON.parse(storage.getItem(storageKeys.CUSTOM_VOICES) || '[]'),
         speed: parseFloat(storage.getItem(storageKeys.VOICE_SPEED) || '1.05'),
         personaName: storage.getItem(storageKeys.PERSONA_NAME) || 'Mimi',

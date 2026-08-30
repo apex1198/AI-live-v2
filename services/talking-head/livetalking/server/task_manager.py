@@ -39,9 +39,9 @@ class TaskManager:
     def __init__(self, max_workers=None):
         if max_workers is None:
             try:
-                max_workers = int(os.getenv("LIVETALKING_TRAIN_WORKERS", "2"))
+                max_workers = int(os.getenv("LIVETALKING_TRAIN_WORKERS", "1"))
             except ValueError:
-                max_workers = 2
+                max_workers = 1
         self.max_workers = max(1, min(4, max_workers))
         self.executor = ThreadPoolExecutor(
             max_workers=self.max_workers,
@@ -146,6 +146,11 @@ class TaskManager:
             logger.error(f"Task {task_id} failed: {e}")
         finally:
             task.end_time = time.time()
+            try:
+                from avatars.musetalk.model_resources import release_accelerator_cache
+                release_accelerator_cache()
+            except Exception:
+                pass
 
     def _notify(self, task):
         if not task.notify_url:

@@ -21,7 +21,7 @@ class BaseTTS:
 
         #self.fps = opt.fps # 20 ms per frame
         self.sample_rate = 16000
-        self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
+        self.chunk = self.sample_rate // 50  # fixed 20 ms audio packets
         self.input_stream = BytesIO()
 
         self.msgqueue = Queue()

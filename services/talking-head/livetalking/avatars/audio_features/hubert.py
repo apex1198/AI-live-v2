@@ -25,7 +25,8 @@ class HubertASR(BaseASR):
         start_time = time.time()
         
         is_all_silence=True
-        for _ in range(self.batch_size * 2):
+        # Keep the ASR output count aligned with BaseAvatar.inference().
+        for _ in range(self.batch_size * self.audio_frames_per_video):
             audio_frame = self.get_audio_frame()
             if audio_frame.type==0:
                 is_all_silence=False  

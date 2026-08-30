@@ -64,6 +64,32 @@ model = None
 global_avatars = {} # avatar_id: payload
         
 
+def release_accelerator_cache():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
+        try:
+            torch.mps.empty_cache()
+        except RuntimeError:
+            pass
+
+
+def evict_avatar_cache(keep_avatar_id=None, remove_avatar_id=None):
+    for cached_id in list(global_avatars):
+        should_remove = cached_id == remove_avatar_id or (keep_avatar_id and cached_id != keep_avatar_id)
+        if should_remove:
+            global_avatars.pop(cached_id, None)
+    release_accelerator_cache()
+
+
+def get_or_load_avatar(avatar_id):
+    if avatar_id not in global_avatars:
+        evict_avatar_cache(keep_avatar_id=avatar_id)
+        global_avatars[avatar_id] = load_avatar(avatar_id)
+    return global_avatars[avatar_id]
+
+
 #####webrtc###############################
 # rtc_manager replaces the old pcs set and duplicate offer handlers.
 rtc_manager = None
@@ -80,6 +106,7 @@ def build_avatar_session(sessionid:str, params:dict)->BaseAvatar:
 
     avatar_id = params.get('avatar',opt.avatar_id) 
     opt_this.avatar_id = avatar_id
+    evict_avatar_cache(keep_avatar_id=avatar_id)
     ref_audio = params.get('refaudio','') #音色
     ref_text = params.get('reftext','')
     if (avatar_id and avatar_id != opt.avatar_id):
@@ -180,6 +207,8 @@ def main():
     appasync["llm_response"] = llm_response
     appasync["opt"] = opt
     appasync["rtc_manager"] = rtc_manager
+    appasync["evict_avatar_cache"] = evict_avatar_cache
+    appasync["get_or_load_avatar"] = get_or_load_avatar
 
     appasync.on_shutdown.append(on_shutdown)
     appasync.router.add_post("/offer", offer)

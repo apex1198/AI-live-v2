@@ -195,10 +195,12 @@ export interface OpenAILLMConfig {
   apiKey: string;
   model?: string;
   temperature?: number;
+  baseUrl?: string;
+  providerName?: string;
 }
 
 export class OpenAIDialogueProvider implements DialogueProvider {
-  readonly name = 'openai-gpt';
+  readonly name: string;
   private readonly _config: OpenAILLMConfig;
 
   constructor(config: OpenAILLMConfig) {
@@ -207,6 +209,7 @@ export class OpenAIDialogueProvider implements DialogueProvider {
       temperature: 0.7,
       ...config,
     };
+    this.name = config.providerName || 'openai-gpt';
   }
 
   async generate(intent: DirectorIntent, persona: CharacterPersona): Promise<string> {
@@ -215,7 +218,8 @@ export class OpenAIDialogueProvider implements DialogueProvider {
     }
 
     try {
-      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      const baseUrl = (this._config.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
+      const res = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this._config.apiKey}`,
@@ -262,7 +266,7 @@ export class OllamaDialogueProvider implements DialogueProvider {
   constructor(config: OllamaLLMConfig = {}) {
     this._config = {
       endpoint: config.endpoint || 'http://127.0.0.1:11434',
-      model: config.model || 'qwen3.5:35b-64k',
+      model: config.model || 'qwen3:8b',
       timeoutMs: config.timeoutMs || 60_000,
     };
   }

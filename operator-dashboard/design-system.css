@@ -1358,6 +1358,66 @@ input[type="checkbox"], input[type="radio"] {
   background: rgba(164, 255, 74, .08) !important;
 }
 
+/* Native preferences layout: compact section list with one stable content pane. */
+#view-settings .settings-preferences-layout {
+  display: grid;
+  grid-template-columns: minmax(168px, 22%) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  padding: 10px;
+}
+#view-settings .settings-section-tabs {
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+  gap: 3px;
+  padding: 4px;
+  border-right: 1px solid var(--ui-line, rgba(255,255,255,.1));
+}
+#view-settings .settings-section-tab {
+  display: grid !important;
+  grid-template-columns: 20px minmax(0, 1fr);
+  justify-content: start !important;
+  width: 100%;
+  height: 36px !important;
+  min-height: 36px !important;
+  padding: 0 10px !important;
+  color: var(--t2);
+  border: 0;
+  border-radius: 4px !important;
+  background: transparent;
+  text-align: left;
+}
+#view-settings .settings-section-tab:hover { color: var(--t1); background: rgba(255,255,255,.055); }
+#view-settings .settings-section-tab.active {
+  color: #f4f4f4;
+  background: #3a3b3b;
+  box-shadow: inset 2px 0 var(--ui-selected, #a4ff4a);
+}
+#view-settings .settings-section-tab:focus-visible { outline: 2px solid var(--ui-selected, #a4ff4a); outline-offset: -2px; }
+#view-settings .settings-section-tab .material-symbols-rounded { font-size: 18px !important; }
+#view-settings .settings-pane-stack { display: block; min-width: 0; }
+#view-settings .settings-pane-stack > .settings-bento-card {
+  width: 100%;
+  min-height: 420px;
+  margin: 0;
+  padding: 10px;
+}
+#view-settings .settings-pane-stack > .settings-bento-card[hidden] { display: none !important; }
+#view-settings .ai-director-provider-field,
+#view-settings .ai-director-provider-panel,
+#view-settings .ai-director-cloud-fields { display: grid; gap: 10px; }
+#view-settings .ai-director-cloud-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#view-settings .ai-director-provider-panel { margin-top: 10px; }
+#view-settings .ai-director-inline-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+@media (max-width: 760px) {
+  #view-settings .settings-preferences-layout { grid-template-columns: 1fr; }
+  #view-settings .settings-section-tabs { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--ui-line, rgba(255,255,255,.1)); }
+  #view-settings .settings-section-tab { flex: 0 0 auto; width: auto; }
+  #view-settings .ai-director-cloud-fields { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 1360px) {
   #view-studio .fcp-right-inspector .voice-quick-form > .form-row {
     display: grid;
@@ -3274,4 +3334,59 @@ html.native-ui-scale body .web-nav-item .material-symbols-rounded {
 html.native-ui-scale body .web-side-footer {
   gap: 12.5px;
   padding: 12.5px;
+}
+
+/* Library is a read-first preview surface. Each card occupies half of the
+   preview area, so playback state and metadata remain readable. */
+#view-studio .svg-reference-layout .library-panel .clip-list {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+#view-studio .svg-reference-layout .library-panel .clip-card,
+#view-studio .svg-reference-layout .library-panel .clip-card[data-state] {
+  min-width: 0;
+  cursor: pointer;
+}
+#view-studio .svg-reference-layout .library-panel .clip-thumb {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+#view-studio .svg-reference-layout .library-panel .clip-thumb-media {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+#view-studio .svg-reference-layout .library-panel .clip-meta {
+  min-width: 0;
+  padding-top: 4px;
+}
+#view-studio .svg-reference-layout .library-panel .clip-n,
+#view-studio .svg-reference-layout .library-panel .clip-d {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#view-studio .svg-reference-layout .library-panel .clip-actions {
+  pointer-events: none;
+}
+#view-studio .svg-reference-layout .library-panel .btn-clip-mode,
+#view-studio .svg-reference-layout .library-panel .btn-delete-clip {
+  display: none !important;
+}
+#view-studio .svg-reference-layout .library-panel .clip-card.playing .clip-thumb {
+  outline: 2px solid var(--ui-selected);
+  outline-offset: -2px;
+}
+
+@media (max-width: 1180px) {
+  #view-studio .svg-reference-layout .library-panel .clip-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  #view-studio .svg-reference-layout .library-panel .clip-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  #view-studio .svg-reference-layout .library-panel .clip-list { grid-template-columns: 1fr; }
 }

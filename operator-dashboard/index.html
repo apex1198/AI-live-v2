@@ -24,7 +24,7 @@
   <header class="topbar" data-tauri-drag-region>
     <div class="tb-left">
       <span class="tb-brand">AI IDOL STREAMER <em>Live Control</em></span>
-      <div class="live-pill"><span class="live-dot"></span>LIVE</div>
+      <div class="live-pill"><span class="live-dot"></span>OBS</div>
       <span class="stream-clock" id="stream-clock">00:00:00</span>
     </div>
 
@@ -45,9 +45,9 @@
         <span class="sys-dot ok" id="sys-talking-dot"></span>
         <span class="sys-k" id="sys-talking-engine">Avatar: Ready</span>
       </div>
-      <div class="sys-item" title="TikTok / Live Chat Source">
+      <div class="sys-item" title="Chat input">
         <span class="sys-dot ok"></span>
-        <span class="sys-k">Chat: Live</span>
+        <span class="sys-k">Chat: Ready</span>
       </div>
       <div class="sys-latency">
         <span class="lat-tag" id="sys-latency-tag">A/V &lt;35ms</span>
@@ -77,7 +77,7 @@
       <button type="button" class="btn-icon-hdr" id="close-quick-settings" aria-label="Close quick settings"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
     </div>
     <div class="session-quick-list">
-      <label><span><strong>Voice</strong><small>Voice used for live replies</small></span><select id="quick-session-voice"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="omnivoice">Omni Voice</option><option value="elevenlabs">ElevenLabs</option></select></label>
+      <label><span><strong>Voice provider</strong><small>Engine used for live replies</small></span><select id="quick-session-voice"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="omnivoice">Omni Voice · Local</option></select></label>
       <label><span><strong>Voice speed</strong><small id="quick-session-voice-speed-value">1.05x</small></span><input type="range" id="quick-session-voice-speed" min="0.7" max="1.5" step="0.05" value="1.05" /></label>
       <label><span><strong>Auto Mix</strong><small>Switch clips automatically</small></span><input type="checkbox" id="quick-session-auto-mix" checked /></label>
       <label><span><strong>Random clips</strong><small>Randomize clips in each state</small></span><input type="checkbox" id="quick-session-random" checked /></label>
@@ -107,6 +107,9 @@
     <nav class="web-side-menu">
       <button type="button" class="web-nav-item" data-app-view="avatar">
         <span class="material-symbols-rounded" aria-hidden="true">person</span><span>AI Profile</span>
+      </button>
+      <button type="button" class="web-nav-item" data-app-view="director">
+        <span class="material-symbols-rounded" aria-hidden="true">psychology</span><span>AI Director</span>
       </button>
       <button type="button" class="web-nav-item active" data-app-view="studio">
         <span class="material-symbols-rounded" aria-hidden="true">space_dashboard</span><span>Live</span>
@@ -155,7 +158,7 @@
     </div>
     <div class="workspace-actions">
       <button class="workspace-secondary" id="btn-open-library-hero"><span class="material-symbols-rounded" aria-hidden="true">video_library</span>Library</button>
-      <button class="workspace-primary" id="btn-go-live-hero"><span class="material-symbols-rounded" aria-hidden="true">podcasts</span>Go live</button>
+      <button class="workspace-primary" id="btn-go-live-hero"><span class="material-symbols-rounded" aria-hidden="true">cable</span>OBS output</button>
     </div>
   </section>
 
@@ -381,7 +384,7 @@
                 <span class="vstatus-pulse-dot" id="vstatus-dot"></span>
                 <span class="vstatus-title" id="vstatus-title">AI voice · Ready</span>
               </div>
-              <span class="vstatus-engine-tag" id="vstatus-engine-tag">ElevenLabs Turbo v2.5 (VI · 1.05x)</span>
+              <span class="vstatus-engine-tag" id="vstatus-engine-tag">Qwen TTS · Vietnamese · 1.05x</span>
             </div>
 
             <div class="vstatus-body">
@@ -452,8 +455,7 @@
                   <label>Voice</label>
                   <select class="form-select-sm" id="quick-voice-provider">
                     <option value="qwentts" selected>Qwen TTS · Vietnamese</option>
-                    <option value="elevenlabs">ElevenLabs</option>
-                    <option value="omnivoice">Omni Voice</option>
+                    <option value="omnivoice">Omni Voice · Local</option>
                   </select>
                 </div>
                 <div class="form-group" style="flex:1;">
@@ -466,14 +468,6 @@
                 </div>
               </div>
 
-              <!-- Provider credentials are server-side only -->
-              <div class="form-group" id="group-quick-apikey">
-                <div class="label-with-action">
-                  <label>Provider credentials</label>
-                </div>
-                <div class="settings-note">Managed securely by the runtime server.</div>
-              </div>
-
               <!-- Built-in voice presets -->
               <div class="form-group" id="group-saved-voices">
                 <label>Voice</label>
@@ -484,16 +478,9 @@
                 </div>
               </div>
 
-              <!-- Voice ID Input & Fast Actions -->
+              <!-- Internal voice ID used by the selected profile. -->
               <div class="form-group" id="quick-voice-id-section" hidden aria-hidden="true">
-                <div class="label-with-action">
-                  <label>Voice ID:</label>
-                  <div class="voice-id-actions">
-                    <button type="button" class="btn-micro-action" id="btn-copy-voice-id" title="Copy Voice ID"><span class="material-symbols-rounded" aria-hidden="true">content_copy</span>Copy</button>
-                    <button type="button" class="btn-micro-action" id="btn-save-custom-voice" title="Save this Voice ID"><span class="material-symbols-rounded" aria-hidden="true">save</span>Save</button>
-                  </div>
-                </div>
-                <input type="text" class="form-input-sm" id="quick-voice-id-input" value="EXAVITQu4vr4xnSDxMaL" placeholder="Enter Voice ID..." />
+                <input type="hidden" id="quick-voice-id-input" value="qwen-default" />
               </div>
 
               <!-- Voice Speed Slider -->
@@ -591,8 +578,7 @@
     </div>
     <div class="avatar-page-toolbar">
       <div><strong>Avatar Library</strong><small id="avatar-page-count">0 avatars</small></div>
-      <span class="avatar-session-rule"><span class="material-symbols-rounded" aria-hidden="true">verified</span>One active avatar per live session</span>
-      <input type="checkbox" id="avatar-page-random-toggle" hidden />
+      <span class="avatar-session-rule"><span class="material-symbols-rounded" aria-hidden="true">verified</span>Single session · Active / Inactive</span>
     </div>
     <div class="avatar-library-grid" id="avatar-library-grid">
       <article class="avatar-empty-card">
@@ -618,12 +604,12 @@
       </section>
       <section class="ai-profile-panel">
         <div class="ai-profile-panel-head"><span class="material-symbols-rounded" aria-hidden="true">record_voice_over</span><div><h2>Voice Setting</h2><p>Choose the voice for live replies.</p></div></div>
-        <label class="ai-profile-provider"><span>Provider</span><select id="profile-voice-provider" class="form-select"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="elevenlabs">ElevenLabs</option><option value="omnivoice">Omni Voice</option></select></label>
+        <label class="ai-profile-provider"><span>Voice provider</span><select id="profile-voice-provider" class="form-select"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="omnivoice">Omni Voice · Local</option></select></label>
         <div class="ai-profile-voice-summary" id="ai-voice-profile-summary" aria-live="polite">Loading active voice...</div>
         <div class="voice-provider-notice" id="voice-provider-notice" aria-live="polite"></div>
         <label class="voice-preview-copy"><span>Preview line</span><textarea id="profile-voice-preview-text" rows="2">Chào cả nhà, AI Idol đã sẵn sàng livestream rồi nè!</textarea></label>
         <div class="voice-profile-builder" id="voice-profile-builder">
-          <div class="voice-profile-tabs" role="tablist"><button type="button" class="active" data-voice-profile-mode="design">Design</button><button type="button" data-voice-profile-mode="clone">Clone</button></div>
+          <div class="voice-profile-tabs" role="tablist" aria-label="Omni Voice creation mode"><button type="button" class="active" data-voice-profile-mode="design">Design voice</button><button type="button" data-voice-profile-mode="clone">Clone voice</button></div>
           <form id="voice-profile-design-form" class="voice-profile-form">
             <label><span>Name</span><input name="name" required value="Mimi Bright" /></label>
             <div class="form-row"><label><span>Gender</span><select name="gender"><option value="female">Female</option><option value="male">Male</option></select></label><label><span>Age</span><select name="age"><option value="young adult">Young adult</option><option value="teenager">Teenager</option><option value="middle-aged">Middle-aged</option><option value="elderly">Elderly</option><option value="child">Child</option></select></label></div>
@@ -670,6 +656,35 @@
     </section>
   </section>
 
+  <section class="web-app-view director-view" id="view-director" data-view="director">
+    <header class="web-page-head">
+      <div><span class="workspace-eyebrow">DIRECTOR CONTROL PLANE</span><h1>AI Director</h1><p>Combine personality, reply rules, and product knowledge into one live brief.</p></div>
+      <div class="director-health"><span class="web-health-dot"></span><span id="director-brief-status">Draft not built</span></div>
+    </header>
+    <div class="director-layout">
+      <section class="ai-profile-panel director-brief-panel">
+        <div class="ai-profile-panel-head"><span class="material-symbols-rounded">tune</span><div><h2>Director brief</h2><p>Instructions for how the AI prioritizes and speaks during the stream.</p></div></div>
+        <div class="director-fields">
+          <label><span>Stream objective</span><input id="director-objective" value="Tăng tương tác, giữ người xem và giới thiệu sản phẩm tự nhiên" /></label>
+          <label><span>Personality & voice</span><textarea id="director-personality" rows="4" placeholder="Cá tính, giọng điệu, cách xưng hô và ngôn ngữ..."></textarea></label>
+          <label><span>Reply playbook</span><textarea id="director-playbook" rows="5" placeholder="Mẫu trả lời, quy tắc khi bị hỏi giá, khiếu nại, spam..."></textarea></label>
+          <label><span>Product knowledge</span><textarea id="director-products" rows="6" placeholder="Tên sản phẩm, lợi ích, giá, ưu đãi và claim được phép nói..."></textarea></label>
+        </div>
+        <div class="director-actions"><span id="director-save-status">Saved locally for this workspace.</span><button type="button" class="btn-primary" id="build-director-brief"><span class="material-symbols-rounded">auto_awesome</span>Build Director brief</button></div>
+      </section>
+      <aside class="director-sources-panel">
+        <div class="director-panel-title"><div><span class="workspace-eyebrow">REFERENCE SOURCES</span><h2>Brief inputs</h2></div><button type="button" class="btn-icon-hdr" id="director-add-source" title="Add reference source" aria-label="Add reference source"><span class="material-symbols-rounded">add</span></button></div>
+        <div class="director-source-list" id="director-source-list"></div>
+        <div class="director-source-add" id="director-source-form" hidden>
+          <label><span>Source name</span><input id="director-source-name" placeholder="Product catalog - Google Doc" /></label>
+          <label><span>Link or file</span><input id="director-source-url" placeholder="Paste Google Docs / Drive link" /></label>
+          <div class="director-source-buttons"><input id="director-source-file" type="file" accept=".md,.txt,.csv,.json,.pdf,.docx" hidden /><button type="button" class="btn-secondary" id="director-choose-file"><span class="material-symbols-rounded">upload_file</span>Choose file</button><button type="button" class="btn-primary" id="director-save-source">Add source</button></div>
+        </div>
+        <div class="director-context-preview"><span class="workspace-eyebrow">ACTIVE CONTEXT</span><pre id="director-context-preview">No brief built yet.</pre></div>
+      </aside>
+    </div>
+  </section>
+
   <section class="web-app-view" id="view-settings" data-view="settings">
     <header class="web-page-head">
       <div>
@@ -678,18 +693,24 @@
         <p>Configure stream output, local storage, and the AI Director.</p>
       </div>
     </header>
-    <div class="web-settings-grid">
+    <div class="settings-preferences-layout">
+      <nav class="settings-section-tabs" role="tablist" aria-label="Settings sections">
+        <button type="button" class="settings-section-tab active" role="tab" aria-selected="true" data-settings-target="output"><span class="material-symbols-rounded" aria-hidden="true">live_tv</span><span>OBS &amp; Output</span></button>
+        <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="storage"><span class="material-symbols-rounded" aria-hidden="true">folder_open</span><span>Storage</span></button>
+        <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="director"><span class="material-symbols-rounded" aria-hidden="true">memory</span><span>AI Director</span></button>
+      </nav>
+      <div class="web-settings-grid settings-pane-stack">
       <section class="settings-bento-card" style="display:none;">
         <div class="settings-bento-head"><span class="material-symbols-rounded">record_voice_over</span><div><h2>Voice & Persona</h2><p>Voice, speed, and host style.</p></div></div>
         <div class="settings-bento-content" id="web-settings-voice-slot"></div>
         <div class="settings-bento-actions" id="web-settings-voice-actions"></div>
       </section>
-      <section class="settings-bento-card">
-        <div class="settings-bento-head"><span class="material-symbols-rounded">live_tv</span><div><h2>OBS & Output</h2><p>WebSocket and stream output.</p></div></div>
+      <section class="settings-bento-card active" data-settings-pane="output" role="tabpanel">
+        <div class="settings-bento-head"><span class="material-symbols-rounded">live_tv</span><div><h2>OBS & Output</h2><p>The Live Monitor and generated voice are sent to OBS. Direct platform streaming is disabled.</p></div></div>
         <div class="settings-bento-content" id="web-settings-obs-slot"></div>
         <div class="settings-bento-actions" id="web-settings-obs-actions"></div>
       </section>
-      <section class="settings-bento-card">
+      <section class="settings-bento-card" data-settings-pane="storage" role="tabpanel" hidden>
         <div class="settings-bento-head"><span class="material-symbols-rounded">folder_open</span><div><h2>Project storage</h2><p>Uploads and trained models.</p></div></div>
         <div class="settings-storage-fields">
           <label><span>Root folder</span><div class="settings-folder-picker"><input id="project-storage-root" type="text" placeholder="/Users/you/AI-Livestream-Projects" /><button id="select-project-storage-folder" type="button" class="btn-secondary"><span class="material-symbols-rounded">folder_open</span>Select folder</button></div></label>
@@ -697,15 +718,18 @@
         </div>
         <div class="settings-bento-actions"><span id="project-storage-status">Loading settings...</span><button id="save-project-storage" type="button" class="btn-primary">Save folder</button></div>
       </section>
-      <section class="settings-bento-card">
-        <div class="settings-bento-head"><span class="material-symbols-rounded">memory</span><div><h2>AI Director</h2><p>Local reply model for live chat.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
-        <div class="local-ai-model-row">
-          <div><label for="local-ai-model-name">Model</label><input id="local-ai-model-name" type="text" value="qwen3.5:35b-64k" autocomplete="off" spellcheck="false" /></div>
-          <div><span>Runtime</span><strong id="local-ai-runtime-state">Checking Ollama…</strong></div>
+      <section class="settings-bento-card" data-settings-pane="director" role="tabpanel" hidden>
+        <div class="settings-bento-head"><span class="material-symbols-rounded">memory</span><div><h2>AI Director</h2><p>Choose the reply model used for live chat.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
+        <div class="ai-director-provider-field"><label for="ai-director-provider">Provider</label><select id="ai-director-provider"><option value="ollama">Local Qwen (Ollama)</option><option value="ttm-chatgpt">ChatGPT (TTM API)</option></select></div>
+        <div class="ai-director-provider-panel" id="ai-director-ollama-panel">
+          <div class="local-ai-model-row"><div><label for="local-ai-model-name">Model</label><input id="local-ai-model-name" type="text" value="qwen3:8b" autocomplete="off" spellcheck="false" /></div><div><span>Runtime</span><strong id="local-ai-runtime-state">Checking Ollama...</strong></div></div>
+          <p class="local-ai-note">Replies stay on this machine and use a bounded 8B model by default.</p>
+          <div class="ai-director-inline-actions"><span id="local-ai-install-progress" aria-live="polite"></span><button id="install-local-ai-model" type="button" class="btn-secondary"><span class="material-symbols-rounded">download</span>Install model</button></div>
         </div>
-        <p class="local-ai-note" id="local-ai-note">Chat replies stay on this machine, then flow through voice and the active AI Profile.</p>
-        <div class="settings-bento-actions"><span id="local-ai-install-progress"></span><button id="install-local-ai-model" type="button" class="btn-primary"><span class="material-symbols-rounded">download</span>Install model</button></div>
+        <div class="ai-director-provider-panel" id="ai-director-ttm-panel" hidden><div class="ai-director-cloud-fields"><label><span>TTM API Key</span><input id="ai-director-api-key" type="password" autocomplete="off" placeholder="Enter API key" /></label><label><span>ChatGPT model</span><select id="ai-director-chatgpt-model"><option value="chat-latest">chat-latest</option></select></label></div><p class="local-ai-note">Requests use the TTM API gateway. The key is never returned to the interface.</p><div class="ai-director-inline-actions"><span id="ai-director-ttm-status" aria-live="polite">Enter a key, then check models.</span><button id="refresh-ai-director-models" type="button" class="btn-secondary"><span class="material-symbols-rounded">sync</span>Check models</button></div></div>
+        <div class="settings-bento-actions"><span id="ai-director-save-status" aria-live="polite"></span><button id="save-ai-director" type="button" class="btn-primary"><span class="material-symbols-rounded">save</span>Save AI Director</button></div>
       </section>
+      </div>
     </div>
   </section>
   </main>
@@ -768,6 +792,12 @@
         <div class="form-group">
           <label>OBS credentials</label>
           <div class="settings-note">The WebSocket password is managed by the runtime server.</div>
+        </div>
+
+        <div class="form-group">
+          <label for="cfg-livetalking-restart-interval">Avatar memory refresh</label>
+          <select class="form-input" id="cfg-livetalking-restart-interval"><option value="5">Every 5 minutes</option><option value="10">Every 10 minutes</option><option value="15" selected>Every 15 minutes</option><option value="20">Every 20 minutes</option></select>
+          <div class="settings-note" id="livetalking-maintenance-status" aria-live="polite">Runs only after voice playback finishes.</div>
         </div>
 
         <div class="form-group">

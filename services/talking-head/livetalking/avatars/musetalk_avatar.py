@@ -32,6 +32,7 @@ import glob
 import pickle
 
 import queue
+import threading
 from queue import Queue
 from threading import Thread, Event
 import torch.multiprocessing as mp
@@ -39,6 +40,7 @@ import torch.multiprocessing as mp
 from avatars.musetalk.utils.utils import get_file_type,get_video_fps,datagen
 from avatars.musetalk.myutil import get_image_blending
 from avatars.musetalk.utils.utils import load_all_model
+from avatars.musetalk.model_resources import set_shared_vae, vae_lock
 from avatars.musetalk.whisper.audio2feature import Audio2Feature
 
 from avatars.audio_features.whisper import WhisperASR
@@ -65,6 +67,7 @@ def load_model():
     unet.model = unet.model.half().to(device)
     # Initialize audio processor and Whisper model
     audio_processor = Audio2Feature(model_path="./models/whisper")
+    set_shared_vae(vae)
     return vae, unet, pe, timesteps, audio_processor
 
 def load_avatar(avatar_id):
@@ -133,6 +136,7 @@ class MuseReal(BaseAvatar):
         self.vae, self.unet, self.pe, self.timesteps, self.audio_processor = model
 
         self.frame_list_cycle,self.mask_list_cycle,self.coord_list_cycle,self.mask_coords_list_cycle, self.input_latent_list_cycle,self.source_fps = avatar
+        self._avatar_data_lock = threading.RLock()
 
         self.asr = WhisperASR(opt,self,self.audio_processor)
         self.asr.warm_up()
@@ -140,18 +144,34 @@ class MuseReal(BaseAvatar):
     def map_frame_index(self, length, index):
         source_step = self.source_fps / max(1.0, float(self.opt.fps))
         return int(round(index * source_step)) % max(1, length)
+
+    def switch_avatar(self, avatar_id, avatar):
+        with self._avatar_data_lock:
+            (
+                self.frame_list_cycle,
+                self.mask_list_cycle,
+                self.coord_list_cycle,
+                self.mask_coords_list_cycle,
+                self.input_latent_list_cycle,
+                self.source_fps,
+            ) = avatar
+            self.opt.avatar_id = avatar_id
     
 
     @torch.no_grad()
     def inference_batch(self, index, audiofeat_batch):
         # 这里的 index 是针对当前 avatar 的索引
         # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
-        length = len(self.input_latent_list_cycle)
+        with self._avatar_data_lock:
+            latent_cycle = self.input_latent_list_cycle
+            source_fps = self.source_fps
+        length = len(latent_cycle)
         whisper_batch = np.stack(audiofeat_batch)
         latent_batch = []
         for i in range(self.batch_size):
-            idx = self.map_frame_index(length, index + i)
-            latent = self.input_latent_list_cycle[idx]
+            source_step = source_fps / max(1.0, float(self.opt.fps))
+            idx = int(round((index + i) * source_step)) % max(1, length)
+            latent = latent_cycle[idx]
             latent_batch.append(latent)
         latent_batch = torch.cat(latent_batch, dim=0)
         
@@ -164,7 +184,8 @@ class MuseReal(BaseAvatar):
         pred_latents = self.unet.model(latent_batch, 
                                     self.timesteps, 
                                     encoder_hidden_states=audio_feature_batch).sample
-        pred = self.vae.decode_latents(pred_latents)
+        with vae_lock():
+            pred = self.vae.decode_latents(pred_latents)
         return pred
 
     def paste_back_frame(self,pred_frame,idx:int):

@@ -64,7 +64,10 @@ class BaseAvatar:
     def __init__(self, opt):
         self.opt = opt
         self.sample_rate = 16000
-        self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms)
+        # WebRTC audio stays on a fixed 20 ms clock independently of the
+        # model cadence. At 12.5 model FPS, four audio packets feed one frame.
+        self.chunk = self.sample_rate // 50
+        self.audio_frames_per_video = max(1, int(round(50.0 / float(opt.fps))))
         self.sessionid = self.opt.sessionid
 
         self.speaking = False
@@ -423,7 +426,7 @@ class BaseAvatar:
                 
             is_all_silence = True
             audio_frames: list[AudioFrameData] = []
-            for _ in range(self.batch_size * 2):
+            for _ in range(self.batch_size * self.audio_frames_per_video):
                 audioframe:AudioFrameData = self.asr.output_queue.get()
                 if audioframe.type == 0:
                     is_all_silence = False               
@@ -435,7 +438,8 @@ class BaseAvatar:
             if is_all_silence: #全为静音数据，只需要取fullimg，不需要推理
                 for i in range(self.batch_size):
                     idx = self.map_frame_index(length, index)
-                    self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx, batch_epoch))
+                    start = i * self.audio_frames_per_video
+                    self.res_frame_queue.put((None, audio_frames[start:start + self.audio_frames_per_video], idx, batch_epoch))
                     index = index + 1
             else:
                 if current_speaking and not last_speaking and self.custom_index.get(1) is not None: #从静音到说话切换,并且有自定义静态视频
@@ -457,7 +461,8 @@ class BaseAvatar:
                     count = 0
                     counttime = 0
                 for i, res_frame in enumerate(pred):
-                    self.res_frame_queue.put((res_frame, audio_frames[i*2:i*2+2], self.map_frame_index(length, index), batch_epoch))
+                    start = i * self.audio_frames_per_video
+                    self.res_frame_queue.put((res_frame, audio_frames[start:start + self.audio_frames_per_video], self.map_frame_index(length, index), batch_epoch))
                     index = index + 1
                     
             if current_speaking != last_speaking:
@@ -491,7 +496,7 @@ class BaseAvatar:
                 res_frame, audio_frames, idx = item
             
             # 检测状态变化
-            current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
+            current_speaking = any(audio_frame.type == 0 for audio_frame in audio_frames)
             if current_speaking != _last_speaking:
                 logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
                 _transition_start = time.time()
@@ -502,7 +507,7 @@ class BaseAvatar:
             _last_speaking = current_speaking
             self.current_frame_index = int(idx)
 
-            if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
+            if not current_speaking: #全为静音数据，只需要取fullimg
                 self.speaking = False
                 audiotype = audio_frames[0].type
                 if self.custom_index.get(audiotype) is not None: #有自定义视频

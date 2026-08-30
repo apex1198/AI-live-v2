@@ -135,9 +135,24 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
         player.push_video(np.zeros((16, 16, 3), dtype=np.uint8))
 
         self.assertAlmostEqual(player.video_ptime, 1 / 25)
-        self.assertLessEqual(player.video._queue.maxsize, 12)
+        self.assertEqual(player.video._queue.maxsize, 25)
         self.assertEqual(player.video._queue.qsize(), 1)
         self.assertEqual(avatar.repeated_video_frames, 0)
+
+    async def test_12_5_model_clock_repeats_frames_at_25_fps(self):
+        avatar = SimpleNamespace(
+            opt=SimpleNamespace(fps=12.5, output_fps=25),
+            batch_size=8,
+            dropped_video_frames=0,
+            repeated_video_frames=0,
+        )
+        player = HumanPlayer(avatar)
+        player.push_video(np.zeros((16, 16, 3), dtype=np.uint8))
+
+        self.assertAlmostEqual(player.video_ptime, 1 / 25)
+        self.assertEqual(player.video_repetitions, 2)
+        self.assertEqual(player.video._queue.qsize(), 2)
+        self.assertEqual(player.audio_packets_per_video, 2)
 
     async def test_video_queue_drops_stale_frames_when_saturated(self):
         avatar = SimpleNamespace(
@@ -223,6 +238,24 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_whisper_uses_upstream_two_frame_timing_offset(self):
         source = inspect.getsource(WhisperASR.run_step)
         self.assertIn("audio_feat_win = [2,3]", source)
+
+    async def test_whisper_12_5_fps_emits_audio_for_every_model_frame(self):
+        # The inference worker consumes batch_size * audio_frames_per_video
+        # packets. This catches the deadlock introduced when model FPS drops
+        # below 25 while ASR still emits the old two-packet batch.
+        asr = object.__new__(WhisperASR)
+        WhisperASR.__init__(
+            asr,
+            SimpleNamespace(fps=12.5, batch_size=8, l=0, r=0),
+            None,
+            None,
+        )
+
+        WhisperASR.run_step(asr)
+
+        self.assertEqual(asr.audio_frames_per_video, 4)
+        self.assertEqual(asr.output_queue.qsize(), 32)
+        self.assertEqual(len(asr.feat_queue.get_nowait()), 8)
 
     async def test_musetalk_realtime_inference_disables_gradients(self):
         self.assertTrue(hasattr(MuseReal.inference_batch, "__wrapped__"))

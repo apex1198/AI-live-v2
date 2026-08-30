@@ -113,8 +113,8 @@ export class RuntimeDatabase {
     try {
       this.db.prepare('DELETE FROM avatars WHERE id = ?').run(id);
       const session = this.getAvatarSession();
-      if (session?.selected.includes(id)) {
-        this.setAvatarSession(session.selected.filter((avatarId) => avatarId !== id), session.random);
+      if (session?.activeAvatarId === id) {
+        this.setAvatarSession(null);
       }
       this.db.exec('COMMIT');
     } catch (error) {
@@ -123,25 +123,24 @@ export class RuntimeDatabase {
     }
   }
 
-  getAvatarSession(): { selected: string[]; random: boolean } | null {
+  getAvatarSession(): { activeAvatarId: string | null; excludedAvatarIds: string[] } | null {
     const row = this.db.prepare('SELECT selected_json, random FROM avatar_sessions WHERE id = 1').get() as { selected_json?: string; random?: number } | undefined;
     if (!row?.selected_json) return null;
     try {
       const selected = JSON.parse(row.selected_json);
-      // A live runtime owns exactly one avatar. Keep the first legacy value so
-      // older databases migrate without resurrecting a multi-avatar session.
-      return {
-        selected: Array.isArray(selected) ? selected.map(String).filter(Boolean).slice(0, 1) : [],
-        random: false,
-      };
+      const values = Array.isArray(selected) ? selected.map(String).filter(Boolean) : [];
+      return { activeAvatarId: values[0] || null, excludedAvatarIds: values.slice(1) };
     } catch { return null; }
   }
 
-  setAvatarSession(selected: string[], random: boolean): void {
+  setAvatarSession(activeAvatarId: string | null, excludedAvatarIds: string[] = []): void {
+    const selected = activeAvatarId
+      ? [activeAvatarId, ...excludedAvatarIds.filter((id) => id && id !== activeAvatarId)]
+      : [];
     this.db.prepare(`
       INSERT INTO avatar_sessions(id, selected_json, random, updated_at) VALUES (1, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET selected_json = excluded.selected_json, random = excluded.random, updated_at = excluded.updated_at
-    `).run(JSON.stringify(selected.filter(Boolean).slice(0, 1)), 0, new Date().toISOString());
+    `).run(JSON.stringify(selected), 0, new Date().toISOString());
   }
 
   upsertSpeechCommand(command: { id: string; text: string; provider: string; state: string; error?: string | null }): void {

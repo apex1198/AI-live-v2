@@ -48,10 +48,10 @@ def parse_args():
                         help='YAML 配置文件路径（设为空字符串可跳过）')
 
     # ─── 音频 ──────────────────────────────────────────────────────────
-    parser.add_argument('--fps', type=int, choices=range(4, 51), default=25,
-                        help="lip inference fps; tune this to the available accelerator")
-    parser.add_argument('--output_fps', type=int, choices=range(24, 61), default=30,
-                        help="WebRTC output fps; generated lip frames are repeated to this cadence")
+    parser.add_argument('--fps', type=float, default=12.5,
+                        help="MuseTalk model generation FPS")
+    parser.add_argument('--output_fps', type=int, default=25,
+                        help="WebRTC output FPS")
     parser.add_argument('-l', type=int, default=10)
     parser.add_argument('-m', type=int, default=8)
     parser.add_argument('-r', type=int, default=10)
@@ -119,5 +119,10 @@ def parse_args():
     if opt.customvideo_config:
         with open(opt.customvideo_config, 'r') as f:
             opt.customopt = json.load(f)
+
+    # Keep the model and transport clocks compatible across native and worker
+    # launches. One generated model frame maps to two 25 FPS output frames.
+    opt.fps = 12.5
+    opt.output_fps = 25
 
     return opt

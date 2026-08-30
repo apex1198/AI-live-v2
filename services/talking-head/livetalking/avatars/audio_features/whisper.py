@@ -59,7 +59,9 @@ class WhisperASR(BaseASR):
         ############################################## extract audio feature ##############################################
         start_time = time.time()
         is_all_silence = True
-        for _ in range(self.batch_size*2):
+        # One model frame consumes enough 20 ms packets to match the model
+        # cadence. At 12.5 FPS this is four packets per frame, not two.
+        for _ in range(self.batch_size * self.audio_frames_per_video):
             audio_frame = self.get_audio_frame()
             if audio_frame.type == 0:
                 is_all_silence = False

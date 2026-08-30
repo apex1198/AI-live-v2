@@ -460,6 +460,25 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     return Boolean(payload.data?.closed);
   }
 
+  async switchAvatarState(
+    avatarId: string,
+    state = 'normal',
+    sessionId: string | null = this._sessionId,
+  ): Promise<{ sessionid: string; avatar_id: string; state: string; changed: boolean }> {
+    sessionId = sessionId || await this.ensureActiveSession();
+    const payload = await this._request(`/api/session/${encodeURIComponent(sessionId)}/avatar-state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ avatar_id: avatarId, state }),
+    }, false, Math.max(this._config.timeoutMs, 30_000));
+    return z.object({
+      sessionid: z.string().min(1),
+      avatar_id: z.string().min(1),
+      state: z.string().min(1),
+      changed: z.boolean(),
+    }).parse(payload.data);
+  }
+
   async sendAudio(
     audio: Blob | ArrayBuffer | Uint8Array,
     sessionId: string | null = null,

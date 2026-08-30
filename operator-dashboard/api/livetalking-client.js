@@ -28,14 +28,10 @@
     registerAvatar: (avatar) => runtime.post('/api/avatars/library', { avatar }),
     deleteAvatar: (avatarId) => runtime.delete(`/api/avatars/library/${encodeURIComponent(avatarId)}`),
     getAvatarSession: () => runtime.get('/api/avatars/session'),
-    saveAvatarSession: (selected, random) => {
-      const avatarId = Array.isArray(selected) ? selected[0] : selected;
-      return runtime.post('/api/avatars/session', {
-        avatarId: avatarId || undefined,
-        selected: avatarId ? [avatarId] : [],
-        random: false,
-      });
-    },
+    saveActiveAvatarSession: (activeAvatarId, excludedAvatarIds = []) => runtime.post('/api/avatars/session', {
+      activeAvatarId: activeAvatarId || null,
+      excludedAvatarIds,
+    }),
     setVoice: (settings) => runtime.post('/api/settings/voice', settings),
     speak: (command) => runtime.post('/api/speech/commands', command),
     speechStatus: () => runtime.get('/api/speech/status'),

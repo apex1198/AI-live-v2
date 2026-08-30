@@ -67,6 +67,21 @@ ul, ol { list-style: none; }
   min-height: 0;
 }
 
+.director-view { overflow-y: auto; padding: 28px 32px 48px; }
+.director-health { display:flex; align-items:center; gap:8px; color:var(--t2); }
+.director-layout { display:grid; grid-template-columns:minmax(0, 1.5fr) minmax(300px, .8fr); gap:18px; max-width:1180px; }
+.director-brief-panel, .director-sources-panel { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--r-md); padding:20px; }
+.director-fields { display:grid; gap:16px; margin-top:20px; }
+.director-fields label, .director-source-add label { display:grid; gap:7px; color:var(--t2); font-weight:600; }
+.director-fields input, .director-fields textarea, .director-source-add input { width:100%; background:var(--bg-el); border:1px solid var(--border-s); border-radius:var(--r-sm); color:var(--t1); padding:10px 12px; font:inherit; resize:vertical; }
+.director-fields input:focus, .director-fields textarea:focus, .director-source-add input:focus { outline:2px solid var(--border-focus); outline-offset:1px; }
+.director-actions, .director-source-buttons { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:20px; }
+.director-actions span { color:var(--t3); }
+.director-panel-title { display:flex; align-items:center; justify-content:space-between; }.director-panel-title h2 { margin-top:4px; }
+.director-source-list { display:grid; gap:8px; margin-top:18px; }.director-source-item { display:grid; grid-template-columns:28px 1fr auto; align-items:center; gap:8px; padding:12px; background:var(--bg-el); border:1px solid var(--border); border-radius:var(--r-sm); }.director-source-item > .material-symbols-rounded { color:var(--accent); }.director-source-item div { min-width:0; display:grid; gap:3px; }.director-source-item small { color:var(--t3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.director-source-empty { padding:22px 8px; color:var(--t3); line-height:1.5; }
+.director-source-add { display:grid; gap:12px; margin-top:14px; padding-top:14px; border-top:1px solid var(--border); }.director-source-buttons { margin-top:0; justify-content:flex-end; }.director-context-preview { margin-top:22px; border-top:1px solid var(--border); padding-top:16px; }.director-context-preview pre { margin-top:10px; max-height:280px; overflow:auto; white-space:pre-wrap; color:var(--t2); font:11px/1.55 var(--font-mono); }
+@media (max-width: 900px) { .director-layout { grid-template-columns:1fr; } .director-view { padding:20px 16px 36px; } }
+
 /* ── Topbar with Embedded System Status ─────────────────── */
 .topbar {
   flex-shrink: 0;

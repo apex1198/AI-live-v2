@@ -84,7 +84,7 @@ def worker_metrics():
         "accelerator": "cpu",
         "inference_fps": 0.0,
         "output_fps": 0.0,
-        "model_fps": 0,
+        "model_fps": 0.0,
         "video_queue_depth": 0,
         "audio_queue_depth": 0,
         "video_buffer_ms": 0.0,
@@ -99,7 +99,7 @@ def worker_metrics():
         metrics.update({
             "inference_fps": round(float(getattr(session, "inference_fps", 0.0)), 2),
             "output_fps": round(float(getattr(session, "output_fps", 0.0)), 2),
-            "model_fps": int(getattr(getattr(session, "opt", None), "fps", 0)),
+            "model_fps": round(float(getattr(getattr(session, "opt", None), "fps", 0.0)), 2),
             "video_queue_depth": int(output_metric(output, "get_buffer_size")),
             "audio_queue_depth": int(output_metric(output, "get_audio_buffer_size")),
             "video_buffer_ms": round(float(output_metric(output, "get_video_buffer_ms", 0.0)), 2),
@@ -454,6 +454,44 @@ async def close_session(request):
         return json_error(str(exc))
 
 
+async def switch_avatar_state(request):
+    """Swap a trained emotion dataset without replacing the WebRTC session."""
+    try:
+        sessionid = validated_session_id(request.match_info.get('sessionid', ''))
+        params = await request.json()
+        avatar_id = require_safe_id(params.get('avatar_id'), "avatar_id")
+        state = str(params.get('state') or 'normal').strip().lower()
+        allowed_states = {
+            'normal', 'happy', 'laughing', 'grateful', 'surprised',
+            'excited', 'sad', 'angry', 'playful', 'focused',
+        }
+        if state not in allowed_states:
+            return json_error("invalid avatar state", code=400)
+        avatar_session = get_session(request, sessionid)
+        if avatar_session is None:
+            return json_error("session not found", code=404)
+        switch_avatar = getattr(avatar_session, 'switch_avatar', None)
+        get_or_load_avatar = request.app.get("get_or_load_avatar")
+        if not callable(switch_avatar) or not callable(get_or_load_avatar):
+            return json_error("avatar state switching is unavailable", code=409)
+        previous_id = str(getattr(getattr(avatar_session, 'opt', None), 'avatar_id', '') or '')
+        avatar = await asyncio.get_event_loop().run_in_executor(None, get_or_load_avatar, avatar_id)
+        switch_avatar(avatar_id, avatar)
+        return json_ok(data={
+            "sessionid": sessionid,
+            "avatar_id": avatar_id,
+            "state": state,
+            "changed": previous_id != avatar_id,
+        })
+    except FileNotFoundError as exc:
+        return json_error(str(exc), code=404)
+    except ValueError as exc:
+        return json_error(str(exc), code=400)
+    except Exception as exc:
+        logger.exception('switch_avatar_state exception:')
+        return json_error(str(exc))
+
+
 async def admin_sessions(request):
     """Admin: 获取活跃的会话及其配置"""
     try:
@@ -511,6 +549,7 @@ def setup_routes(app):
     app.router.add_post("/is_speaking", is_speaking)
     app.router.add_get("/api/session/{sessionid}/status", session_status)
     app.router.add_delete("/api/session/{sessionid}", close_session)
+    app.router.add_post("/api/session/{sessionid}/avatar-state", switch_avatar_state)
     app.router.add_get("/api/session/{sessionid}/events", sse_handler)
     app.router.add_get("/api/admin/config", admin_config)
     app.router.add_get("/api/admin/sessions", admin_sessions)

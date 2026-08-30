@@ -37,17 +37,24 @@ class Engine:
         self.voices_dir = self.data_dir / "voices"
         self.voices_dir.mkdir(parents=True, exist_ok=True)
         self.model = None
-        self.model_lock = threading.Lock()
+        self.model_lock = threading.RLock()
+        self.load_lock = threading.Lock()
         self.loaded_at = 0.0
 
     def load(self):
+        if self.model is not None:
+            return self.model
+        with self.load_lock:
+            if self.model is not None:
+                return self.model
+            self._load_model()
+        return self.model
+
+    def _load_model(self):
         LOGGER.info("Loading Vietnamese Qwen TTS from %s", self.model_path)
         self.model = load_model(self.model_path)
         self.loaded_at = time.time()
         self.warm_voice(DEFAULT_VOICE_ID)
-        # Compile the MLX generation graph during the app loading screen so
-        # the first live-chat reply uses the warm realtime path.
-        self.synthesize(SynthesisInput(text="Xin chao.", voice_id=DEFAULT_VOICE_ID))
         LOGGER.info("Vietnamese Qwen TTS is ready")
 
     def _builtin_profiles(self):
@@ -85,6 +92,7 @@ class Engine:
         return next((profile for profile in self.profiles() if profile["voice_id"] == voice_id), None)
 
     def warm_voice(self, voice_id: str):
+        self.load()
         profile = self.profile(voice_id)
         if not profile:
             raise ValueError("Voice profile not found")
@@ -132,6 +140,7 @@ class Engine:
         return profile
 
     def synthesize(self, payload: SynthesisInput):
+        self.load()
         profile = self.profile(payload.voice_id)
         if not profile:
             raise ValueError("Voice profile not found")
@@ -163,7 +172,8 @@ def create_app(engine: Engine):
     @app.get("/api/health")
     def health():
         return {
-            "ready": engine.model is not None,
+            "ready": True,
+            "model_loaded": engine.model is not None,
             "provider": "qwentts",
             "model": "gwen-tts-0.6B-vi-8bit",
             "backend": "mlx",
@@ -211,7 +221,6 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
     engine = Engine(args.model, args.data_dir)
-    engine.load()
     uvicorn.run(create_app(engine), host=args.host, port=args.port, log_level="info")
 
 

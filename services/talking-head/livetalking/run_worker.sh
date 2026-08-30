@@ -18,13 +18,15 @@ max_session="${LIVETALKING_MAX_SESSION:-1}"
 stun_url="${LIVETALKING_STUN_URL:-stun:stun.l.google.com:19302}"
 if [[ "$(uname -s)" == "Darwin" ]]; then
   batch_size="${LIVETALKING_BATCH_SIZE:-8}"
-  fps="${LIVETALKING_FPS:-25}"
+  fps="12.5"
   output_fps="${LIVETALKING_OUTPUT_FPS:-25}"
 else
-  batch_size="${LIVETALKING_BATCH_SIZE:-12}"
-  fps="${LIVETALKING_FPS:-25}"
+  batch_size="${LIVETALKING_BATCH_SIZE:-8}"
+  fps="12.5"
   output_fps="${LIVETALKING_OUTPUT_FPS:-25}"
 fi
+
+output_fps="25"
 
 avatar_asset="latents.pt"
 if [[ "$model" != "musetalk" ]]; then

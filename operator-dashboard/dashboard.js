@@ -4,7 +4,7 @@
    AI IDOL OPERATOR DASHBOARD — Main Controller
    Layout: 25% Live Chat & Mixer | 50% 16:9 Monitor | 25% Controls
    Features: Level 3 Talking Video + Exact Duration Detection
-   Voice: ElevenLabs Turbo v2.5 (Native VI) + Web Speech API
+   Voice: Qwen TTS + Omni Voice local providers
    ============================================================ */
 
 // ── Application Configuration & Storage Keys ─────────────
@@ -15,11 +15,10 @@ const STORAGE_KEYS = {
   LIVETALKING_ENDPOINT: 'idol_livetalking_endpoint',
   LIVETALKING_MODEL:    'idol_livetalking_model',
   LIVETALKING_AVATAR:   'idol_livetalking_avatar',
-  AVATAR_POOL:          'idol_avatar_pool',
-  AVATAR_RANDOM:        'idol_avatar_random',
+  ACTIVE_AVATAR:        'idol_active_avatar',
   PROJECT_STORAGE_ROOT: 'idol_project_storage_root',
   PROJECT_NAME:         'idol_project_name',
-  ELEVENLABS_VOICE:     'idol_elevenlabs_voice',
+  VOICE_ID:     'idol_voice_id',
   CUSTOM_VOICES:        'idol_saved_custom_voices',
   VOICE_SPEED:          'idol_voice_speed',
   PERSONA_NAME:         'idol_persona_name',
@@ -47,6 +46,14 @@ const STORAGE_KEYS = {
 
 // Provider secrets are server-side only. Remove credentials persisted by older builds.
 localStorage.removeItem('idol_elevenlabs_key');
+if (!localStorage.getItem(STORAGE_KEYS.ACTIVE_AVATAR)) {
+  try {
+    const legacyActiveAvatar = JSON.parse(localStorage.getItem('idol_avatar_pool') || '[]').find(Boolean);
+    if (legacyActiveAvatar) localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, legacyActiveAvatar);
+  } catch {}
+}
+localStorage.removeItem('idol_avatar_pool');
+localStorage.removeItem('idol_avatar_random');
 
 const STATE_COLOR = {
   GAMEPLAY_IDLE:  '#60a5fa',
@@ -152,6 +159,8 @@ function handleRuntimeRealtimeMessage(payload) {
     applyReplySkillPayload(payload.replySkills);
   } else if (payload.type === 'LIVETALKING_WORKER_STATE' && payload.worker) {
     applyLiveTalkingWorkerState(payload.worker);
+  } else if (payload.type === 'LIVETALKING_MAINTENANCE_STATE' && payload.maintenance) {
+    applyLiveTalkingMaintenanceState(payload.maintenance);
   }
 }
 
@@ -2055,14 +2064,15 @@ const LiveTalkingStudio = {
   dragState: { isDragging: false, target: null, handle: null, startX: 0, startY: 0, initialBox: null },
 };
 
-const AvatarSession = {
-  selected: JSON.parse(localStorage.getItem(STORAGE_KEYS.AVATAR_POOL) || '[]').filter(Boolean).slice(0, 1),
-  random: false,
+const LiveAvatarSession = {
+  activeAvatarId: localStorage.getItem(STORAGE_KEYS.ACTIVE_AVATAR) || '',
+  excludedAvatarIds: [],
 };
 
 const AvatarCreateFlow = { status: 'upload', progress: 0, file: null, files: [], items: [] };
 const VoiceProfileState = {
   profiles: [],
+  providers: {},
   selected: null,
   previewedKey: '',
   previewAudio: null,
@@ -2165,7 +2175,7 @@ async function refreshLiveTalkingWorkerStatus({ silent = false } = {}) {
       && !speechBusy
       && avatarDeletionsInProgress.size === 0
       && (becameReady || workerRestarted || sessionConfirmedLost)) {
-      const avatarId = [AvatarSession.selected[0], LiveTalkingStudio.avatarId]
+      const avatarId = [LiveAvatarSession.activeAvatarId, LiveTalkingStudio.avatarId]
         .find(id => id && TRAINED_AVATARS.has(id))
         || TRAINED_AVATARS.keys().next().value;
       if (avatarId && !liveTalkingReconnectPromise) {
@@ -2264,12 +2274,12 @@ async function renameProjectAvatar(avatar, name) {
 async function deleteProjectAvatar(avatarId) {
   if (location.protocol === 'file:') throw new Error('Open the dashboard through localhost to manage avatars');
   avatarDeletionsInProgress.add(avatarId);
-  const wasSelected = AvatarSession.selected.includes(avatarId);
+  const wasSelected = LiveAvatarSession.activeAvatarId === avatarId;
   const legacyAvatar = await IdolDB.getAvatar('livetalking_avatar').catch(() => null);
   const legacyAvatarId = legacyAvatar?.meta?.avatarId || '';
   try {
-    AvatarSession.selected = AvatarSession.selected.filter(id => id !== avatarId);
-    await saveAvatarSession();
+    if (wasSelected) LiveAvatarSession.activeAvatarId = '';
+    await saveActiveAvatarSession();
     if (LiveTalkingStudio.avatarId === avatarId && LiveTalkingWebRTCClient.sessionId) {
       await LiveTalkingWebRTCClient.disconnect();
     }
@@ -2288,13 +2298,13 @@ async function deleteProjectAvatar(avatarId) {
     if (localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) === avatarId) {
       localStorage.removeItem(STORAGE_KEYS.LIVETALKING_AVATAR);
     }
-    localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
+    localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
     await refreshLiveTalkingAvatarList();
     return payload;
   } catch (error) {
     if (wasSelected && TRAINED_AVATARS.has(avatarId)) {
-      AvatarSession.selected = [avatarId];
-      await saveAvatarSession().catch(() => {});
+      LiveAvatarSession.activeAvatarId = avatarId;
+      await saveActiveAvatarSession().catch(() => {});
     }
     throw error;
   } finally {
@@ -2415,6 +2425,86 @@ async function installLocalAiModel() {
   }, 2000);
 }
 
+const AiDirectorState = { provider: 'ollama', model: 'qwen3:8b', apiKeyConfigured: false };
+
+function setAiDirectorProviderUI(provider) {
+  const selected = provider === 'ttm-chatgpt' ? 'ttm-chatgpt' : 'ollama';
+  AiDirectorState.provider = selected;
+  if ($('ai-director-provider')) $('ai-director-provider').value = selected;
+  $('ai-director-ollama-panel')?.toggleAttribute('hidden', selected !== 'ollama');
+  $('ai-director-ttm-panel')?.toggleAttribute('hidden', selected !== 'ttm-chatgpt');
+}
+
+function populateChatGptModels(models = [], preferredModel = '') {
+  const select = $('ai-director-chatgpt-model');
+  if (!select) return;
+  const values = [...new Set(['chat-latest', preferredModel, ...models].filter(Boolean))];
+  select.replaceChildren(...values.map(model => Object.assign(document.createElement('option'), { value: model, textContent: model })));
+  select.value = values.includes(preferredModel) ? preferredModel : values[0];
+}
+
+function applyAiDirectorSettings(persona = {}) {
+  const provider = persona.llmProvider === 'ttm-chatgpt' ? 'ttm-chatgpt' : 'ollama';
+  const model = persona.llmModel || (provider === 'ttm-chatgpt' ? 'chat-latest' : 'qwen3:8b');
+  AiDirectorState.provider = provider;
+  AiDirectorState.model = model;
+  AiDirectorState.apiKeyConfigured = Boolean(persona.apiKeyConfigured);
+  if ($('local-ai-model-name') && provider === 'ollama') $('local-ai-model-name').value = model;
+  populateChatGptModels([], provider === 'ttm-chatgpt' ? model : 'chat-latest');
+  const keyInput = $('ai-director-api-key');
+  if (keyInput) {
+    keyInput.value = '';
+    keyInput.placeholder = AiDirectorState.apiKeyConfigured ? 'Saved API key' : 'Enter API key';
+  }
+  setAiDirectorProviderUI(provider);
+}
+
+function applyLiveTalkingMaintenanceState(maintenance = {}) {
+  const interval = Number(maintenance.restartIntervalMinutes || 15);
+  const select = $('cfg-livetalking-restart-interval');
+  if (select && document.activeElement !== select) select.value = String(interval);
+  const status = $('livetalking-maintenance-status');
+  if (!status) return;
+  const stateLabel = maintenance.state === 'RESTARTING'
+    ? 'Refreshing avatar memory now.'
+    : maintenance.state === 'WAITING_FOR_IDLE'
+      ? 'Waiting for voice playback to finish.'
+      : `Memory refresh every ${interval} minutes, after voice playback finishes.`;
+  status.textContent = stateLabel;
+}
+
+async function loadAiDirectorSettings() {
+  const payload = await window.RuntimeApi.get('/api/ai/director/status');
+  applyAiDirectorSettings({ llmProvider: payload.provider, llmModel: payload.model, apiKeyConfigured: payload.apiKeyConfigured });
+  if (payload.provider === 'ollama') await refreshLocalAiStatus();
+}
+
+async function refreshChatGptModels() {
+  const status = $('ai-director-ttm-status');
+  const button = $('refresh-ai-director-models');
+  const apiKey = $('ai-director-api-key')?.value.trim() || '';
+  if (status) status.textContent = 'Checking TTM API...';
+  if (button) button.disabled = true;
+  try {
+    const payload = await window.RuntimeApi.post('/api/ai/director/models', apiKey ? { apiKey } : {});
+    populateChatGptModels(payload.models || [], $('ai-director-chatgpt-model')?.value || AiDirectorState.model);
+    if (status) status.textContent = `${payload.models?.length || 0} models available.`;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function saveAiDirectorSettings() {
+  const provider = $('ai-director-provider')?.value === 'ttm-chatgpt' ? 'ttm-chatgpt' : 'ollama';
+  const model = provider === 'ttm-chatgpt'
+    ? ($('ai-director-chatgpt-model')?.value || 'chat-latest')
+    : ($('local-ai-model-name')?.value.trim() || 'qwen3:8b');
+  const apiKey = $('ai-director-api-key')?.value.trim() || '';
+  const payload = await window.RuntimeApi.post('/api/ai/director/config', { provider, model, ...(apiKey ? { apiKey } : {}) });
+  applyAiDirectorSettings(payload.settings || {});
+  if ($('ai-director-save-status')) $('ai-director-save-status').textContent = 'AI Director saved.';
+}
+
 function canonicalizeBox(box) {
   if (!box) return null;
   let cx = Number(box.cx), cy = Number(box.cy), w = Number(box.w), h = Number(box.h);
@@ -2506,20 +2596,13 @@ function logLiveTalkingTerminal(msg, type = 'info') {
 
 function updateLiveTalkingVoiceUI() {
   const provider = $('lt-voice-provider-select')?.value || App.voice.provider || 'qwentts';
-  const grpEleven = $('lt-group-elevenlabs');
   const grpWebspeech = $('lt-group-webspeech');
   const grpOpenai = $('lt-group-openai');
   const grpOmnivoice = $('lt-group-omnivoice');
 
-  if (grpEleven) grpEleven.style.display = provider === 'elevenlabs' ? 'flex' : 'none';
   if (grpWebspeech) grpWebspeech.style.display = provider === 'webspeech' ? 'flex' : 'none';
   if (grpOpenai) grpOpenai.style.display = provider === 'openai' ? 'flex' : 'none';
   if (grpOmnivoice) grpOmnivoice.style.display = provider === 'omnivoice' ? 'flex' : 'none';
-
-  // Custom ElevenLabs Voice ID field toggle
-  const elevenVoice = $('lt-eleven-voice-select')?.value;
-  const customVoiceWrap = $('lt-custom-voice-id-wrap');
-  if (customVoiceWrap) customVoiceWrap.style.display = elevenVoice === 'custom' ? 'block' : 'none';
 }
 
 function updateLiveTalkingUI() {
@@ -3049,13 +3132,14 @@ async function refreshLiveTalkingAvatarList() {
     }
   }
   if (sessionResult.status === 'fulfilled' && sessionResult.value.session) {
-    const persistedAvatarId = sessionResult.value.session.avatarId || sessionResult.value.session.selected?.[0] || '';
-    AvatarSession.selected = persistedAvatarId && records.has(persistedAvatarId) ? [persistedAvatarId] : [];
-    AvatarSession.random = false;
-    localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
-    localStorage.setItem(STORAGE_KEYS.AVATAR_RANDOM, String(AvatarSession.random));
-    if (persistedAvatarId && !AvatarSession.selected.length && localResult.status === 'fulfilled' && localResult.value.workerAvailable !== false) {
-      void window.LiveTalkingApi.saveAvatarSession([], false)
+    const persistedAvatarId = sessionResult.value.session.activeAvatarId || '';
+    LiveAvatarSession.activeAvatarId = persistedAvatarId && records.has(persistedAvatarId) ? persistedAvatarId : '';
+    LiveAvatarSession.excludedAvatarIds = (sessionResult.value.session.excludedAvatarIds || [])
+      .map(String)
+      .filter(id => records.has(id));
+    localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
+    if (persistedAvatarId && !LiveAvatarSession.activeAvatarId && localResult.status === 'fulfilled' && localResult.value.workerAvailable !== false) {
+      void window.LiveTalkingApi.saveActiveAvatarSession(null)
         .catch(error => addLog(`Could not clear an unavailable avatar session: ${error.message}`, 'warn'));
     }
   }
@@ -3063,17 +3147,17 @@ async function refreshLiveTalkingAvatarList() {
   TRAINED_AVATARS.clear();
   avatars.forEach(avatar => TRAINED_AVATARS.set(avatar.id, avatar));
   const validIds = new Set(avatars.map(avatar => avatar.id));
-  const persistedSelectedId = AvatarSession.selected.find(id => validIds.has(id)) || '';
+  const persistedSelectedId = validIds.has(LiveAvatarSession.activeAvatarId) ? LiveAvatarSession.activeAvatarId : '';
   const cachedActiveId = validIds.has(LiveTalkingStudio.avatarId) ? LiveTalkingStudio.avatarId : '';
   const validActiveId = persistedSelectedId || cachedActiveId || avatars[0]?.id || '';
-  AvatarSession.selected = validActiveId ? [validActiveId] : [];
+  LiveAvatarSession.activeAvatarId = validActiveId;
   LiveTalkingStudio.avatarId = validActiveId;
   if (validActiveId) {
     localStorage.setItem(STORAGE_KEYS.LIVETALKING_AVATAR, validActiveId);
   } else {
     localStorage.removeItem(STORAGE_KEYS.LIVETALKING_AVATAR);
   }
-  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
+  localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
   if (select) {
     select.replaceChildren(...avatars.map(avatar => {
       const option = document.createElement('option');
@@ -3083,7 +3167,7 @@ async function refreshLiveTalkingAvatarList() {
       return option;
     }));
   }
-  renderAvatarSessionPool(avatars.map(avatar => avatar.id));
+  renderActiveAvatarOptions(avatars.map(avatar => avatar.id));
   renderAvatarLibrary(avatars);
   renderLibraryUI();
   return avatars;
@@ -3095,9 +3179,8 @@ function renderAvatarLibrary(avatars) {
   for (const objectUrl of avatarThumbnailObjectUrls) URL.revokeObjectURL(objectUrl);
   avatarThumbnailObjectUrls.clear();
   const valid = avatars.filter(avatar => avatar?.id);
-  AvatarSession.selected = AvatarSession.selected.filter(id => valid.some(avatar => avatar.id === id));
+  if (!valid.some(avatar => avatar.id === LiveAvatarSession.activeAvatarId)) LiveAvatarSession.activeAvatarId = '';
   if ($('avatar-page-count')) $('avatar-page-count').textContent = `${valid.length} avatar${valid.length === 1 ? '' : 's'}`;
-  if ($('avatar-page-random-toggle')) $('avatar-page-random-toggle').checked = AvatarSession.random;
 
   if (!valid.length) {
     grid.innerHTML = `<article class="avatar-empty-card"><span class="material-symbols-rounded" aria-hidden="true">person_add</span><h2>No avatars yet</h2><p>Upload media and train your first avatar.</p><button type="button" data-create-avatar>Create Avatar</button></article>`;
@@ -3106,7 +3189,7 @@ function renderAvatarLibrary(avatars) {
 
   grid.replaceChildren(...valid.map(avatar => {
     const card = document.createElement('article');
-    const selected = AvatarSession.selected.includes(avatar.id);
+    const selected = LiveAvatarSession.activeAvatarId === avatar.id;
     card.className = `avatar-library-card${selected ? ' selected' : ''}`;
 
     const preview = document.createElement('div');
@@ -3218,13 +3301,15 @@ function renderAvatarLibrary(avatars) {
     const label = document.createElement('span');
     label.textContent = 'Use in live session';
     checkbox.addEventListener('change', async () => {
-      AvatarSession.selected = checkbox.checked ? [avatar.id] : [];
-      AvatarSession.random = false;
+      LiveAvatarSession.activeAvatarId = checkbox.checked ? avatar.id : '';
+      if (checkbox.checked) {
+        LiveAvatarSession.excludedAvatarIds = LiveAvatarSession.excludedAvatarIds.filter(id => id !== avatar.id);
+      }
       card.classList.toggle('selected', checkbox.checked);
       updateAvatarPoolCount();
       checkbox.disabled = true;
       try {
-        await saveAvatarSession();
+        await saveActiveAvatarSession();
         if (checkbox.checked) await activateLiveTalkingAvatar(avatar.id);
       } catch (error) {
         addLog(`Could not activate avatar: ${error.message}`, 'warn');
@@ -3239,25 +3324,24 @@ function renderAvatarLibrary(avatars) {
   }));
 }
 
-function renderAvatarSessionPool(ids) {
+function renderActiveAvatarOptions(ids) {
   const list = $('lt-avatar-pool-list');
   if (!list) return;
   const validIds = [...new Set(ids.filter(Boolean))];
-  AvatarSession.selected = AvatarSession.selected.filter(id => validIds.includes(id));
-  if (!AvatarSession.selected.length && LiveTalkingStudio.avatarId && validIds.includes(LiveTalkingStudio.avatarId)) {
-    AvatarSession.selected = [LiveTalkingStudio.avatarId];
+  if (!validIds.includes(LiveAvatarSession.activeAvatarId)) LiveAvatarSession.activeAvatarId = '';
+  if (!LiveAvatarSession.activeAvatarId && LiveTalkingStudio.avatarId && validIds.includes(LiveTalkingStudio.avatarId)) {
+    LiveAvatarSession.activeAvatarId = LiveTalkingStudio.avatarId;
   }
   list.replaceChildren(...validIds.map(id => {
     const label = document.createElement('label');
-    label.className = `avatar-pool-item${AvatarSession.selected.includes(id) ? ' active' : ''}`;
+    label.className = `avatar-pool-item${LiveAvatarSession.activeAvatarId === id ? ' active' : ''}`;
     const input = document.createElement('input');
     input.type = 'radio';
     input.name = 'active-live-avatar-pool';
     input.value = id;
-    input.checked = AvatarSession.selected.includes(id);
+    input.checked = LiveAvatarSession.activeAvatarId === id;
     input.addEventListener('change', () => {
-      AvatarSession.selected = input.checked ? [input.value] : [];
-      AvatarSession.random = false;
+      LiveAvatarSession.activeAvatarId = input.checked ? input.value : '';
       label.classList.toggle('active', input.checked);
       updateAvatarPoolCount();
     });
@@ -3272,35 +3356,33 @@ function renderAvatarSessionPool(ids) {
     empty.textContent = 'No trained avatars yet.';
     list.append(empty);
   }
-  if ($('lt-random-avatar-toggle')) $('lt-random-avatar-toggle').checked = AvatarSession.random;
   updateAvatarPoolCount();
 }
 
 function updateAvatarPoolCount() {
-  if ($('lt-avatar-pool-count')) $('lt-avatar-pool-count').textContent = AvatarSession.selected[0]
-    ? `Active avatar: ${AvatarSession.selected[0]}`
+  if ($('lt-avatar-pool-count')) $('lt-avatar-pool-count').textContent = LiveAvatarSession.activeAvatarId
+    ? `Active avatar: ${LiveAvatarSession.activeAvatarId}`
     : 'No active avatar';
 }
 
-async function saveAvatarSession() {
-  AvatarSession.selected = AvatarSession.selected.filter(Boolean).slice(0, 1);
-  AvatarSession.random = false;
-  if ($('avatar-page-random-toggle')) $('avatar-page-random-toggle').checked = false;
-  if ($('lt-random-avatar-toggle')) $('lt-random-avatar-toggle').checked = false;
-  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(AvatarSession.selected));
-  localStorage.setItem(STORAGE_KEYS.AVATAR_RANDOM, String(AvatarSession.random));
+async function saveActiveAvatarSession() {
+  LiveAvatarSession.activeAvatarId = String(LiveAvatarSession.activeAvatarId || '').trim();
+  localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
   if (location.protocol !== 'file:') {
-    await window.LiveTalkingApi.saveAvatarSession(AvatarSession.selected, AvatarSession.random);
+    await window.LiveTalkingApi.saveActiveAvatarSession(
+      LiveAvatarSession.activeAvatarId || null,
+      LiveAvatarSession.excludedAvatarIds,
+    );
   }
-  addLog(`Saved active avatar session: ${AvatarSession.selected[0] || 'none'}`, 'ok');
+  addLog(`Saved active avatar: ${LiveAvatarSession.activeAvatarId || 'none'}`, 'ok');
 }
 
 async function selectAvatarForSpeech() {
-  const selectedId = [AvatarSession.selected[0], LiveTalkingStudio.avatarId]
+  const selectedId = [LiveAvatarSession.activeAvatarId, LiveTalkingStudio.avatarId]
     .find(id => id && TRAINED_AVATARS.has(id))
     || TRAINED_AVATARS.keys().next().value;
   if (!selectedId) throw new Error('No trained avatar is ready');
-  AvatarSession.selected = [selectedId];
+  LiveAvatarSession.activeAvatarId = selectedId;
   let sessionViable = LiveTalkingWebRTCClient.isViable?.()
     ?? LiveTalkingWebRTCClient.isConnected?.()
     ?? Boolean(LiveTalkingWebRTCClient.sessionId);
@@ -3325,7 +3407,8 @@ async function activateLiveTalkingAvatar(avatarId) {
   if (TRAINED_AVATARS.size > 0 && !TRAINED_AVATARS.has(id)) {
     throw new Error(`Avatar ${id} is not trained or is unavailable`);
   }
-  AvatarSession.selected = [id];
+  LiveAvatarSession.activeAvatarId = id;
+  LiveAvatarSession.excludedAvatarIds = LiveAvatarSession.excludedAvatarIds.filter(avatarId => avatarId !== id);
   LiveTalkingStudio.avatarId = id;
   LiveTalkingStudio.isTrainedReady = true;
   LiveTalkingStudio.trainProgress = 100;
@@ -3449,8 +3532,8 @@ async function startAvatarBatchTraining() {
       await persistProjectJson('models', 'training-result.json', record, item.avatarId).catch(() => {});
     }));
 
-    AvatarSession.selected = completed[0]?.avatarId ? [completed[0].avatarId] : AvatarSession.selected.slice(0, 1);
-    await saveAvatarSession().catch(() => {});
+    if (completed[0]?.avatarId) LiveAvatarSession.activeAvatarId = completed[0].avatarId;
+    await saveActiveAvatarSession().catch(() => {});
     LiveTalkingStudio.isTraining = false;
     LiveTalkingStudio.isTrainedReady = completed.length > 0;
     LiveTalkingStudio.trainProgress = completed.length ? 100 : 0;
@@ -3561,8 +3644,8 @@ async function startLiveTalkingTraining() {
     });
     await registerProjectAvatar({ id: avatarId, name: file.name, modelType: model, taskId, status: 'ready', trainedAt: Date.now() }).catch(() => {});
     await persistProjectJson('models', 'training-result.json', LiveTalkingStudio.trainedDataset, avatarId).catch(() => {});
-    AvatarSession.selected = [avatarId];
-    await saveAvatarSession().catch(() => {});
+    LiveAvatarSession.activeAvatarId = avatarId;
+    await saveActiveAvatarSession().catch(() => {});
     updateLiveTalkingUI();
     await refreshLiveTalkingAvatarList();
     logLiveTalkingTerminal(`✅ Worker created coords.pkl, latents.pt, and masks for ${avatarId}.`, 'ok');
@@ -3933,7 +4016,7 @@ function updateVoiceStatusUI(status, label = '', progressPct = 0) {
     const speedStr = `${(App.voice.speed || 1.0).toFixed(2)}x`;
     const providerName = App.voice.provider === 'qwentts'
       ? 'Qwen TTS Vietnamese'
-      : App.voice.provider === 'omnivoice' ? 'OmniVoice Female' : 'ElevenLabs Turbo v2.5';
+      : 'Omni Voice Local';
     engineTag.textContent = `${providerName} (VI · ${speedStr})`;
   }
 
@@ -3956,7 +4039,7 @@ function updateVoiceStatusUI(status, label = '', progressPct = 0) {
     if (dot) dot.className = 'vstatus-pulse-dot';
     const readyVoice = App.voice.provider === 'qwentts'
       ? 'Qwen TTS · Vietnamese'
-      : App.voice.provider === 'omnivoice' ? 'OmniVoice · Vietnamese Female' : 'ElevenLabs';
+      : 'Omni Voice · Local';
     if (title) title.textContent = `AI voice: Ready (${readyVoice})`;
     if (fill) fill.style.width = '0%';
     if (voiceViz) voiceViz.classList.remove('speaking');
@@ -3991,14 +4074,14 @@ function stopLiveSpeech() {
 async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
   if (!LiveTalkingWebRTCClient.sessionId) throw new Error('Activate a LiveTalking avatar first');
   const runId = ++liveTalkingSpeechRun;
-  const runtimeProvider = ['webspeech', 'qwentts', 'elevenlabs', 'openai', 'omnivoice'].includes(provider) ? provider : 'qwentts';
+  const runtimeProvider = ['qwentts', 'omnivoice'].includes(provider) ? provider : 'qwentts';
   const normalizedEmotion = ['neutral', 'happy', 'excited', 'surprised', 'sad', 'angry', 'playful', 'focused', 'grateful', 'laughing'].includes(emotion)
     ? emotion
     : 'happy';
 
   await window.LiveTalkingApi.setVoice({
     provider: runtimeProvider,
-    voiceId: App.voice.elevenLabsVoiceId,
+    voiceId: App.voice.voiceId,
     speed,
     languageCode: App.voice.language || 'vi',
   });
@@ -4075,17 +4158,9 @@ async function speakAI(text, emotion = 'happy') {
   }
 
   if (prov === 'qwentts') {
-    return await speakWithQwenTts(text, emotion, App.voice.elevenLabsVoiceId || 'qwen-default', speed);
-  } else if (prov === 'elevenlabs') {
-    const voiceSelectVal = $('lt-eleven-voice-select')?.value || App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
-    const voiceId = (voiceSelectVal === 'custom' ? $('lt-eleven-custom-voice-id')?.value.trim() : voiceSelectVal) || App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
-    const modelId = $('lt-eleven-model-select')?.value || 'eleven_turbo_v2_5';
-    return await speakWithElevenLabs(text, emotion, voiceId, modelId, speed);
-  } else if (prov === 'openai') {
-    const voice = $('lt-openai-voice-select')?.value || 'nova';
-    return await speakWithOpenAI(text, emotion, voice, speed);
+    return await speakWithQwenTts(text, emotion, App.voice.voiceId || 'qwen-default', speed);
   } else if (prov === 'omnivoice') {
-    const voice = $('lt-omnivoice-voice-select')?.value || 'vi-female';
+    const voice = App.voice.voiceId || $('lt-omnivoice-voice-select')?.value || 'voice_bright_storyteller';
     return await speakWithOmniVoice(text, emotion, voice, speed);
   } else {
     const voiceURI = $('lt-webspeech-voice-select')?.value || '';
@@ -4151,29 +4226,6 @@ async function requestProviderAudio({ provider, text, emotion, voiceId, modelId,
   return new Blob([bytes], { type: payload.mediaType || 'audio/mpeg' });
 }
 
-async function speakWithElevenLabs(text, emotion = 'happy', customVoiceId = null, customModelId = null, customSpeed = null) {
-  const voiceId = customVoiceId || ($('quick-voice-id-input')?.value || App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL').trim();
-  const modelId = customModelId || 'eleven_turbo_v2_5';
-  const speed = customSpeed || App.voice.speed || 1.05;
-
-  updateVoiceStatusUI('generating', `Runtime TTS [${voiceId.slice(0, 8)}]...`, 30);
-  addLog(`Runtime is generating ElevenLabs voice [${voiceId.slice(0, 8)}].`, 'hi');
-
-  try {
-    const blob = await requestProviderAudio({ provider: 'elevenlabs', text, emotion, voiceId, modelId, speed });
-    App.voice.providerConfigured = true;
-    await handleAudioResponse(new Response(blob, { headers: { 'Content-Type': blob.type } }), text, emotion, `ElevenLabs-${voiceId.slice(0, 6)}`);
-  } catch (err) {
-    console.error('[Runtime TTS Error]:', err);
-    addLog(`ElevenLabs unavailable: ${err.message}. Using the LiveTalking voice fallback.`, 'err');
-    updateVoiceStatusUI('error', err.message);
-    if (App.talkingEngine.provider === 'livetalking') {
-      return speakWithLiveTalkingText(text, emotion, '', speed);
-    }
-    return speakWithWebSpeech(text, emotion, '', speed);
-  }
-}
-
 async function speakWithQwenTts(text, emotion = 'happy', voiceId = 'qwen-default', speed = 1.05) {
   updateVoiceStatusUI('generating', 'Qwen TTS is generating Vietnamese voice…', 30);
   try {
@@ -4190,24 +4242,6 @@ async function speakWithQwenTts(text, emotion = 'happy', voiceId = 'qwen-default
   } catch (error) {
     updateVoiceStatusUI('error', error.message);
     return speakWithOmniVoice(text, emotion, 'vi-female', speed);
-  }
-}
-
-async function speakWithOpenAI(text, emotion = 'happy', voice = 'nova', speed = 1.05) {
-  updateVoiceStatusUI('generating', `Runtime TTS [${voice}]...`, 30);
-  addLog(`Runtime is generating OpenAI voice [${voice}].`, 'hi');
-
-  try {
-    const blob = await requestProviderAudio({ provider: 'openai', text, emotion, voiceId: voice, modelId: 'tts-1', speed });
-    App.voice.providerConfigured = true;
-    await handleAudioResponse(new Response(blob, { headers: { 'Content-Type': blob.type } }), text, emotion, `OpenAI-${voice}`);
-  } catch (err) {
-    console.error('[Runtime OpenAI TTS Error]:', err);
-    addLog(`OpenAI voice unavailable: ${err.message}. Using the LiveTalking voice fallback.`, 'err');
-    if (App.talkingEngine.provider === 'livetalking') {
-      return speakWithLiveTalkingText(text, emotion, '', speed);
-    }
-    return speakWithWebSpeech(text, emotion, '', speed);
   }
 }
 
@@ -4426,7 +4460,7 @@ function renderSavedVoicesList() {
     const opt = document.createElement('option');
     opt.value = v.id;
     opt.textContent = `★ ${v.name || v.id}`;
-    if (v.id === App.voice.elevenLabsVoiceId) opt.selected = true;
+    if (v.id === App.voice.voiceId) opt.selected = true;
     optgroup.appendChild(opt);
   });
 }
@@ -4443,7 +4477,7 @@ function getGroupForState(state) {
 }
 
 function getActiveTalkingAvatarClip() {
-  const avatarId = [AvatarSession.selected[0], LiveTalkingStudio.avatarId]
+  const avatarId = [LiveAvatarSession.activeAvatarId, LiveTalkingStudio.avatarId]
     .find(id => id && TRAINED_AVATARS.has(id))
     || TRAINED_AVATARS.keys().next().value;
   if (!avatarId) return null;
@@ -4587,10 +4621,13 @@ function createLibraryRenderSignature() {
     avatar.id,
     avatar.status,
     avatar.thumbnailUrl,
+    avatar.avatarState,
+    avatar.durationMs || avatar.duration_ms,
   ]);
   return JSON.stringify({
     clips,
     avatars,
+    excludedAvatarIds: LiveAvatarSession.excludedAvatarIds,
     ratio: App.libraryRatio,
     filter: App.activeFilter,
   });
@@ -4630,7 +4667,8 @@ function renderLibraryUI() {
 
   // 2. Talking & Chat
   const talkingClips = CLIP_LIBRARY.TALKING || [];
-  const talkingAvatars = [...TRAINED_AVATARS.values()];
+  const talkingAvatars = [...TRAINED_AVATARS.values()]
+    .filter(avatar => !LiveAvatarSession.excludedAvatarIds.includes(avatar.id));
   const talkingItemCount = talkingClips.length + talkingAvatars.length;
   totalCount += talkingItemCount;
   if ($('cnt-group-talking')) $('cnt-group-talking').textContent = talkingItemCount;
@@ -4780,6 +4818,9 @@ function renderTalkingAvatarCardHTML(avatar) {
   const thumbnail = avatar.thumbnailUrl
     ? `<img class="clip-thumb-media live-avatar-thumb" src="${avatar.thumbnailUrl}" alt="" loading="lazy" />`
     : '<span class="material-symbols-rounded live-avatar-fallback" aria-hidden="true">person</span>';
+  const durationMs = Number(avatar.durationMs || avatar.duration_ms || 0);
+  const durationLabel = durationMs > 0 ? `${(durationMs / 1000).toFixed(1)}s` : 'Duration unavailable';
+  const stateLabel = String(avatar.avatarState || 'normal').toUpperCase();
   return `
     <div class="clip-card live-avatar-card ${isActive ? 'active playing' : ''}" data-avatar-id="${avatar.id}" data-state="TALKING">
       <div class="clip-thumb live-avatar-preview">
@@ -4789,10 +4830,11 @@ function renderTalkingAvatarCardHTML(avatar) {
       </div>
       <div class="clip-meta">
         <span class="clip-n">${avatar.id}</span>
-        <span class="clip-d">AI Profile · Live</span>
+        <span class="clip-d">${stateLabel} · ${durationLabel}</span>
       </div>
       <div class="clip-actions">
         <div class="now-badge" style="display:${isActive ? 'block' : 'none'};">ACTIVE</div>
+        <button class="btn-remove-live-avatar" data-avatar-id="${avatar.id}" title="Remove this avatar state from Live"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
       </div>
     </div>
   `;
@@ -5121,7 +5163,6 @@ function updateMonitorScreen(state, clip) {
         el.onended = advance;
         el.ontimeupdate = () => {
           if (el.paused || !Number.isFinite(el.duration) || el.duration <= 0) return;
-          if (App.queuedTransition?.commandId) return;
           // Start the ready-frame swap just before decode reaches EOF. Waiting
           // for `ended` lets some browsers briefly clear the last video frame.
           if (el.duration - el.currentTime <= 0.32) advance();
@@ -5418,17 +5459,17 @@ function applyLiveSessionSettingsUI(settings = {}) {
 
 function applyRuntimeSettingsUI(settings = {}) {
   if (settings.voice) {
-    const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(settings.voice.provider)
+    const provider = ['qwentts', 'omnivoice'].includes(settings.voice.provider)
       ? settings.voice.provider
       : 'qwentts';
     App.voice.provider = provider;
     App.voice.language = settings.voice.languageCode || 'vi';
-    if (settings.voice.voiceId) App.voice.elevenLabsVoiceId = settings.voice.voiceId;
+    if (settings.voice.voiceId) App.voice.voiceId = settings.voice.voiceId;
     if (Number.isFinite(Number(settings.voice.speed))) App.voice.speed = Number(settings.voice.speed);
     localStorage.setItem(STORAGE_KEYS.VOICE_PROVIDER, App.voice.provider);
     localStorage.setItem(STORAGE_KEYS.VOICE_LANG, App.voice.language);
     localStorage.setItem(STORAGE_KEYS.VOICE_SPEED, String(App.voice.speed));
-    localStorage.setItem(STORAGE_KEYS.ELEVENLABS_VOICE, App.voice.elevenLabsVoiceId);
+    localStorage.setItem(STORAGE_KEYS.VOICE_ID, App.voice.voiceId);
     const omniVoice = $('lt-omnivoice-voice-select');
     if (omniVoice && [...omniVoice.options].some(option => option.value === settings.voice.voiceId)) {
       omniVoice.value = settings.voice.voiceId;
@@ -5441,6 +5482,15 @@ function applyRuntimeSettingsUI(settings = {}) {
     App.talkingEngine.model = settings.talkingEngine.model || App.talkingEngine.model;
   }
   if (settings.liveSession) applyLiveSessionSettingsUI(settings.liveSession);
+  if (settings.persona) applyAiDirectorSettings(settings.persona);
+  if (settings.liveAvatarMaintenance) {
+    applyLiveTalkingMaintenanceState(settings.liveAvatarMaintenance);
+  }
+  if (settings.obs) {
+    if ($('cfg-obs-host') && document.activeElement !== $('cfg-obs-host')) $('cfg-obs-host').value = settings.obs.host || 'localhost';
+    if ($('cfg-obs-port') && document.activeElement !== $('cfg-obs-port')) $('cfg-obs-port').value = String(settings.obs.port || 4455);
+    if ($('cfg-obs-autoconnect')) $('cfg-obs-autoconnect').checked = Boolean(settings.obs.autoConnect);
+  }
   loadPersistedSettings();
 }
 
@@ -5489,17 +5539,16 @@ function loadPersistedSettings() {
 
 
   const apikeyGroup = $('group-quick-apikey');
-  const isEleven = App.voice.provider === 'elevenlabs';
-  if (apikeyGroup) apikeyGroup.style.display = isEleven ? 'flex' : 'none';
+  if (apikeyGroup) apikeyGroup.style.display = 'none';
 
   const quickVoiceInput = $('quick-voice-id-input');
-  if (quickVoiceInput) quickVoiceInput.value = App.voice.elevenLabsVoiceId;
+  if (quickVoiceInput) quickVoiceInput.value = App.voice.voiceId;
 
   const voiceSelect = $('quick-saved-voice-list');
   if (voiceSelect) {
     renderQuickVoiceOptions(App.voice.provider);
-    if ([...voiceSelect.options].some(option => option.value === App.voice.elevenLabsVoiceId)) {
-      voiceSelect.value = App.voice.elevenLabsVoiceId;
+    if ([...voiceSelect.options].some(option => option.value === App.voice.voiceId)) {
+      voiceSelect.value = App.voice.voiceId;
     }
   }
 
@@ -5514,13 +5563,13 @@ function loadPersistedSettings() {
   if ($('sys-tts-engine')) {
     const engineName = App.voice.provider === 'qwentts'
       ? 'Qwen TTS 0.6B'
-      : App.voice.provider === 'omnivoice' ? 'OmniVoice Female' : 'ElevenLabs';
+      : 'Omni Voice Local';
     $('sys-tts-engine').textContent = `${engineName} (VI)`;
   }
   if ($('vstatus-engine-tag')) {
     const providerLabel = App.voice.provider === 'qwentts'
       ? 'Qwen TTS Local · MLX'
-      : App.voice.provider === 'omnivoice' ? 'OmniVoice Local' : 'ElevenLabs Turbo v2.5';
+      : 'Omni Voice Local · MPS';
     $('vstatus-engine-tag').textContent = `${providerLabel} (VI · ${speedStr})`;
   }
   if ($('sys-talking-engine')) {
@@ -5560,6 +5609,23 @@ function loadPersistedSettings() {
     } catch {}
   }
 }
+
+const DIRECTOR_STORAGE_KEY = 'idol_director_brief_v1';
+function setupDirectorBrief() {
+  if ($('view-director')?.dataset.initialized === 'true') return;
+  if ($('view-director')) $('view-director').dataset.initialized = 'true';
+  let data = {}; try { data = JSON.parse(localStorage.getItem(DIRECTOR_STORAGE_KEY) || '{}'); } catch {}
+  ['objective', 'personality', 'playbook', 'products'].forEach(key => { const el = $(`director-${key}`); if (el && data[key]) el.value = data[key]; });
+  const sources = Array.isArray(data.sources) ? data.sources : [];
+  const render = () => { const list = $('director-source-list'); if (!list) return; list.innerHTML = sources.length ? sources.map((s, i) => `<div class="director-source-item"><span class="material-symbols-rounded">${s.kind === 'file' ? 'description' : 'link'}</span><div><strong>${String(s.name).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</strong><small>${String(s.detail).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</small></div><button type="button" class="btn-icon-hdr" data-remove-source="${i}" aria-label="Remove source"><span class="material-symbols-rounded">close</span></button></div>`).join('') : '<div class="director-source-empty">Add Google Docs, Drive links, or local reference files.</div>'; };
+  const save = (built = false) => { const brief = { objective: $('director-objective')?.value.trim() || '', personality: $('director-personality')?.value.trim() || '', playbook: $('director-playbook')?.value.trim() || '', products: $('director-products')?.value.trim() || '', sources }; localStorage.setItem(DIRECTOR_STORAGE_KEY, JSON.stringify(brief)); if ($('director-brief-status')) $('director-brief-status').textContent = built ? 'Brief active' : 'Draft saved'; if ($('director-save-status')) $('director-save-status').textContent = built ? 'Brief built and synced to Live Session.' : 'Saved locally for this workspace.'; if ($('director-context-preview')) $('director-context-preview').textContent = `OBJECTIVE\n${brief.objective}\n\nPERSONALITY\n${brief.personality}\n\nPLAYBOOK\n${brief.playbook}\n\nPRODUCTS\n${brief.products}\n\nSOURCES\n${sources.map(s => s.name).join(', ') || 'None'}`; };
+  render(); if (data.objective) save(false);
+  $('director-add-source')?.addEventListener('click', () => { const form = $('director-source-form'); if (form) form.hidden = !form.hidden; });
+  $('director-choose-file')?.addEventListener('click', () => $('director-source-file')?.click());
+  $('director-save-source')?.addEventListener('click', () => { const file = $('director-source-file')?.files?.[0]; const name = $('director-source-name')?.value.trim() || file?.name || 'Reference source'; const url = $('director-source-url')?.value.trim(); sources.push({ name, detail: file ? `${file.name} · local file` : (url || 'Manual reference'), kind: file ? 'file' : 'link' }); render(); save(false); $('director-source-form').hidden = true; });
+  $('director-source-list')?.addEventListener('click', e => { const button = e.target.closest('[data-remove-source]'); if (!button) return; sources.splice(Number(button.dataset.removeSource), 1); render(); save(false); });
+  $('build-director-brief')?.addEventListener('click', async () => { save(true); const settings = { goal: $('director-objective').value, personaBrief: $('director-personality').value, context: `${$('director-playbook').value}\n\nProduct knowledge:\n${$('director-products').value}\n\nReferences: ${sources.map(s => s.name).join(', ')}` }; if (location.protocol !== 'file:') await window.RuntimeApi.post('/api/settings/live-session', settings).catch(() => {}); });
+}
 function saveVoiceSettings(newSettings = {}) {
   Object.assign(App.voice, newSettings);
 
@@ -5569,9 +5635,8 @@ function saveVoiceSettings(newSettings = {}) {
   if (newSettings.language !== undefined) {
     localStorage.setItem(STORAGE_KEYS.VOICE_LANG, App.voice.language);
   }
-  delete newSettings.elevenLabsKey;
-  if (newSettings.elevenLabsVoiceId !== undefined) {
-    localStorage.setItem(STORAGE_KEYS.ELEVENLABS_VOICE, App.voice.elevenLabsVoiceId);
+  if (newSettings.voiceId !== undefined) {
+    localStorage.setItem(STORAGE_KEYS.VOICE_ID, App.voice.voiceId);
   }
   if (newSettings.speed !== undefined) {
     localStorage.setItem(STORAGE_KEYS.VOICE_SPEED, String(App.voice.speed));
@@ -5774,7 +5839,7 @@ function applyAiProfileUI(settings = {}) {
   if ($('profile-idol-personality')) $('profile-idol-personality').value = persona.personality || '';
   if ($('profile-idol-prompt')) $('profile-idol-prompt').value = persona.systemPrompt || App.voice.personaPrompt || '';
   syncPersonaPreviewCopy(name);
-  const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(voice.provider) ? voice.provider : 'qwentts';
+  const provider = ['qwentts', 'omnivoice'].includes(voice.provider) ? voice.provider : 'qwentts';
   if ($('profile-voice-provider')) $('profile-voice-provider').value = provider;
   updateVoiceProfileBuilder(provider);
 }
@@ -5804,8 +5869,7 @@ function voiceProfileKey(profile) {
 
 function voiceProviderLabel(provider) {
   if (provider === 'qwentts') return 'Qwen TTS';
-  if (provider === 'omnivoice') return 'Omni Voice';
-  return 'ElevenLabs';
+  return 'Omni Voice';
 }
 
 function voiceProfileDescription(profile) {
@@ -5834,7 +5898,7 @@ function updateVoiceProfileActions() {
   const selectedKey = voiceProfileKey(selected);
   const isActive = Boolean(selected)
     && selected.provider === App.voice.provider
-    && selected.voiceId === App.voice.elevenLabsVoiceId;
+    && selected.voiceId === App.voice.voiceId;
   if (previewButton) previewButton.disabled = !selected || selected.status === 'setup-required';
   if (saveButton) saveButton.disabled = !selected || isActive || VoiceProfileState.previewedKey !== selectedKey;
 }
@@ -5871,7 +5935,7 @@ function renderQuickVoiceOptions(provider = App.voice.provider) {
     option.textContent = `${profile.name} · ${voiceProfileDescription(profile)}`;
     select.appendChild(option);
   });
-  const activeId = App.voice.provider === provider ? App.voice.elevenLabsVoiceId : '';
+  const activeId = App.voice.provider === provider ? App.voice.voiceId : '';
   select.value = profiles.some(profile => profile.voiceId === activeId) ? activeId : profiles[0].voiceId;
   if ($('quick-voice-id-input')) $('quick-voice-id-input').value = select.value;
 }
@@ -5879,7 +5943,7 @@ function renderQuickVoiceOptions(provider = App.voice.provider) {
 function syncQuickVoiceIdVisibility(provider = App.voice.provider) {
   const section = $('quick-voice-id-section');
   if (!section) return;
-  const supportsExternalVoiceId = provider === 'elevenlabs' || provider === 'omnivoice';
+  const supportsExternalVoiceId = provider === 'omnivoice';
   section.hidden = !supportsExternalVoiceId;
   section.setAttribute('aria-hidden', String(!supportsExternalVoiceId));
 }
@@ -5893,7 +5957,7 @@ function renderVoiceProfileList() {
   list.replaceChildren(...profiles.map(profile => {
     const item = document.createElement('article');
     const profileKey = voiceProfileKey(profile);
-    const isActive = profile.provider === App.voice.provider && profile.voiceId === App.voice.elevenLabsVoiceId;
+    const isActive = profile.provider === App.voice.provider && profile.voiceId === App.voice.voiceId;
     item.className = `ai-voice-profile-item${profileKey === selectedKey ? ' selected' : ''}${isActive ? ' active' : ''}`;
 
     const selectButton = document.createElement('button');
@@ -5934,21 +5998,23 @@ function renderVoiceProfileList() {
     list.appendChild(empty);
   }
   if ($('ai-voice-profile-count')) $('ai-voice-profile-count').textContent = `${profiles.length} voice${profiles.length === 1 ? '' : 's'}`;
-  const active = VoiceProfileState.profiles.find(profile => profile.provider === App.voice.provider && profile.voiceId === App.voice.elevenLabsVoiceId);
+  const active = VoiceProfileState.profiles.find(profile => profile.provider === App.voice.provider && profile.voiceId === App.voice.voiceId);
   if ($('ai-voice-profile-summary')) {
     $('ai-voice-profile-summary').textContent = active
       ? `${active.name} · ${voiceProviderLabel(active.provider)} · Active`
-      : `${voiceProviderLabel(App.voice.provider)} · ${App.voice.elevenLabsVoiceId || 'No voice selected'}`;
+      : `${voiceProviderLabel(App.voice.provider)} · ${App.voice.voiceId || 'No voice selected'}`;
   }
   const providerNotice = $('voice-provider-notice');
   if (providerNotice) {
     const availableProfiles = profiles.filter(profile => profile.status !== 'setup-required' && profile.status !== 'offline');
     providerNotice.classList.toggle('needs-setup', profiles.length > 0 && !availableProfiles.length);
-    providerNotice.textContent = provider === 'elevenlabs' && !availableProfiles.length
-      ? 'Connect ElevenLabs before previewing or saving a voice.'
-      : provider === 'omnivoice'
-        ? 'Omni Voice is available for voice design, cloning, and preview.'
-        : 'Qwen TTS runs locally and is optimized for fast Vietnamese replies.';
+    const providerAvailable = VoiceProfileState.providers[provider]?.available !== false;
+    providerNotice.textContent = provider === 'omnivoice'
+      ? (providerAvailable
+        ? 'Omni Voice is ready for design, cloning, and preview.'
+        : 'Open Omni Speak to use design, cloning, and preview.')
+      : 'Qwen TTS runs locally and is optimized for fast Vietnamese replies.';
+    providerNotice.classList.toggle('needs-setup', !providerAvailable || (profiles.length > 0 && !availableProfiles.length));
   }
   updateVoiceProfileActions();
 }
@@ -5971,7 +6037,7 @@ async function previewSelectedVoice() {
       voiceId: profile.voiceId,
       modelId: profile.provider === 'qwentts'
         ? 'gwen-tts-0.6B-vi-8bit'
-        : profile.provider === 'elevenlabs' ? 'eleven_turbo_v2_5' : 'omnivoice',
+        : 'omnivoice',
       speed: App.voice.speed || 1.05,
     });
     VoiceProfileState.previewUrl = URL.createObjectURL(blob);
@@ -6003,7 +6069,7 @@ async function saveSelectedVoice() {
       languageCode: 'vi',
       speed: App.voice.speed,
     });
-    saveVoiceSettings({ provider: profile.provider, elevenLabsVoiceId: profile.voiceId });
+    saveVoiceSettings({ provider: profile.provider, voiceId: profile.voiceId });
     if ($('profile-voice-provider')) $('profile-voice-provider').value = profile.provider;
     if (status) status.textContent = `${profile.name} is saved and active for live replies.`;
     renderQuickVoiceOptions(profile.provider);
@@ -6021,9 +6087,10 @@ async function loadVoiceProfiles(provider = $('profile-voice-provider')?.value |
     const payload = await window.RuntimeApi.get('/api/voice/profiles');
     const profiles = payload.profiles || [];
     VoiceProfileState.profiles = profiles;
+    VoiceProfileState.providers = payload.providers || {};
     renderQuickVoiceOptions(App.voice.provider || 'qwentts');
     const providerProfiles = profiles.filter(profile => profile.provider === provider);
-    const requestedId = preferredVoiceId || (App.voice.provider === provider ? App.voice.elevenLabsVoiceId : '');
+    const requestedId = preferredVoiceId || (App.voice.provider === provider ? App.voice.voiceId : '');
     const selection = providerProfiles.find(profile => profile.voiceId === requestedId) || providerProfiles[0] || null;
     VoiceProfileState.selected = selection;
     VoiceProfileState.previewedKey = '';
@@ -6064,7 +6131,7 @@ function bindAiProfileControls() {
   });
 
   $('profile-voice-provider')?.addEventListener('change', async event => {
-    const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(event.target.value) ? event.target.value : 'qwentts';
+    const provider = ['qwentts', 'omnivoice'].includes(event.target.value) ? event.target.value : 'qwentts';
     updateVoiceProfileBuilder(provider);
     stopVoiceProfilePreview();
     await loadVoiceProfiles(provider);
@@ -6121,7 +6188,7 @@ function bindAiProfileControls() {
     if (status) status.textContent = 'Analyzing audio and creating cloned voice…';
     try {
       const values = Object.fromEntries(new FormData(event.currentTarget));
-      const provider = App.voice.provider === 'omnivoice' ? 'omnivoice' : 'qwentts';
+      const provider = $('profile-voice-provider')?.value === 'omnivoice' ? 'omnivoice' : 'qwentts';
       if (provider === 'qwentts' && !String(values.transcript || '').trim()) {
         throw new Error('Qwen TTS requires the exact reference transcript for fast, accurate cloning.');
       }
@@ -6274,7 +6341,7 @@ function openUploadModalForTargetState(targetState = 'GAMEPLAY_IDLE') {
 // ── Event Listeners ───────────────────────────────────────
 function bindEventListeners() {
   // Topbar Modals
-  $('btn-modal-obs')?.addEventListener('click', () => window.navigateAppView?.('settings'));
+  $('btn-modal-obs')?.addEventListener('click', () => window.openStudioSettings?.('output'));
   $('close-modal-obs')?.addEventListener('click', () => closeModal('modal-obs'));
   $('cancel-modal-obs')?.addEventListener('click', () => closeModal('modal-obs'));
 
@@ -6291,15 +6358,32 @@ function bindEventListeners() {
       }));
     });
   });
-  $('save-modal-obs')?.addEventListener('click', () => {
-    localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify({
+  $('save-modal-obs')?.addEventListener('click', async () => {
+    const obsSettings = {
       host: $('cfg-obs-host')?.value || 'localhost',
-      port: $('cfg-obs-port')?.value || '4455',
+      port: Number($('cfg-obs-port')?.value || 4455),
       autoConnect: $('cfg-obs-autoconnect')?.checked || false,
-    }));
+    };
+    const restartIntervalMinutes = Number($('cfg-livetalking-restart-interval')?.value || 15);
+    localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify(obsSettings));
     const banner = $('obs-status-banner');
-    if (banner) banner.textContent = '● OBS settings saved';
-    addLog('OBS output settings saved.', 'ok');
+    const button = $('save-modal-obs');
+    if (button) button.disabled = true;
+    if (banner) banner.textContent = 'Connecting to OBS…';
+    try {
+      const [obsResult] = await Promise.all([
+        window.RuntimeApi.post('/api/settings/obs', obsSettings),
+        window.RuntimeApi.post('/api/settings/talking', { restartIntervalMinutes }),
+      ]);
+      if (banner) banner.textContent = obsResult.isConnected ? 'OBS connected' : 'OBS settings saved. Waiting for OBS.';
+      applyLiveTalkingMaintenanceState({ restartIntervalMinutes, state: 'SCHEDULED' });
+      addLog('OBS output settings saved.', 'ok');
+    } catch (error) {
+      if (banner) banner.textContent = `OBS connection failed: ${error.message}`;
+      addLog(`OBS output error: ${error.message}`, 'err');
+    } finally {
+      if (button) button.disabled = false;
+    }
   });
 
   // Video Mixer Controls
@@ -6487,12 +6571,6 @@ function bindEventListeners() {
     await startAvatarBatchTraining();
     updateAvatarCreateUI();
   });
-  $('avatar-page-random-toggle')?.addEventListener('change', event => {
-    event.target.checked = false;
-    AvatarSession.random = false;
-    saveAvatarSession().catch(err => addLog(`Could not save avatar session: ${err.message}`, 'warn'));
-  });
-
   // ── Step 1: Training Video Upload & Training Workflow ──────
   $('btn-upload-train-video')?.addEventListener('click', () => {
     $('input-train-video-file')?.click();
@@ -6533,12 +6611,8 @@ function bindEventListeners() {
     }
   });
 
-  $('lt-random-avatar-toggle')?.addEventListener('change', (event) => {
-    event.target.checked = false;
-    AvatarSession.random = false;
-  });
   $('btn-save-avatar-pool')?.addEventListener('click', () => {
-    saveAvatarSession().catch(err => addLog(`Could not save avatar session: ${err.message}`, 'warn'));
+    saveActiveAvatarSession().catch(err => addLog(`Could not save avatar session: ${err.message}`, 'warn'));
   });
 
   // ── LiveTalking Model Selection & Config ──────────────────
@@ -6824,22 +6898,6 @@ function bindEventListeners() {
     addLog(`🎙️ Changed LiveTalking voice provider: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
   });
 
-  $('lt-eleven-voice-select')?.addEventListener('change', (e) => {
-    updateLiveTalkingVoiceUI();
-    if (e.target.value !== 'custom') {
-      App.voice.elevenLabsVoiceId = e.target.value;
-      saveVoiceSettings({ elevenLabsVoiceId: e.target.value });
-    }
-  });
-
-  $('lt-eleven-custom-voice-id')?.addEventListener('input', (e) => {
-    const val = e.target.value.trim();
-    if (val) {
-      App.voice.elevenLabsVoiceId = val;
-      saveVoiceSettings({ elevenLabsVoiceId: val });
-    }
-  });
-
   $('lt-voice-speed-slider')?.addEventListener('input', (e) => {
     const spd = parseInt(e.target.value, 10) / 100;
     LiveTalkingStudio.voiceSpeed = spd;
@@ -7036,15 +7094,14 @@ function bindEventListeners() {
   $('btn-modal-voice')?.addEventListener('click', () => {
     // Populate modal inputs from App.voice
     if ($('cfg-voice-provider')) $('cfg-voice-provider').value = App.voice.provider || 'qwentts';
-    if ($('cfg-voice-id')) $('cfg-voice-id').value = App.voice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL';
+    if ($('cfg-voice-id')) $('cfg-voice-id').value = App.voice.voiceId || 'qwen-default';
     if ($('cfg-voice-speed')) $('cfg-voice-speed').value = App.voice.speed || 1.0;
     if ($('val-voice-speed')) $('val-voice-speed').textContent = `${(App.voice.speed || 1.0).toFixed(2)}x`;
     if ($('cfg-persona-name')) $('cfg-persona-name').value = App.voice.personaName || 'Mimi';
     if ($('cfg-persona-prompt')) $('cfg-persona-prompt').value = App.voice.personaPrompt || '';
     
-    // Toggle API key visibility based on provider
     const apikeyGrp = $('group-voice-apikey');
-    if (apikeyGrp) apikeyGrp.style.display = (App.voice.provider === 'elevenlabs' || App.voice.provider === 'openai') ? 'block' : 'none';
+    if (apikeyGrp) apikeyGrp.style.display = 'none';
 
     window.navigateAppView?.('settings');
   });
@@ -7055,17 +7112,20 @@ function bindEventListeners() {
   $('cfg-voice-provider')?.addEventListener('change', (e) => {
     const val = e.target.value;
     const apikeyGrp = $('group-voice-apikey');
-    if (apikeyGrp) apikeyGrp.style.display = (val === 'elevenlabs' || val === 'openai') ? 'block' : 'none';
+    if (apikeyGrp) apikeyGrp.style.display = 'none';
+    if ($('cfg-voice-id') && !String($('cfg-voice-id').value || '').trim()) {
+      $('cfg-voice-id').value = val === 'omnivoice' ? 'voice_bright_storyteller' : 'qwen-default';
+    }
   });
 
   $('btn-reset-voice-id')?.addEventListener('click', () => {
-    if ($('cfg-voice-id')) $('cfg-voice-id').value = 'EXAVITQu4vr4xnSDxMaL';
+    if ($('cfg-voice-id')) $('cfg-voice-id').value = App.voice.provider === 'omnivoice' ? 'voice_bright_storyteller' : 'qwen-default';
   });
   $('btn-clear-voice-id')?.addEventListener('click', () => {
     if ($('cfg-voice-id')) $('cfg-voice-id').value = '';
   });
   $('btn-rst-voice-id')?.addEventListener('click', () => {
-    if ($('cfg-voice-id')) $('cfg-voice-id').value = 'EXAVITQu4vr4xnSDxMaL';
+    if ($('cfg-voice-id')) $('cfg-voice-id').value = App.voice.provider === 'omnivoice' ? 'voice_bright_storyteller' : 'qwen-default';
   });
 
   $('cfg-voice-speed')?.addEventListener('input', (e) => {
@@ -7105,21 +7165,21 @@ function bindEventListeners() {
     unlockAudio();
     const text = $('cfg-test-voice-text')?.value.trim() || idolPreviewLine();
     const provider = $('cfg-voice-provider')?.value || App.voice.provider;
-    const voiceId = $('cfg-voice-id')?.value.trim() || App.voice.elevenLabsVoiceId;
+    const voiceId = $('cfg-voice-id')?.value.trim() || App.voice.voiceId;
     const speed = parseFloat($('cfg-voice-speed')?.value || App.voice.speed || 1.0);
 
-    saveVoiceSettings({ provider, elevenLabsVoiceId: voiceId, speed });
+    saveVoiceSettings({ provider, voiceId: voiceId, speed });
     speakAI(text, 'happy');
   });
 
   $('save-modal-voice')?.addEventListener('click', () => {
     const provider = $('cfg-voice-provider')?.value || App.voice.provider;
-    const voiceId = $('cfg-voice-id')?.value.trim() || App.voice.elevenLabsVoiceId;
+    const voiceId = $('cfg-voice-id')?.value.trim() || App.voice.voiceId;
     const speed = parseFloat($('cfg-voice-speed')?.value || App.voice.speed || 1.0);
     const personaName = $('cfg-persona-name')?.value.trim() || App.voice.personaName;
     const personaPrompt = $('cfg-persona-prompt')?.value.trim() || App.voice.personaPrompt;
 
-    saveVoiceSettings({ provider, elevenLabsVoiceId: voiceId, speed, personaName, personaPrompt });
+    saveVoiceSettings({ provider, voiceId: voiceId, speed, personaName, personaPrompt });
 
     // Sync to quick panel
     if ($('quick-voice-provider')) $('quick-voice-provider').value = provider;
@@ -7166,7 +7226,7 @@ function bindEventListeners() {
     if (selectedVoiceId) {
       const input = $('quick-voice-id-input');
       if (input) input.value = selectedVoiceId;
-      saveVoiceSettings({ elevenLabsVoiceId: selectedVoiceId });
+      saveVoiceSettings({ voiceId: selectedVoiceId });
       await window.LiveTalkingApi.setVoice({
         provider: App.voice.provider,
         voiceId: selectedVoiceId,
@@ -7181,7 +7241,7 @@ function bindEventListeners() {
   $('quick-voice-id-input')?.addEventListener('change', async (e) => {
     const val = e.target.value.trim();
     if (!val) return;
-    saveVoiceSettings({ elevenLabsVoiceId: val });
+    saveVoiceSettings({ voiceId: val });
     await window.LiveTalkingApi.setVoice({
       provider: App.voice.provider,
       voiceId: val,
@@ -7198,7 +7258,7 @@ function bindEventListeners() {
   });
 
   $('btn-copy-voice-id')?.addEventListener('click', () => {
-    const vId = $('quick-voice-id-input')?.value || App.voice.elevenLabsVoiceId;
+    const vId = $('quick-voice-id-input')?.value || App.voice.voiceId;
     if (navigator.clipboard) {
       navigator.clipboard.writeText(vId);
       addLog(`📋 Copied Voice ID: ${vId}`, 'ok');
@@ -7265,11 +7325,11 @@ function bindEventListeners() {
   });
 
   $('quick-voice-provider')?.addEventListener('change', async (e) => {
-    const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(e.target.value) ? e.target.value : 'qwentts';
+    const provider = ['qwentts', 'omnivoice'].includes(e.target.value) ? e.target.value : 'qwentts';
     syncQuickVoiceIdVisibility(provider);
     renderQuickVoiceOptions(provider);
-    const voiceId = $('quick-saved-voice-list')?.value || $('quick-voice-id-input')?.value.trim() || App.voice.elevenLabsVoiceId;
-    saveVoiceSettings({ provider, elevenLabsVoiceId: voiceId });
+    const voiceId = $('quick-saved-voice-list')?.value || $('quick-voice-id-input')?.value.trim() || App.voice.voiceId;
+    saveVoiceSettings({ provider, voiceId: voiceId });
     await window.LiveTalkingApi.setVoice({
       provider,
       voiceId,
@@ -7372,7 +7432,24 @@ function bindEventListeners() {
       return;
     }
 
-    // 3. Trained neural avatar click
+    // 3. Remove one avatar state from this live session without deleting training data.
+    const removeLiveAvatarButton = e.target.closest('.btn-remove-live-avatar');
+    if (removeLiveAvatarButton) {
+      e.stopPropagation();
+      const avatarId = removeLiveAvatarButton.dataset.avatarId;
+      if (!avatarId) return;
+      LiveAvatarSession.excludedAvatarIds = [...new Set([...LiveAvatarSession.excludedAvatarIds, avatarId])];
+      void saveActiveAvatarSession()
+        .then(() => {
+          lastLibraryRenderSignature = '';
+          renderLibraryUI();
+          addLog(`Removed ${avatarId} from this live session.`, 'ok');
+        })
+        .catch(error => addLog(`Could not remove avatar state: ${error.message}`, 'err'));
+      return;
+    }
+
+    // 4. Trained neural avatar click
     const avatarCard = e.target.closest('.live-avatar-card');
     if (avatarCard) {
       const avatarId = avatarCard.dataset.avatarId;
@@ -7645,8 +7722,43 @@ function setupStudioShell() {
   // surface. Avatar creation remains available through the AI Profile flow.
   $('modal-avatar')?.remove();
 
-  const navigateAppView = (name = 'studio', updateHash = true) => {
-    if (!['studio', 'avatar', 'settings'].includes(name)) name = 'studio';
+  const setSettingsPane = (target = 'output') => {
+    const allowed = ['output', 'storage', 'director'];
+    const selected = allowed.includes(target) ? target : 'output';
+    document.querySelectorAll('.settings-section-tab').forEach(tab => {
+      const active = tab.dataset.settingsTarget === selected;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+    });
+    document.querySelectorAll('[data-settings-pane]').forEach(pane => {
+      const active = pane.dataset.settingsPane === selected;
+      pane.classList.toggle('active', active);
+      pane.toggleAttribute('hidden', !active);
+    });
+    if (selected === 'director') loadAiDirectorSettings().catch(error => {
+      if ($('ai-director-save-status')) $('ai-director-save-status').textContent = error.message;
+    });
+  };
+
+  document.querySelectorAll('.settings-section-tab').forEach(tab => {
+    tab.addEventListener('click', () => setSettingsPane(tab.dataset.settingsTarget));
+    tab.addEventListener('keydown', event => {
+      if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const tabs = [...document.querySelectorAll('.settings-section-tab')];
+      const current = tabs.indexOf(tab);
+      const next = event.key === 'Home' ? 0
+        : event.key === 'End' ? tabs.length - 1
+          : (current + (event.key === 'ArrowDown' ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[next]?.focus();
+      setSettingsPane(tabs[next]?.dataset.settingsTarget);
+    });
+  });
+  setSettingsPane('output');
+
+  const navigateAppView = (name = 'studio', updateHash = true, settingsPane = null) => {
+    if (!['studio', 'avatar', 'director', 'settings'].includes(name)) name = 'studio';
     document.querySelectorAll('.web-app-view').forEach(view => view.classList.toggle('active', view.dataset.view === name));
     document.querySelectorAll('.web-nav-item').forEach(item => item.classList.toggle('active', item.dataset.appView === name));
     const quickButton = $('btn-quick-settings');
@@ -7658,10 +7770,12 @@ function setupStudioShell() {
     }
     if (updateHash && location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
     if (name === 'avatar') refreshLiveTalkingAvatarList();
+    if (name === 'director') setupDirectorBrief();
     if (name === 'settings') {
+      if (settingsPane) setSettingsPane(settingsPane);
       loadProjectStorageConfig();
       loadPersistedSettings();
-      refreshLocalAiStatus();
+      loadAiDirectorSettings().catch(() => refreshLocalAiStatus());
     }
   };
   document.querySelectorAll('.web-nav-item').forEach(item => item.addEventListener('click', () => navigateAppView(item.dataset.appView)));
@@ -7681,7 +7795,7 @@ function setupStudioShell() {
       { boxShadow: '0 12px 34px rgba(0,0,0,.12)' },
     ], { duration: 900, easing: 'ease-out' });
   };
-  const openSettingsCenter = () => navigateAppView('settings');
+  const openSettingsCenter = (pane = 'output') => navigateAppView('settings', true, pane);
 
   $('nav-overview')?.addEventListener('click', () => focusPanel('.monitor-box', 'nav-overview'));
   $('nav-avatar-studio')?.addEventListener('click', () => { setActiveNav('nav-avatar-studio'); $('btn-modal-avatar')?.click(); });
@@ -7694,9 +7808,7 @@ function setupStudioShell() {
   $('btn-settings-top')?.addEventListener('click', () => openSettingsCenter('providers'));
   $('btn-open-library-hero')?.addEventListener('click', () => focusPanel('.library-panel', 'nav-asset-library'));
   $('btn-go-live-hero')?.addEventListener('click', () => {
-    if (App.isPaused) $('btn-pause')?.click();
-    focusPanel('.monitor-box', 'nav-live-session');
-    addLog('✦ Livestream workspace is ready.', 'ok');
+    openSettingsCenter('output');
   });
 
   const quickPanel = $('quick-settings-panel');
@@ -7734,14 +7846,14 @@ function setupStudioShell() {
   const quickSessionVoice = $('quick-session-voice');
   const quickSessionVoiceSpeed = $('quick-session-voice-speed');
   if (quickSessionVoice) {
-    quickSessionVoice.value = ['qwentts', 'elevenlabs', 'omnivoice'].includes(App.voice.provider) ? App.voice.provider : 'qwentts';
+    quickSessionVoice.value = ['qwentts', 'omnivoice'].includes(App.voice.provider) ? App.voice.provider : 'qwentts';
     quickSessionVoice.addEventListener('change', async event => {
-      const provider = ['qwentts', 'elevenlabs', 'omnivoice'].includes(event.target.value) ? event.target.value : 'qwentts';
+      const provider = ['qwentts', 'omnivoice'].includes(event.target.value) ? event.target.value : 'qwentts';
       const providerProfiles = VoiceProfileState.profiles.filter(profile => profile.provider === provider);
-      const voiceId = providerProfiles.some(profile => profile.voiceId === App.voice.elevenLabsVoiceId)
-        ? App.voice.elevenLabsVoiceId
-        : providerProfiles[0]?.voiceId || App.voice.elevenLabsVoiceId;
-      saveVoiceSettings({ provider, elevenLabsVoiceId: voiceId });
+      const voiceId = providerProfiles.some(profile => profile.voiceId === App.voice.voiceId)
+        ? App.voice.voiceId
+        : providerProfiles[0]?.voiceId || App.voice.voiceId;
+      saveVoiceSettings({ provider, voiceId: voiceId });
       if ($('quick-voice-provider')) $('quick-voice-provider').value = provider;
       syncQuickVoiceIdVisibility(provider);
       renderQuickVoiceOptions(provider);
@@ -7799,6 +7911,22 @@ function setupStudioShell() {
   $('install-local-ai-model')?.addEventListener('click', () => {
     installLocalAiModel().catch(error => {
       if ($('local-ai-install-progress')) $('local-ai-install-progress').textContent = error.message;
+    });
+  });
+  $('ai-director-provider')?.addEventListener('change', event => setAiDirectorProviderUI(event.target.value));
+  $('refresh-ai-director-models')?.addEventListener('click', () => {
+    refreshChatGptModels().catch(error => {
+      if ($('ai-director-ttm-status')) $('ai-director-ttm-status').textContent = error.message;
+    });
+  });
+  $('save-ai-director')?.addEventListener('click', () => {
+    const button = $('save-ai-director');
+    if (button) button.disabled = true;
+    if ($('ai-director-save-status')) $('ai-director-save-status').textContent = 'Saving…';
+    saveAiDirectorSettings().catch(error => {
+      if ($('ai-director-save-status')) $('ai-director-save-status').textContent = error.message;
+    }).finally(() => {
+      if (button) button.disabled = false;
     });
   });
   $('local-ai-model-name')?.addEventListener('input', () => {
@@ -7878,7 +8006,7 @@ async function init() {
   await refreshLiveTalkingAvatarList().then(async avatars => {
     if (App.talkingEngine.provider !== 'livetalking') return;
     const savedActiveAvatar = localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) || LiveTalkingStudio.avatarId;
-    const selectedAvatar = AvatarSession.selected[0];
+    const selectedAvatar = LiveAvatarSession.activeAvatarId;
     const preferredAvatar = avatars.some(avatar => avatar.id === selectedAvatar)
       ? selectedAvatar
       : (avatars.some(avatar => avatar.id === savedActiveAvatar) ? savedActiveAvatar : avatars[0]?.id);
@@ -7886,8 +8014,8 @@ async function init() {
       addLog('No trained avatar is available yet.', 'hi');
       return;
     }
-    AvatarSession.selected = [preferredAvatar];
-    await saveAvatarSession();
+    LiveAvatarSession.activeAvatarId = preferredAvatar;
+    await saveActiveAvatarSession();
     await reconnectLiveTalkingAvatar(preferredAvatar);
   }).catch(err => addLog(`Live avatar auto-connect failed: ${err.message}`, 'hi'));
   if (startupStatus) startupStatus.textContent = 'Live workspace ready';

@@ -34,7 +34,8 @@ class MelASR(BaseASR):
     def run_step(self):
         ############################################## extract audio feature ##############################################
         # get a frame of audio
-        for _ in range(self.batch_size*2):
+        # Keep the ASR output count aligned with BaseAvatar.inference().
+        for _ in range(self.batch_size * self.audio_frames_per_video):
             audioframe = self.get_audio_frame()
             self.frames.append(audioframe.data)
             # put to output

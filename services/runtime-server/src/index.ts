@@ -49,7 +49,7 @@ const __dirname = path.dirname(__filename);
 
 import { GameAdapter, SlotSimulatorEngine } from '@idol/game-adapter';
 import { ChatManager, MockChatGenerator, SmartChatFilter } from '@idol/chat-adapter';
-import { ElevenLabsTTSAdapter, WebSpeechTTSAdapter } from '@idol/voice';
+import { WebSpeechTTSAdapter } from '@idol/voice';
 import { OpenAIDialogueProvider, OllamaDialogueProvider, MockDialogueProvider } from '@idol/dialogue-agent';
 import { MockTalkingProvider, LiveTalkingProvider, TalkingVideoPipeline, MuseTalkBatchPipeline, type VideoFrame } from '@idol/talking-head';
 import { RuntimeDatabase } from './persistence.js';
@@ -84,10 +84,13 @@ const StorageJsonSchema = z.object({
   data: z.unknown().default({}),
 }).strict();
 const AvatarSessionSchema = z.object({
-  avatarId: SafeIdSchema.optional(),
-  selected: z.array(SafeIdSchema).max(1).default([]),
-  random: z.boolean().default(false),
+  activeAvatarId: SafeIdSchema.nullable(),
+  excludedAvatarIds: z.array(SafeIdSchema).max(20).default([]),
 }).strict();
+const AvatarStateSchema = z.enum([
+  'normal', 'happy', 'laughing', 'grateful', 'surprised',
+  'excited', 'sad', 'angry', 'playful', 'focused',
+]);
 const AvatarRecordSchema = z.object({
   id: SafeIdSchema.optional(),
   avatarId: SafeIdSchema.optional(),
@@ -97,6 +100,11 @@ const AvatarRecordSchema = z.object({
   status: z.enum(['empty', 'uploading', 'training', 'ready', 'failed']).optional(),
   trainedAt: z.number().int().positive().optional(),
   thumbnailUrl: z.string().max(2048).optional(),
+  profileId: SafeIdSchema.optional(),
+  avatarState: AvatarStateSchema.optional(),
+  frameCount: z.number().int().nonnegative().optional(),
+  sourceFps: z.number().positive().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
 }).strict().refine((value) => Boolean(value.id || value.avatarId), { message: 'Avatar ID is required' });
 const RawChatSchema = z.object({
   type: z.literal('chat.message').optional(),
@@ -128,6 +136,7 @@ const TalkingSettingsSchema = z.object({
   provider: z.enum(['livetalking', 'mock', 'off']).optional(),
   endpoint: z.string().url().max(500).optional(),
   model: z.enum(['musetalk', 'wav2lip', 'wav2lip_gan']).optional(),
+  restartIntervalMinutes: z.union([z.literal(5), z.literal(10), z.literal(15), z.literal(20)]).optional(),
 }).strict();
 const AvatarSettingsSchema = z.object({
   preset: SafeIdSchema.optional(),
@@ -157,7 +166,7 @@ const SpeechSynthesisSchema = z.object({
   text: z.string().trim().min(1).max(1000),
   emotion: z.enum(['neutral', 'happy', 'excited', 'surprised', 'sad', 'angry', 'playful', 'focused', 'grateful', 'laughing']).default('happy'),
   speed: z.number().min(0.5).max(2).default(1),
-  provider: z.enum(['qwentts', 'elevenlabs', 'openai', 'omnivoice']),
+  provider: z.enum(['qwentts', 'omnivoice']),
   voiceId: z.string().trim().min(1).max(120).optional(),
   modelId: z.string().trim().min(1).max(120).optional(),
 }).strict();
@@ -200,7 +209,7 @@ const AvatarBatchSchema = z.object({
   });
 });
 const VoiceSettingsSchema = z.object({
-  provider: z.enum(['qwentts', 'elevenlabs', 'omnivoice']).optional(),
+  provider: z.enum(['qwentts', 'omnivoice']).optional(),
   voiceId: z.string().trim().min(1).max(120).optional(),
   speed: z.number().min(0.5).max(2).optional(),
   pitch: z.number().min(0.5).max(2).optional(),
@@ -223,8 +232,17 @@ const PersonaSettingsSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   personality: z.string().trim().max(1000).optional(),
   systemPrompt: z.string().trim().min(1).max(4000).optional(),
-  llmProvider: z.enum(['mock', 'openai', 'gemini', 'ollama']).optional(),
+  llmProvider: z.enum(['mock', 'openai', 'gemini', 'ollama', 'ttm-chatgpt']).optional(),
   llmModel: OllamaModelSchema.optional(),
+}).strict();
+const AiDirectorConfigSchema = z.object({
+  provider: z.enum(['ollama', 'ttm-chatgpt']),
+  model: OllamaModelSchema,
+  apiKey: z.string().trim().max(500).optional(),
+  clearApiKey: z.boolean().default(false),
+}).strict();
+const TtmModelsSchema = z.object({
+  apiKey: z.string().trim().max(500).optional(),
 }).strict();
 const VoiceDesignProfileSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -243,19 +261,6 @@ const VoiceCloneProfileSchema = z.object({
   filename: z.string().trim().max(160).optional(),
   provider: z.enum(['qwentts', 'omnivoice']).default('qwentts'),
 }).strict();
-const ELEVENLABS_VOICE_PROFILES = [
-  { id: 'EXAVITQu4vr4xnSDxMaL', voiceId: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah / Bella', description: 'Warm and expressive' },
-  { id: 'FGY2WhTYpPnrIDTdsKH5', voiceId: 'FGY2WhTYpPnrIDTdsKH5', name: 'Laura', description: 'Bright and energetic' },
-  { id: 'cgSgspJ2msm6clMCkdW9', voiceId: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', description: 'Playful and engaging' },
-  { id: 'Xb7hH8MSUJpSbSDYk0k2', voiceId: 'Xb7hH8MSUJpSbSDYk0k2', name: 'Alice', description: 'Idol and live host style' },
-  { id: 'pFZP5JQG7iQjIQuC4Bku', voiceId: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily', description: 'Clear, soft, and friendly' },
-  { id: '21m00Tcm4TlvDq8ikWAM', voiceId: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', description: 'Calm and warm' },
-  { id: 'AZnzlk1XvdvUeBnXmlld', voiceId: 'AZnzlk1XvdvUeBnXmlld', name: 'Domi', description: 'Energetic and bold' },
-  { id: 'MF3mGyEYCl7XYWbV9V6O', voiceId: 'MF3mGyEYCl7XYWbV9V6O', name: 'Elli', description: 'Young VTuber style' },
-  { id: 'ErXwobaYiN019PkySvjV', voiceId: 'ErXwobaYiN019PkySvjV', name: 'Antoni', description: 'Deep and expressive' },
-  { id: 'VR6AewLTigWG4xSOukaG', voiceId: 'VR6AewLTigWG4xSOukaG', name: 'Arnold', description: 'Strong and direct' },
-  { id: 'pNInz6obpgDQGcFmaJgB', voiceId: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', description: 'Excited and engaging' },
-] as const;
 const ObsSettingsSchema = z.object({
   host: z.string().trim().min(1).max(255).optional(),
   port: z.number().int().min(1).max(65535).optional(),
@@ -307,7 +312,7 @@ export class IdolRuntimeServer {
 
   private _settings = {
     voice: {
-      provider: 'qwentts' as 'webspeech' | 'qwentts' | 'elevenlabs' | 'openai' | 'omnivoice',
+      provider: 'qwentts' as 'qwentts' | 'omnivoice',
       apiKey: '',
       voiceId: 'qwen-default',
       speed: 1.05,
@@ -331,14 +336,15 @@ export class IdolRuntimeServer {
       name: 'Mimi',
       personality: 'Dễ thương, năng động, hài hước, thích tương tác và hay trêu người xem',
       systemPrompt: 'Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu. Không tự chuyển sang tiếng Anh.',
-      llmProvider: (process.env['NODE_ENV'] === 'test' ? 'mock' : 'ollama') as 'mock' | 'openai' | 'gemini' | 'ollama',
-      llmModel: process.env['OLLAMA_MODEL'] || 'qwen3.5:35b-64k',
-      llmApiKey: process.env['OPENAI_API_KEY'] || '',
+      llmProvider: (process.env['NODE_ENV'] === 'test' ? 'mock' : 'ollama') as 'mock' | 'openai' | 'gemini' | 'ollama' | 'ttm-chatgpt',
+      llmModel: process.env['OLLAMA_MODEL'] || 'qwen3:8b',
+      llmApiKey: process.env['TTM_API_KEY'] || process.env['OPENAI_API_KEY'] || '',
     },
     talkingEngine: {
       provider: 'livetalking' as 'livetalking' | 'mock' | 'off',
       endpoint: process.env['LIVETALKING_ENDPOINT'] || 'http://127.0.0.1:8011',
       model: 'musetalk' as 'musetalk' | 'wav2lip' | 'wav2lip_gan',
+      restartIntervalMinutes: 15 as 5 | 10 | 15 | 20,
     },
     obs: {
       host: 'localhost',
@@ -366,6 +372,10 @@ export class IdolRuntimeServer {
   private _localModelProcess: ReturnType<typeof spawn> | null = null;
   private _liveTalkingWorkerProcess: ReturnType<typeof spawn> | null = null;
   private _liveTalkingWorkerRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  private _liveTalkingMaintenanceTimer: ReturnType<typeof setTimeout> | null = null;
+  private _liveTalkingMaintenanceRunning = false;
+  private _liveTalkingMaintenancePending = false;
+  private _liveTalkingLastRecycleAt: number | null = null;
   private _liveTalkingWorker = {
     state: 'OFFLINE' as 'OFFLINE' | 'STARTING' | 'READY' | 'STOPPING' | 'ERROR',
     pid: null as number | null,
@@ -677,13 +687,18 @@ export class IdolRuntimeServer {
     return {
       voice: {
         ...voice,
-        apiKeyConfigured: this._settings.voice.provider === 'openai'
-          ? Boolean(this._settings.persona.llmApiKey)
-          : Boolean(this._settings.voice.apiKey),
+        apiKeyConfigured: Boolean(this._settings.voice.apiKey),
       },
       avatar: { ...this._settings.avatar },
       persona: { ...persona, apiKeyConfigured: Boolean(this._settings.persona.llmApiKey) },
       liveSession: { ...this._settings.liveSession },
+      liveAvatarMaintenance: {
+        restartIntervalMinutes: this._settings.talkingEngine.restartIntervalMinutes,
+        state: this._liveTalkingMaintenanceRunning
+          ? 'RESTARTING'
+          : (this._liveTalkingMaintenancePending ? 'WAITING_FOR_IDLE' : 'SCHEDULED'),
+        lastRestartAt: this._liveTalkingLastRecycleAt,
+      },
       realtimeStatus: {
         ready: this._liveTalkingWorker.state === 'READY',
         state: this._liveTalkingWorker.state,
@@ -823,7 +838,7 @@ export class IdolRuntimeServer {
   }
 
   private _omniSpeakEndpoint(): string {
-    return (process.env['OMNIVOICE_DESKTOP_ENDPOINT'] || 'http://127.0.0.1:8001').replace(/\/$/, '');
+    return (process.env['OMNIVOICE_DESKTOP_ENDPOINT'] || 'http://127.0.0.1:8003').replace(/\/$/, '');
   }
 
   private _qwenTtsEndpoint(): string {
@@ -929,7 +944,7 @@ export class IdolRuntimeServer {
       error: this._liveTalkingWorker.error || null,
       endpoint: this._settings.talkingEngine.endpoint,
       model: this._settings.talkingEngine.model,
-      trainingWorkers: Math.max(1, Math.min(4, parseInt(process.env['LIVETALKING_TRAIN_WORKERS'] || '2', 10) || 2)),
+      trainingWorkers: Math.max(1, Math.min(4, parseInt(process.env['LIVETALKING_TRAIN_WORKERS'] || '1', 10) || 1)),
       recentOutput: this._liveTalkingWorker.output.slice(-12),
       health,
     };
@@ -980,7 +995,7 @@ export class IdolRuntimeServer {
     const projectStorageRoot = path.resolve(this._projectStorageRoot);
     const workerModel = this._settings.talkingEngine.model === 'musetalk' ? 'musetalk' : 'wav2lip';
     const avatarAssetName = workerModel === 'musetalk' ? 'latents.pt' : 'coords.pkl';
-    const selectedAvatarId = this._db.getAvatarSession()?.selected[0];
+    const selectedAvatarId = this._db.getAvatarSession()?.activeAvatarId;
     const projectModelsRoot = path.join(this._projectDir(), 'models');
     const projectArtifactIds = fs.existsSync(projectModelsRoot)
       ? fs.readdirSync(projectModelsRoot, { withFileTypes: true })
@@ -1003,7 +1018,7 @@ export class IdolRuntimeServer {
       ? selectedAvatarId
       : availableAvatarIds[0];
     if (workerAvatarId && workerAvatarId !== selectedAvatarId) {
-      this._db.setAvatarSession([workerAvatarId], false);
+      this._db.setAvatarSession(workerAvatarId);
     }
     if (workerAvatarId && !fs.existsSync(path.join(workerAvatarsRoot, workerAvatarId, avatarAssetName))) {
       const projectAvatarDir = path.join(this._projectDir(), 'models', workerAvatarId);
@@ -1030,6 +1045,8 @@ export class IdolRuntimeServer {
         LIVETALKING_HOST: endpointUrl.hostname === 'localhost' ? '127.0.0.1' : endpointUrl.hostname,
         LIVETALKING_PORT: endpointUrl.port || (endpointUrl.protocol === 'https:' ? '443' : '80'),
         LIVETALKING_MODEL: workerModel,
+        LIVETALKING_TRAIN_WORKERS: process.env['LIVETALKING_TRAIN_WORKERS'] || '1',
+        AVATAR_TRAIN_RESOURCE_FRACTION: process.env['AVATAR_TRAIN_RESOURCE_FRACTION'] || '0.20',
         ...(workerAvatarId ? { LIVETALKING_AVATAR_ID: workerAvatarId } : {}),
         LIVETALKING_ALLOWED_MEDIA_ROOTS: allowedRoots(process.env['LIVETALKING_ALLOWED_MEDIA_ROOTS'], [
           path.join(workerRoot, 'data', 'tmp'),
@@ -1098,6 +1115,53 @@ export class IdolRuntimeServer {
     });
   }
 
+  private _scheduleLiveTalkingMaintenance(): void {
+    if (this._liveTalkingMaintenanceTimer) clearTimeout(this._liveTalkingMaintenanceTimer);
+    this._liveTalkingMaintenanceTimer = null;
+    if (!this._isRunning || this._settings.talkingEngine.provider !== 'livetalking') return;
+    this._liveTalkingMaintenanceTimer = setTimeout(() => {
+      this._liveTalkingMaintenanceTimer = null;
+      this._liveTalkingMaintenancePending = true;
+      this._broadcast({ type: 'LIVETALKING_MAINTENANCE_STATE', maintenance: this._publicSettings().liveAvatarMaintenance, timestamp: Date.now() });
+      void this._tryRunLiveTalkingMaintenance();
+    }, this._settings.talkingEngine.restartIntervalMinutes * 60_000);
+  }
+
+  private async _tryRunLiveTalkingMaintenance(): Promise<void> {
+    if (!this._liveTalkingMaintenancePending || this._liveTalkingMaintenanceRunning) return;
+    if (this._speechRuntime.state !== 'IDLE' || this._directorSpeechDrainRunning || this._director.state.isSpeaking) {
+      setTimeout(() => void this._tryRunLiveTalkingMaintenance(), 1_000);
+      return;
+    }
+    const workerProcess = this._liveTalkingWorkerProcess;
+    if (!workerProcess) {
+      this._liveTalkingMaintenancePending = false;
+      this._scheduleLiveTalkingMaintenance();
+      return;
+    }
+    this._liveTalkingMaintenancePending = false;
+    this._liveTalkingMaintenanceRunning = true;
+    this._liveTalkingWorker.state = 'STOPPING';
+    this._broadcast({ type: 'LIVETALKING_MAINTENANCE_STATE', maintenance: this._publicSettings().liveAvatarMaintenance, timestamp: Date.now() });
+    try {
+      await this._liveTalkingProvider.closeSession().catch(() => {});
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 10_000);
+        workerProcess.once('exit', () => { clearTimeout(timer); resolve(); });
+        workerProcess.kill('SIGTERM');
+      });
+      await this._startLiveTalkingWorker();
+      this._liveTalkingLastRecycleAt = Date.now();
+    } catch (error) {
+      this._addLog('error', `Scheduled Live Avatar restart failed: ${error instanceof Error ? error.message : String(error)}`);
+      this._scheduleLiveTalkingWorkerRestart();
+    } finally {
+      this._liveTalkingMaintenanceRunning = false;
+      this._scheduleLiveTalkingMaintenance();
+      this._broadcast({ type: 'LIVETALKING_MAINTENANCE_STATE', maintenance: this._publicSettings().liveAvatarMaintenance, timestamp: Date.now() });
+    }
+  }
+
   private async _stopLiveTalkingWorker(): Promise<Record<string, unknown>> {
     const workerProcess = this._liveTalkingWorkerProcess;
     if (!workerProcess) {
@@ -1164,16 +1228,28 @@ export class IdolRuntimeServer {
     const obs = this._db.getSetting<Record<string, unknown>>('obs');
     if (voice) this._settings.voice = { ...this._settings.voice, ...voice, apiKey: this._settings.voice.apiKey } as typeof this._settings.voice;
     if (avatar) this._settings.avatar = { ...this._settings.avatar, ...avatar } as typeof this._settings.avatar;
-    if (persona) this._settings.persona = { ...this._settings.persona, ...persona, llmApiKey: this._settings.persona.llmApiKey } as typeof this._settings.persona;
+    if (persona) this._settings.persona = { ...this._settings.persona, ...persona } as typeof this._settings.persona;
     if (liveSession) this._settings.liveSession = { ...this._settings.liveSession, ...liveSession } as typeof this._settings.liveSession;
     if (talkingEngine) this._settings.talkingEngine = { ...this._settings.talkingEngine, ...talkingEngine } as typeof this._settings.talkingEngine;
+    if (![5, 10, 15, 20].includes(this._settings.talkingEngine.restartIntervalMinutes)) {
+      this._settings.talkingEngine.restartIntervalMinutes = 15;
+    }
     if (obs) this._settings.obs = { ...this._settings.obs, ...obs, password: this._settings.obs.password } as typeof this._settings.obs;
+
+    const directorDefaultsVersion = Number(this._db.getSetting<number>('directorDefaultsVersion') || 0);
+    if (directorDefaultsVersion < 1) {
+      if (this._settings.persona.llmModel === 'qwen3.5:35b-64k' || !this._settings.persona.llmModel) {
+        this._settings.persona.llmModel = 'qwen3:8b';
+        const { llmApiKey: _secret, ...persistedPersona } = this._settings.persona;
+        this._db.setSetting('persona', persistedPersona);
+      }
+      this._db.setSetting('directorDefaultsVersion', 1);
+    }
 
     const voiceDefaultsVersion = Number(this._db.getSetting<number>('voiceDefaultsVersion') || 0);
     const supportedVoiceProvider = this._settings.voice.provider === 'qwentts'
-      || this._settings.voice.provider === 'elevenlabs'
       || this._settings.voice.provider === 'omnivoice';
-    if (voiceDefaultsVersion < 3 || !supportedVoiceProvider) {
+    if (voiceDefaultsVersion < 4 || !supportedVoiceProvider) {
       this._settings.voice = {
         ...this._settings.voice,
         provider: 'qwentts',
@@ -1183,7 +1259,7 @@ export class IdolRuntimeServer {
       };
       const { apiKey: _secret, ...persistedVoice } = this._settings.voice;
       this._db.setSetting('voice', persistedVoice);
-      this._db.setSetting('voiceDefaultsVersion', 3);
+      this._db.setSetting('voiceDefaultsVersion', 4);
     }
   }
 
@@ -1193,7 +1269,7 @@ export class IdolRuntimeServer {
 
   private _readAvatarManifest(): any[] {
     const stored = this._db.listAvatars();
-    if (stored.length) return stored;
+    if (stored.length) return this._normalizeAvatarRecords(stored, true);
     try {
       const file = this._avatarManifestPath();
       const legacy = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
@@ -1207,6 +1283,35 @@ export class IdolRuntimeServer {
       const id = String(avatar?.id || avatar?.avatarId || '');
       if (id) this._db.upsertAvatar(id, { ...avatar, id, avatarId: id });
     }
+  }
+
+  private _normalizeAvatarRecords(records: any[], persist = false): any[] {
+    const states = ['normal', 'happy', 'laughing', 'grateful', 'surprised', 'excited', 'sad', 'angry', 'playful', 'focused'];
+    const idOf = (avatar: any) => String(avatar?.id || avatar?.avatarId || '');
+    const batchParts = (id: string) => {
+      const match = id.match(/^(.*)_([0-9]{2})$/);
+      return match ? { base: match[1]!, position: Number(match[2]) } : null;
+    };
+    const groups = new Map<string, any[]>();
+    for (const avatar of records) {
+      const parts = batchParts(idOf(avatar));
+      if (!parts) continue;
+      groups.set(parts.base, [...(groups.get(parts.base) || []), avatar]);
+    }
+    return records.map((avatar) => {
+      const id = idOf(avatar);
+      if (!id) return avatar;
+      const parts = batchParts(id);
+      const siblings = parts ? (groups.get(parts.base) || []) : [];
+      const profileId = String(avatar.profileId || (parts && siblings.length > 1 ? parts.base : id));
+      const requestedState = String(avatar.avatarState || '').toLowerCase();
+      const avatarState = AvatarStateSchema.safeParse(requestedState).success
+        ? requestedState
+        : (parts && siblings.length > 1 ? states[Math.max(0, parts.position - 1)] || 'normal' : 'normal');
+      const normalized = { ...avatar, id, avatarId: id, profileId, avatarState };
+      if (persist && (avatar.profileId !== profileId || avatar.avatarState !== avatarState)) this._db.upsertAvatar(id, normalized);
+      return normalized;
+    });
   }
 
   get talkingPipeline(): TalkingVideoPipeline {
@@ -1264,6 +1369,7 @@ export class IdolRuntimeServer {
         this._addLog('info', `Idol Runtime Server listening at http://${this._config.host}:${this._config.port}`);
         this._startMainLoop();
         this._autoStartLiveTalkingWorker();
+        this._scheduleLiveTalkingMaintenance();
         if (this._config.enableSimulation) {
           this._startSimulationLoop();
         }
@@ -1280,6 +1386,10 @@ export class IdolRuntimeServer {
     if (this._liveTalkingWorkerRestartTimer) {
       clearTimeout(this._liveTalkingWorkerRestartTimer);
       this._liveTalkingWorkerRestartTimer = null;
+    }
+    if (this._liveTalkingMaintenanceTimer) {
+      clearTimeout(this._liveTalkingMaintenanceTimer);
+      this._liveTalkingMaintenanceTimer = null;
     }
     if (this._tickTimer) clearInterval(this._tickTimer);
     if (this._simTimer) clearInterval(this._simTimer);
@@ -1536,6 +1646,17 @@ export class IdolRuntimeServer {
     this._addLog('info', `Speech ${commandId}: dialogue=${dialogueProvider}, voice=${this._settings.voice.provider}`);
     await this._liveTalkingProvider.interrupt().catch(() => {});
     if (runId !== this._speechRun) return;
+    const selectedAvatarState = this._resolveAvatarState(command);
+    const avatarStateSwitch = selectedAvatarState && this._liveTalkingProvider.sessionId
+      ? this._liveTalkingProvider.switchAvatarState(
+        selectedAvatarState.avatarId,
+        selectedAvatarState.state,
+        this._liveTalkingProvider.sessionId,
+      ).catch((error) => {
+        this._addLog('warn', `Avatar state unavailable; keeping current state (${error instanceof Error ? error.message : String(error)})`);
+        return null;
+      })
+      : Promise.resolve(null);
 
     try {
       let uploadedAudio: { bytes: Uint8Array; mediaType: string; sessionId: string } | null = null;
@@ -1546,13 +1667,14 @@ export class IdolRuntimeServer {
         await this._waitForSpeechPlaybackBoundary(commandId, runId);
       };
       const uploadAudio = async (bytes: Uint8Array, mediaType: string): Promise<void> => {
+        await avatarStateSwitch;
         await waitForPlaybackBoundary();
         if (runId !== this._speechRun) return;
         const sessionId = await this._liveTalkingProvider.sendAudio(bytes, null, mediaType);
         uploadedAudio = { bytes, mediaType, sessionId };
       };
-      if (this._settings.voice.provider !== 'webspeech') {
-        const provider = this._settings.voice.provider as 'qwentts' | 'elevenlabs' | 'openai' | 'omnivoice';
+      {
+        const provider = this._settings.voice.provider;
         try {
           let audio = await this._synthesizeProviderAudio({
             commandId,
@@ -1563,7 +1685,7 @@ export class IdolRuntimeServer {
             voiceId: this._settings.voice.voiceId || 'nova',
             modelId: provider === 'qwentts'
               ? 'gwen-tts-0.6B-vi-8bit'
-              : provider === 'elevenlabs' ? 'eleven_turbo_v2_5' : (provider === 'omnivoice' ? 'omnivoice' : 'tts-1'),
+              : 'omnivoice',
           });
           const generatedDurationMs = audio.durationMs;
           audio = await this._fitSpeechAudioDuration(audio, command.durationMs);
@@ -1574,7 +1696,6 @@ export class IdolRuntimeServer {
           const audioBytes = Uint8Array.from(Buffer.from(audio.audioBase64, 'base64'));
           await uploadAudio(audioBytes, audio.mediaType);
         } catch (error) {
-          if (!['qwentts', 'omnivoice'].includes(provider)) throw error;
           const primaryReason = error instanceof Error ? error.message : String(error);
           if (provider === 'qwentts') {
             try {
@@ -1609,18 +1730,6 @@ export class IdolRuntimeServer {
           const systemAudio = await this._synthesizeSystemAudio(command.text, command.speed);
           await uploadAudio(systemAudio.bytes, systemAudio.mediaType);
         }
-      } else {
-        await waitForPlaybackBoundary();
-        if (runId !== this._speechRun) return;
-        await this._liveTalkingProvider.startSpeaking(command.text, {
-          text: command.text,
-          emotion: ['happy', 'excited', 'surprised', 'neutral', 'grateful'].includes(command.emotion)
-            ? command.emotion as 'happy' | 'excited' | 'surprised' | 'neutral' | 'grateful'
-            : 'neutral',
-          speed: command.speed,
-          voice: process.env['LIVETALKING_TTS_VOICE'] || 'vi-VN-HoaiMyNeural',
-          ...(command.durationMs ? { durationMs: command.durationMs } : {}),
-        });
       }
 
       await this._waitForLiveTalkingSpeech(runId, command, uploadedAudio);
@@ -1632,6 +1741,48 @@ export class IdolRuntimeServer {
       this._setSpeechRuntime({ state: 'ERROR', error: message });
       this._addLog('error', `Speech ${commandId} failed: ${message}`);
     }
+  }
+
+  private _resolveAvatarState(command: z.infer<typeof SpeechCommandSchema>): { avatarId: string; state: z.infer<typeof AvatarStateSchema> } | null {
+    const emotionState: Record<string, z.infer<typeof AvatarStateSchema>> = {
+      neutral: 'normal',
+      happy: 'happy',
+      excited: 'excited',
+      surprised: 'surprised',
+      sad: 'sad',
+      angry: 'angry',
+      playful: 'playful',
+      focused: 'focused',
+      grateful: 'grateful',
+      laughing: 'laughing',
+    };
+    const session = this._db.getAvatarSession();
+    const sessionAvatarId = command.avatarId || session?.activeAvatarId || '';
+    if (!sessionAvatarId) return null;
+    const requestedState = emotionState[command.emotion] || 'normal';
+    const excluded = new Set(session?.excludedAvatarIds || []);
+    const recordsById = new Map<string, any>();
+    for (const record of [...this._readProjectAvatarArtifacts(), ...this._db.listAvatars()]) {
+      const id = String(record?.id || record?.avatarId || '');
+      if (id) recordsById.set(id, record);
+    }
+    const records = this._normalizeAvatarRecords([...recordsById.values()]);
+    const active = records.find((record) => String(record.id || record.avatarId) === sessionAvatarId);
+    if (!active) return excluded.has(sessionAvatarId) ? null : { avatarId: sessionAvatarId, state: requestedState };
+    const profileId = String(active.profileId || sessionAvatarId);
+    const available = records.filter((record) => {
+      const id = String(record.id || record.avatarId || '');
+      return id && String(record.profileId || id) === profileId && !excluded.has(id);
+    });
+    const selected = available.find((record) => record.avatarState === requestedState)
+      || available.find((record) => record.avatarState === 'normal')
+      || available.find((record) => String(record.id || record.avatarId) === sessionAvatarId)
+      || available[0];
+    if (!selected) return null;
+    return {
+      avatarId: String(selected.id || selected.avatarId),
+      state: AvatarStateSchema.parse(selected.avatarState || 'normal'),
+    };
   }
 
   private async _waitForSpeechPlaybackBoundary(commandId: string, runId: number): Promise<void> {
@@ -2027,15 +2178,7 @@ export class IdolRuntimeServer {
     const { apiKey: _secret, ...persistedVoice } = this._settings.voice;
     this._db.setSetting('voice', persistedVoice);
 
-    if (this._settings.voice.provider === 'elevenlabs' && this._settings.voice.apiKey) {
-      this._voiceService.setAdapter(new ElevenLabsTTSAdapter({
-        apiKey: this._settings.voice.apiKey,
-        voiceId: this._settings.voice.voiceId || 'EXAVITQu4vr4xnSDxMaL',
-        languageCode: this._settings.voice.languageCode || 'vi',
-      }));
-    } else {
-      this._voiceService.setAdapter(new WebSpeechTTSAdapter());
-    }
+    this._voiceService.setAdapter(new WebSpeechTTSAdapter());
 
     this._addLog('info', `Voice provider updated: ${this._settings.voice.provider}`);
     this._broadcast({ type: 'SETTINGS_UPDATED', settings: this._publicSettings() });
@@ -2101,6 +2244,18 @@ export class IdolRuntimeServer {
   }
 
   private _configureDialogueProvider(): void {
+    if (this._settings.persona.llmProvider === 'ttm-chatgpt' && this._settings.persona.llmApiKey) {
+      this._dialogueAgent.setProviders([
+        new OpenAIDialogueProvider({
+          apiKey: this._settings.persona.llmApiKey,
+          baseUrl: this._ttmApiBaseUrl(),
+          model: this._settings.persona.llmModel || 'chat-latest',
+          providerName: 'ttm-chatgpt',
+        }),
+        new MockDialogueProvider(),
+      ]);
+      return;
+    }
     if (this._settings.persona.llmProvider === 'openai' && this._settings.persona.llmApiKey) {
       this._dialogueAgent.setProviders([
         new OpenAIDialogueProvider({ apiKey: this._settings.persona.llmApiKey }),
@@ -2119,6 +2274,30 @@ export class IdolRuntimeServer {
       return;
     }
     this._dialogueAgent.setProviders([new MockDialogueProvider()]);
+  }
+
+  private _ttmApiBaseUrl(): string {
+    return (process.env['TTM_API_BASE_URL'] || 'https://ttmapi.site/v1').replace(/\/+$/, '');
+  }
+
+  private async _fetchTtmModels(apiKey: string): Promise<string[]> {
+    if (!apiKey) throw new Error('TTM API key is required');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch(`${this._ttmApiBaseUrl()}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: controller.signal,
+      });
+      const payload = await response.json().catch(() => ({})) as any;
+      if (!response.ok) throw new Error(payload.error?.message || payload.message || `TTM API HTTP ${response.status}`);
+      const models = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload.models) ? payload.models : []);
+      return [...new Set(models
+        .map((item: any) => String(typeof item === 'string' ? item : item?.id || '').trim())
+        .filter((id: string) => OllamaModelSchema.safeParse(id).success))].slice(0, 200) as string[];
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async _updateObsSettings(newSettings: Partial<typeof this._settings.obs>): Promise<void> {
@@ -2165,8 +2344,9 @@ export class IdolRuntimeServer {
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    if (!completed?.audio_url) throw new Error('OmniVoice desktop speech job timed out');
-    const audioResponse = await fetch(new URL(completed.audio_url, `${this._omniSpeakEndpoint()}/`));
+    if (!completed || completed.status !== 'completed') throw new Error('OmniVoice desktop speech job timed out');
+    const audioUrl = completed.audio_url || `/api/jobs/${encodeURIComponent(jobId)}/audio?format=wav`;
+    const audioResponse = await fetch(new URL(audioUrl, `${this._omniSpeakEndpoint()}/`));
     if (!audioResponse.ok) throw new Error(`OmniVoice desktop audio HTTP ${audioResponse.status}`);
     const audio = Buffer.from(await audioResponse.arrayBuffer());
     return {
@@ -2210,31 +2390,8 @@ export class IdolRuntimeServer {
   }
 
   private async _synthesizeProviderAudio(input: z.infer<typeof SpeechSynthesisSchema>): Promise<{ audioBase64: string; mediaType: string; durationMs: number }> {
-    const request = {
-      type: 'voice.request' as const,
-      text: input.text,
-      emotion: input.emotion,
-      energy: 0.8,
-      speedMultiplier: input.speed,
-      interruptible: true,
-      requestId: input.commandId || `speech_${Date.now()}`,
-      timestamp: Date.now(),
-    };
-
     if (input.provider === 'qwentts') {
       return this._synthesizeQwenTtsAudio(input);
-    }
-
-    if (input.provider === 'elevenlabs') {
-      if (!this._settings.voice.apiKey) throw new Error('ElevenLabs is not configured on the runtime server');
-      const result = await new ElevenLabsTTSAdapter({
-        apiKey: this._settings.voice.apiKey,
-        voiceId: input.voiceId || this._settings.voice.voiceId,
-        modelId: input.modelId || 'eleven_turbo_v2_5',
-        languageCode: this._settings.voice.languageCode,
-      }).synthesize(request);
-      if (!result.audioBase64) throw new Error('ElevenLabs did not return audio');
-      return { audioBase64: result.audioBase64, mediaType: 'audio/mpeg', durationMs: result.durationMs };
     }
 
     if (input.provider === 'omnivoice') {
@@ -2283,35 +2440,7 @@ export class IdolRuntimeServer {
       };
     }
 
-    if (!this._settings.persona.llmApiKey) throw new Error('OpenAI is not configured on the runtime server');
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000);
-    const response = await fetch('https://api.openai.com/v1/audio/speech', {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Authorization': `Bearer ${this._settings.persona.llmApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: input.modelId || 'tts-1',
-        voice: input.voiceId || 'nova',
-        input: input.text,
-        speed: input.speed,
-        response_format: 'wav',
-      }),
-    }).finally(() => clearTimeout(timeout));
-    if (!response.ok) {
-      const details = await response.text().catch(() => '');
-      throw new Error(`OpenAI TTS failed with HTTP ${response.status}${details ? `: ${details.slice(0, 300)}` : ''}`);
-    }
-    const audio = Buffer.from(await response.arrayBuffer());
-    const wordCount = input.text.split(/\s+/).filter(Boolean).length;
-    return {
-      audioBase64: audio.toString('base64'),
-      mediaType: response.headers.get('content-type') || 'audio/wav',
-      durationMs: Math.max(1800, Math.round((wordCount / 3.2 / input.speed) * 1000)),
-    };
+    throw new Error(`Unsupported TTS provider: ${input.provider}`);
   }
 
   // ─────────────────────────────────────────────────────────
@@ -2610,6 +2739,9 @@ export class IdolRuntimeServer {
               thumbnailUrl: avatar.thumbnail_url
                 ? `/api/avatars/library/${encodeURIComponent(id)}/thumbnail`
                 : undefined,
+              frameCount: Number(avatar.frame_count || 0),
+              sourceFps: Number(avatar.source_fps || 25),
+              durationMs: Number(avatar.duration_ms || 0),
               source: 'worker',
             });
         }
@@ -2628,7 +2760,7 @@ export class IdolRuntimeServer {
           if (id && !merged.has(id)) merged.set(id, avatar);
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, avatars: [...merged.values()], workerAvailable }));
+        res.end(JSON.stringify({ success: true, avatars: this._normalizeAvatarRecords([...merged.values()]), workerAvailable }));
       };
       this._liveTalkingProvider.listTrainedAvatars()
         .then((workerAvatars) => respondWithLibrary(workerAvatars, true))
@@ -2709,9 +2841,9 @@ export class IdolRuntimeServer {
       this._readJsonBody(req, (body) => {
         const input = this._parseBody(AvatarSessionSchema, body, res);
         if (!input) return;
-        const activeAvatarId = input.avatarId || input.selected[0] || null;
-        const session = { avatarId: activeAvatarId, selected: activeAvatarId ? [activeAvatarId] : [], random: false, updatedAt: new Date().toISOString() };
-        this._db.setAvatarSession(session.selected, false);
+        const excludedAvatarIds = input.activeAvatarId ? input.excludedAvatarIds : [];
+        const session = { activeAvatarId: input.activeAvatarId, excludedAvatarIds, updatedAt: new Date().toISOString() };
+        this._db.setAvatarSession(session.activeAvatarId, session.excludedAvatarIds);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, session }));
       });
@@ -2723,7 +2855,7 @@ export class IdolRuntimeServer {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         success: true,
-        session: session ? { ...session, avatarId: session.selected[0] || null, random: false } : null,
+        session,
       }));
       return;
     }
@@ -2741,6 +2873,62 @@ export class IdolRuntimeServer {
         uptime: process.uptime(),
         timestamp: Date.now(),
       }));
+      return;
+    }
+
+    if (pathname === '/api/ai/director/status' && method === 'GET') {
+      const persona = this._settings.persona;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        provider: persona.llmProvider,
+        model: persona.llmModel,
+        apiKeyConfigured: Boolean(persona.llmApiKey),
+        baseUrl: persona.llmProvider === 'ttm-chatgpt' ? this._ttmApiBaseUrl() : undefined,
+      }));
+      return;
+    }
+
+    if (pathname === '/api/ai/director/models' && method === 'POST') {
+      this._readJsonBody(req, async (body) => {
+        const input = this._parseBody(TtmModelsSchema, body, res);
+        if (!input) return;
+        const apiKey = input.apiKey || this._settings.persona.llmApiKey;
+        try {
+          const models = await this._fetchTtmModels(apiKey);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, models, apiKeyConfigured: Boolean(apiKey) }));
+        } catch (error) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/ai/director/config' && method === 'POST') {
+      this._readJsonBody(req, (body) => {
+        const input = this._parseBody(AiDirectorConfigSchema, body, res);
+        if (!input) return;
+        const nextApiKey = input.clearApiKey ? '' : (input.apiKey || this._settings.persona.llmApiKey);
+        if (input.provider === 'ttm-chatgpt' && !nextApiKey) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'TTM API key is required for ChatGPT' }));
+          return;
+        }
+        this._settings.persona = {
+          ...this._settings.persona,
+          llmProvider: input.provider,
+          llmModel: input.model,
+          llmApiKey: nextApiKey,
+        };
+        this._db.setSetting('persona', this._settings.persona);
+        this._configureDialogueProvider();
+        this._addLog('info', `AI Director updated: ${input.provider}/${input.model}`);
+        this._broadcast({ type: 'SETTINGS_UPDATED', settings: this._publicSettings() });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, settings: this._publicSettings().persona }));
+      });
       return;
     }
 
@@ -2910,11 +3098,11 @@ export class IdolRuntimeServer {
         if (!offer) return;
         try {
           const requestedAvatarId = offer.avatarId || offer.avatar;
-          const currentAvatarId = this._db.getAvatarSession()?.selected[0] || null;
+          const currentAvatarId = this._db.getAvatarSession()?.activeAvatarId || null;
           const avatarId = requestedAvatarId || currentAvatarId || undefined;
           const answer = await this._liveTalkingProvider.createOffer(offer.sdp, offer.type, avatarId);
           if (requestedAvatarId && requestedAvatarId !== currentAvatarId) {
-            this._db.setAvatarSession([requestedAvatarId], false);
+            this._db.setAvatarSession(requestedAvatarId);
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, avatarId, ...answer }));
@@ -3289,6 +3477,8 @@ export class IdolRuntimeServer {
         this._settings.talkingEngine = { ...this._settings.talkingEngine, ...this._withoutUndefined(input) };
         this._db.setSetting('talkingEngine', this._settings.talkingEngine);
         if (input.model) this._liveTalkingProvider.setModel(input.model);
+        if (input.restartIntervalMinutes) this._scheduleLiveTalkingMaintenance();
+        this._broadcast({ type: 'SETTINGS_UPDATED', settings: this._publicSettings() });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, settings: this._settings.talkingEngine }));
       });
@@ -3356,16 +3546,14 @@ export class IdolRuntimeServer {
 
     // ── Voice Profile APIs ──
     if (url === '/api/voice/profiles' && method === 'GET') {
-      const elevenProfiles = ELEVENLABS_VOICE_PROFILES.map((profile) => ({
-        ...profile,
-        kind: 'preset',
-        provider: 'elevenlabs',
-        status: this._settings.voice.apiKey ? 'ready' : 'setup-required',
-        remote: 'elevenlabs',
-      }));
-      void this._qwenTtsJson('/api/voices').then((qwenProfiles) => {
-        const localProfiles = this._voiceProfiles();
-        const remoteProfiles = Array.isArray(qwenProfiles) ? qwenProfiles.map((profile: any) => ({
+      void Promise.allSettled([
+        this._qwenTtsJson('/api/voices'),
+        this._omniSpeakJson('/api/voices'),
+      ]).then(([qwenResult, omniResult]) => {
+        const storedProfiles = this._voiceProfiles()
+          .filter((profile) => profile['provider'] === 'qwentts' || profile['provider'] === 'omnivoice');
+        const qwenProfiles = qwenResult.status === 'fulfilled' && Array.isArray(qwenResult.value)
+          ? qwenResult.value.map((profile: any) => ({
           id: String(profile.id || profile.voice_id),
           voiceId: String(profile.voice_id || profile.id),
           name: String(profile.name || 'Qwen voice'),
@@ -3373,21 +3561,38 @@ export class IdolRuntimeServer {
           provider: 'qwentts',
           status: 'ready',
           remote: 'qwen-tts',
-        })) : [];
+          }))
+          : [];
+        const omniProfiles = omniResult.status === 'fulfilled' && Array.isArray(omniResult.value)
+          ? omniResult.value.map((profile: any) => ({
+            id: String(profile.id),
+            voiceId: String(profile.id),
+            name: String(profile.name || 'Omni Voice'),
+            kind: String(profile.kind || 'preset'),
+            provider: 'omnivoice',
+            status: 'ready',
+            transcript: profile.transcript || '',
+            description: profile.instruct || profile.metadata?.description || '',
+            remote: 'omni-speak',
+          }))
+          : [];
         const merged = [
-          ...remoteProfiles,
-          ...localProfiles.filter((profile) => !remoteProfiles.some((remote: any) => remote.id === profile['id'])),
-          ...elevenProfiles,
+          ...qwenProfiles,
+          ...omniProfiles,
+          ...storedProfiles.filter((profile) => ![...qwenProfiles, ...omniProfiles].some((remote: any) => remote.id === profile['id'])),
         ];
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, profiles: merged }));
-      }).catch(() => {
-        const profiles = this._voiceProfiles();
-        if (!profiles.some((profile) => profile['id'] === 'qwen-default')) {
-          profiles.unshift({ id: 'qwen-default', voiceId: 'qwen-default', name: 'Yến Nhi', kind: 'preset', provider: 'qwentts', status: 'offline' });
+        if (!merged.some((profile) => profile.provider === 'qwentts')) {
+          merged.unshift({ id: 'qwen-default', voiceId: 'qwen-default', name: 'Yến Nhi', kind: 'preset', provider: 'qwentts', status: 'offline', remote: 'qwen-tts' });
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, profiles: [...profiles, ...elevenProfiles] }));
+        res.end(JSON.stringify({
+          success: true,
+          profiles: merged,
+          providers: {
+            qwentts: { available: qwenResult.status === 'fulfilled' },
+            omnivoice: { available: omniResult.status === 'fulfilled', endpoint: this._omniSpeakEndpoint() },
+          },
+        }));
       });
       return;
     }

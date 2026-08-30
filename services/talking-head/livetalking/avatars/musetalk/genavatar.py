@@ -4,6 +4,7 @@ import json
 import os
 import pickle
 import shutil
+import time
 
 import cv2
 import numpy as np
@@ -12,7 +13,14 @@ from tqdm import tqdm
 
 from avatars.musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs
 from avatars.musetalk.utils.blending import get_image_prepare_material
-from avatars.musetalk.utils.utils import load_all_model
+from avatars.musetalk.models.vae import VAE
+from avatars.musetalk.model_resources import (
+    bounded_preprocess_size,
+    get_shared_vae,
+    release_accelerator_cache,
+    throttle_training,
+    vae_lock,
+)
 
 try:
     from utils.face_parsing import FaceParsing
@@ -28,6 +36,14 @@ def video2imgs(vid_path, save_path, ext='.png', cut_frame=10000000):
             break
         ret, frame = cap.read()
         if ret:
+            height, width = frame.shape[:2]
+            target_width, target_height = bounded_preprocess_size(width, height)
+            if (target_width, target_height) != (width, height):
+                frame = cv2.resize(
+                    frame,
+                    (target_width, target_height),
+                    interpolation=cv2.INTER_AREA,
+                )
             cv2.putText(frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
             cv2.imwrite(f"{save_path}/{count:08d}.png", frame)
             count += 1
@@ -106,6 +122,16 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
     if progress_callback: progress_callback(20)
 
     input_img_list = sorted(glob.glob(os.path.join(save_full_path, '*.[jpJP][pnPN]*[gG]')))
+    info_path = os.path.join(avatar_save_path, 'avator_info.json')
+    with open(info_path, "r", encoding="utf-8") as info_file:
+        avatar_info = json.load(info_file)
+    avatar_info.update({
+        "frame_count": len(input_img_list),
+        "duration_ms": round(len(input_img_list) / max(1.0, source_fps) * 1000),
+        "max_preprocess_resolution": "720p",
+    })
+    with open(info_path, "w", encoding="utf-8") as info_file:
+        json.dump(avatar_info, info_file)
     print("extracting landmarks...")
     def report_face_progress(processed, total):
         if progress_callback and total:
@@ -129,10 +155,12 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
-    vae_local, unet_local, pe_local = load_all_model(device=device)
-    # MPS is more reliable in fp32 during one-time avatar preprocessing.
-    vae_dtype = torch.float16 if device.type == "cuda" else torch.float32
-    vae_local.vae = vae_local.vae.to(device=device, dtype=vae_dtype)
+    vae_local = get_shared_vae()
+    owns_model = vae_local is None
+    if owns_model:
+        vae_local = VAE(model_path=os.path.join("models", "sd-vae"))
+        vae_dtype = torch.float16 if device.type == "cuda" else torch.float32
+        vae_local.vae = vae_local.vae.to(device=device, dtype=vae_dtype)
 
     if version == "v15":
         fp_local = FaceParsing(left_cheek_width=90, right_cheek_width=90)
@@ -150,7 +178,10 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
             coord_list[idx] = [x1, y1, x2, y2]
         crop_frame = frame[y1:y2, x1:x2]
         resized_crop_frame = cv2.resize(crop_frame, (256, 256), interpolation=cv2.INTER_LANCZOS4)
-        latents = vae_local.get_latents_for_unet(resized_crop_frame)
+        work_started = time.perf_counter()
+        with vae_lock():
+            latents = vae_local.get_latents_for_unet(resized_crop_frame)
+        throttle_training(work_started)
         input_latent_list.append(latents)
 
         if progress_callback:
@@ -182,6 +213,9 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
     torch.save(input_latent_list, os.path.join(latents_out_path))
 
     if progress_callback: progress_callback(100)
+    if owns_model:
+        del vae_local
+    release_accelerator_cache()
     print("Avatar 生成完成！")
 
 if __name__ == '__main__':

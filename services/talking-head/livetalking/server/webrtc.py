@@ -129,7 +129,10 @@ class PlayerStreamTrack(MediaStreamTrack):
         #         else:
         #             frame = await self._queue.get()
         #     else:
-        repeat_deadline = time.monotonic() + getattr(self._player, 'video_ptime', VIDEO_PTIME)
+        repeat_deadline = time.monotonic() + (
+            getattr(self._player, 'video_ptime', VIDEO_PTIME)
+            if self.kind == 'video' else AUDIO_PTIME
+        )
         while True:
             try:
                 frame, eventpoint = self._queue.get_nowait()
@@ -194,36 +197,47 @@ class HumanPlayer:
         self.__video: Optional[PlayerStreamTrack] = None
 
         self.__container = avatar_session
-        model_fps = max(1, int(getattr(avatar_session.opt, 'fps', 25)))
-        self.video_ptime = 1.0 / model_fps
-        self.audio_ptime = 1.0 / (model_fps * 2)
-        self.__max_video_buffer = max(8, min(12, int(getattr(avatar_session, 'batch_size', 4)) * 2))
-        self.__max_audio_buffer = self.__max_video_buffer * 2
+        model_fps = max(1.0, float(getattr(avatar_session.opt, 'fps', 25.0)))
+        output_fps = max(1.0, float(getattr(avatar_session.opt, 'output_fps', 25.0)))
+        self.video_ptime = 1.0 / output_fps
+        self.audio_ptime = AUDIO_PTIME
+        self.video_repetitions = max(1, int(round(output_fps / model_fps)))
+        self.audio_packets_per_video = max(1, int(round(self.video_ptime / self.audio_ptime)))
+        batch_size = int(getattr(avatar_session, 'batch_size', 4))
+        self.__max_video_buffer = max(int(round(output_fps)), batch_size * self.video_repetitions)
+        self.__max_audio_buffer = max(
+            int(round(1.0 / AUDIO_PTIME)),
+            int(round(self.__max_video_buffer * self.video_ptime / AUDIO_PTIME)),
+        )
         self.__audio = PlayerStreamTrack(self, kind="audio", max_queue_size=self.__max_audio_buffer)
         self.__video = PlayerStreamTrack(self, kind="video", max_queue_size=self.__max_video_buffer)
         if hasattr(self.__container, 'output'):
             self.__container.output._player = self
 
-    def push_video(self, frame):
+    def push_video(self, frame, preserve=False):
         from av import VideoFrame
-        new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
-        while self.__video._queue.full():
+        for _ in range(self.video_repetitions):
+            new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
+            if preserve:
+                self.__video._queue.put((new_frame, None))
+                continue
+            while self.__video._queue.full():
+                try:
+                    self.__video._queue.get_nowait()
+                    # Keep the independently queued audio clock aligned with
+                    # the stale output frame being discarded.
+                    for _ in range(self.audio_packets_per_video):
+                        try:
+                            self.__audio._queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    self.record_dropped_frame()
+                except queue.Empty:
+                    break
             try:
-                self.__video._queue.get_nowait()
-                # One model frame always owns two 20 ms audio frames. If stale
-                # video is discarded, discard its audio as the same A/V unit.
-                for _ in range(2):
-                    try:
-                        self.__audio._queue.get_nowait()
-                    except queue.Empty:
-                        break
+                self.__video._queue.put_nowait((new_frame, None))
+            except queue.Full:
                 self.record_dropped_frame()
-            except queue.Empty:
-                break
-        try:
-            self.__video._queue.put_nowait((new_frame, None))
-        except queue.Full:
-            self.record_dropped_frame()
 
     def push_audio(self, frame, eventpoint=None):
         from av import AudioFrame

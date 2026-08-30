@@ -675,17 +675,17 @@ async function runAudit() {
 
   console.log('\n▶ Auditing Phase 4: SQLite Persistence & Migrations...');
   const persistence = new RuntimeDatabase(':memory:');
-  persistence.setSetting('voice', { provider: 'webspeech', languageCode: 'vi' });
+  persistence.setSetting('voice', { provider: 'qwentts', languageCode: 'vi' });
   assert(persistence.getSetting<any>('voice')?.languageCode === 'vi', 'SQLite persists runtime settings without browser localStorage');
   persistence.setActiveProject('project_test', '/tmp/project-test');
   assert(persistence.getActiveProject()?.projectName === 'project_test', 'SQLite persists the active project and storage root');
   persistence.upsertAvatar('avatar_test', { id: 'avatar_test', status: 'ready' });
   assert(persistence.listAvatars<any>()[0]?.id === 'avatar_test', 'SQLite persists trained avatar records');
-  persistence.setAvatarSession(['avatar_test', 'avatar_ignored'], true);
+  persistence.setAvatarSession('avatar_test');
   const persistedSession = persistence.getAvatarSession();
   assert(
-    persistedSession?.selected.length === 1 && persistedSession.selected[0] === 'avatar_test' && persistedSession.random === false,
-    'SQLite enforces one active avatar per live session',
+    persistedSession?.activeAvatarId === 'avatar_test',
+    'SQLite persists one active avatar for the live session',
   );
   persistence.close();
 
@@ -711,7 +711,20 @@ async function runAudit() {
         && defaultSettings.voice.languageCode === 'vi',
       'Runtime defaults TTS to Qwen Vietnamese 0.6B',
     );
+    assert(defaultSettings.persona?.llmModel === 'qwen3:8b', 'AI Director defaults to the bounded Qwen 8B model');
     assert(defaultSettings.talkingEngine === undefined && defaultSettings.realtimeStatus !== undefined, 'Public settings hide core realtime implementation details');
+
+    const maintenanceConfigRes = await fetch('http://localhost:9876/api/settings/talking', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ restartIntervalMinutes: 10 }),
+    });
+    const maintenanceSettings = await fetch('http://localhost:9876/api/settings/all').then((response) => response.json()) as any;
+    assert(
+      maintenanceConfigRes.status === 200
+        && maintenanceSettings.liveAvatarMaintenance?.restartIntervalMinutes === 10,
+      'Avatar worker memory refresh accepts and persists a 5/10/15/20 minute interval',
+    );
 
     await fetch('http://localhost:9876/api/settings/persona', {
       method: 'POST',
@@ -744,10 +757,22 @@ async function runAudit() {
     const activeAvatarSessionRes = await fetch('http://localhost:9876/api/avatars/session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ avatarId: 'avatar_test', selected: ['avatar_test'], random: false }),
+      body: JSON.stringify({ activeAvatarId: 'avatar_test' }),
     });
     const activeAvatarSession = await activeAvatarSessionRes.json() as any;
-    assert(activeAvatarSession.session?.avatarId === 'avatar_test' && activeAvatarSession.session?.selected.length === 1, 'Avatar session stores exactly one active avatar');
+    assert(activeAvatarSession.session?.activeAvatarId === 'avatar_test', 'Avatar session stores exactly one active avatar');
+    const excludedAvatarSessionRes = await fetch('http://localhost:9876/api/avatars/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activeAvatarId: 'avatar_test', excludedAvatarIds: ['avatar_happy'] }),
+    });
+    const excludedAvatarSession = await excludedAvatarSessionRes.json() as any;
+    assert(
+      excludedAvatarSessionRes.status === 200
+        && excludedAvatarSession.session?.activeAvatarId === 'avatar_test'
+        && excludedAvatarSession.session?.excludedAvatarIds?.[0] === 'avatar_happy',
+      'Live session persists active avatar and per-state exclusions independently',
+    );
 
     const workerStatusRes = await fetch('http://localhost:9876/api/talking-head/livetalking/worker');
     const workerStatus = await workerStatusRes.json() as any;
@@ -833,7 +858,7 @@ async function runAudit() {
     });
     const sessionAfterFailedOffer = await fetch('http://localhost:9876/api/avatars/session').then((response) => response.json()) as any;
     assert(
-      failedOfferRes.status === 503 && sessionAfterFailedOffer.session?.avatarId === 'avatar_test',
+      failedOfferRes.status === 503 && sessionAfterFailedOffer.session?.activeAvatarId === 'avatar_test',
       'A failed avatar connection cannot replace the persisted active session',
     );
 
@@ -868,7 +893,7 @@ async function runAudit() {
     await fetch('http://localhost:9876/api/settings/voice', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: 'webspeech', voiceId: 'local', speed: 1 }),
+      body: JSON.stringify({ provider: 'qwentts', voiceId: 'qwen-default', speed: 1 }),
     });
 
     // Test the single runtime speech command path.
@@ -920,18 +945,42 @@ async function runAudit() {
     const settingsJson = await settingsRes.json() as any;
     assert(settingsJson.voice !== undefined && settingsJson.avatar !== undefined, 'REST /api/settings/all returns complete system settings');
 
+    const ttmConfigRes = await fetch('http://localhost:9876/api/ai/director/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'ttm-chatgpt', model: 'chat-latest', apiKey: 'ttm_test_secret' }),
+    });
+    const ttmConfig = await ttmConfigRes.json() as any;
+    const ttmStatus = await fetch('http://localhost:9876/api/ai/director/status').then((response) => response.json()) as any;
+    assert(
+      ttmConfigRes.status === 200
+        && ttmConfig.settings?.llmProvider === 'ttm-chatgpt'
+        && ttmConfig.settings?.llmApiKey === undefined
+        && ttmStatus.apiKeyConfigured === true
+        && ttmStatus.baseUrl === 'https://ttmapi.site/v1'
+        && JSON.stringify(ttmStatus).includes('ttm_test_secret') === false,
+      'ChatGPT TTM provider is configurable through ttmapi.site without exposing its API key',
+    );
+    await fetch('http://localhost:9876/api/ai/director/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'ollama', model: 'qwen3:8b', clearApiKey: true }),
+    });
+
     const voiceProfilesRes = await fetch('http://localhost:9876/api/voice/profiles');
     const voiceProfilesJson = await voiceProfilesRes.json() as any;
     const voiceProfileProviders = new Set((voiceProfilesJson.profiles || []).map((profile: any) => profile.provider));
     assert(
-      voiceProfileProviders.has('qwentts') && voiceProfileProviders.has('elevenlabs'),
-      'Voice catalog returns provider-specific Qwen and ElevenLabs profiles',
+      voiceProfileProviders.has('qwentts') && !voiceProfileProviders.has('elevenlabs'),
+      'Voice catalog returns Qwen profiles without the removed ElevenLabs provider',
     );
 
     const dashboardHtml = fs.readFileSync('./operator-dashboard/index.html', 'utf8');
     const dashboardScript = fs.readFileSync('./operator-dashboard/dashboard.js', 'utf8');
     const dashboardStyles = fs.readFileSync('./operator-dashboard/design-system.css', 'utf8');
     const webRtcReceiverScript = fs.readFileSync('./operator-dashboard/webrtc/receiver.js', 'utf8');
+    const nativeShellSource = fs.readFileSync('./src-tauri/src/lib.rs', 'utf8');
+    const qwenServerSource = fs.readFileSync('./services/qwen-tts/server.py', 'utf8');
     assert(
       dashboardHtml.includes('id="preview-selected-voice"')
         && dashboardHtml.includes('id="save-selected-voice"')
@@ -959,6 +1008,29 @@ async function runAudit() {
         && dashboardStyles.includes('.chat-input-form > :where(input, button)')
         && dashboardStyles.includes('border-radius: var(--ui-radius) !important;'),
       'Live chat input and Send button share one height and corner-radius token',
+    );
+    assert(
+      dashboardHtml.includes('data-settings-target="output"')
+        && dashboardHtml.includes('data-settings-target="storage"')
+        && dashboardHtml.includes('data-settings-target="director"')
+        && dashboardScript.includes("const openSettingsCenter = (pane = 'output')")
+        && dashboardStyles.includes('grid-template-columns: repeat(4, minmax(0, 1fr));'),
+      'Settings uses left-side tabs with one content pane and Live Library uses quarter-width desktop previews',
+    );
+    assert(
+      dashboardHtml.includes('id="btn-go-live-hero"')
+        && dashboardHtml.includes('OBS output')
+        && !dashboardHtml.includes('Continue with Google')
+        && !dashboardHtml.includes('Continue with Facebook')
+        && dashboardScript.includes("openSettingsCenter('output');"),
+      'Live output is OBS-only with no direct platform authentication controls',
+    );
+    assert(
+      qwenServerSource.includes('"model_loaded": engine.model is not None')
+        && !qwenServerSource.includes('engine.load()\n    uvicorn.run')
+        && nativeShellSource.includes('response.contains("\\\"model_loaded\\\"")')
+        && nativeShellSource.includes('terminate_qwen_port_owner()?;'),
+      'Native startup replaces legacy Qwen port owners and keeps the TTS model lazy-loaded',
     );
     assert(
       webRtcReceiverScript.includes('needsServerProbe()')
@@ -1020,7 +1092,7 @@ async function runAudit() {
     const avatarDeleteRes = await fetch('http://localhost:9876/api/avatars/library/avatar_test', { method: 'DELETE' });
     const sessionAfterAvatarDelete = await fetch('http://localhost:9876/api/avatars/session').then((response) => response.json()) as any;
     assert(
-      avatarDeleteRes.status === 200 && sessionAfterAvatarDelete.session?.selected?.length === 0,
+      avatarDeleteRes.status === 200 && sessionAfterAvatarDelete.session?.activeAvatarId === null,
       'Deleting the active avatar clears its persisted live session',
     );
 
@@ -1105,7 +1177,7 @@ async function runAudit() {
     await fetch('http://localhost:9876/api/avatars/session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ avatarId: deleteTestAvatar, selected: [deleteTestAvatar], random: false }),
+      body: JSON.stringify({ activeAvatarId: deleteTestAvatar }),
     });
     const projectOnlyDeleteRes = await fetch(`http://localhost:9876/api/avatars/library/${deleteTestAvatar}`, { method: 'DELETE' });
     const repeatedDeleteRes = await fetch(`http://localhost:9876/api/avatars/library/${deleteTestAvatar}`, { method: 'DELETE' });
@@ -1117,7 +1189,7 @@ async function runAudit() {
         && !deletedLibrary.avatars?.some((avatar: any) => avatar.id === deleteTestAvatar)
         && !fs.existsSync(path.join(deleteTestProject, 'models', deleteTestAvatar))
         && !fs.existsSync(path.join(deleteTestProject, 'avatars', 'source', deleteTestAvatar))
-        && deletedSession.session?.selected?.length === 0,
+        && deletedSession.session?.activeAvatarId === null,
       'Avatar deletion removes project artifacts, SQLite state, and remains idempotent',
     );
     const staleAvatarId = 'avatar_stale_sqlite_only';
@@ -1143,7 +1215,7 @@ async function runAudit() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider: 'openai' }),
     });
-    assert(rejectedLegacyVoiceRes.status === 400, 'REST voice settings accept only Qwen TTS, ElevenLabs, and OmniVoice');
+    assert(rejectedLegacyVoiceRes.status === 400, 'REST voice settings accept only Qwen TTS and Omni Voice');
 
     const qwenVoiceSetRes = await fetch('http://localhost:9876/api/settings/voice', {
       method: 'POST',
@@ -1156,10 +1228,10 @@ async function runAudit() {
     const voiceSetRes = await fetch('http://localhost:9876/api/settings/voice', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: 'elevenlabs', voiceId: 'EXAVITQu4vr4xnSDxMaL', speed: 1.05 }),
+      body: JSON.stringify({ provider: 'omnivoice', voiceId: 'voice_bright_storyteller', speed: 1.05 }),
     });
     const voiceSetJson = await voiceSetRes.json() as any;
-    assert(voiceSetJson.success === true && voiceSetJson.settings.voiceId === 'EXAVITQu4vr4xnSDxMaL', 'REST /api/settings/voice dynamically configures ElevenLabs');
+    assert(voiceSetJson.success === true && voiceSetJson.settings.voiceId === 'voice_bright_storyteller', 'REST /api/settings/voice dynamically configures Omni Voice');
 
     const avatarSetRes = await fetch('http://localhost:9876/api/settings/avatar', {
       method: 'POST',

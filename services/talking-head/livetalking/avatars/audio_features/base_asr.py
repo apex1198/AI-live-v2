@@ -31,9 +31,13 @@ class BaseASR:
         self.opt = opt
         self.parent = parent
 
-        self.fps = opt.fps # 20 ms per frame
+        self.fps = float(opt.fps)
         self.sample_rate = 16000
-        self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
+        self.chunk = self.sample_rate // 50  # fixed 20 ms audio packets
+        # The inference worker groups this many 20 ms packets per model frame.
+        # Keep the value local to ASR so every feature extractor emits exactly
+        # the number of audio frames the avatar inference loop consumes.
+        self.audio_frames_per_video = max(1, int(round(50.0 / self.fps)))
         self.queue:Queue[AudioFrameData] = Queue()
         self.output_queue:Queue[AudioFrameData] = Queue()
 

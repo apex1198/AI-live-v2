@@ -169,6 +169,9 @@ async def list_trained_avatars(request):
                 "status": "ready",
                 "source_name": os.path.basename(str(info.get('video_path') or '')) or avatar_id,
                 "thumbnail_url": f"/api/avatars/{avatar_id}/thumbnail" if thumbnail_path else None,
+                "frame_count": int(info.get('frame_count') or 0),
+                "source_fps": float(info.get('source_fps') or 25.0),
+                "duration_ms": int(info.get('duration_ms') or 0),
             })
         except Exception as exc:
             logger.warning(f"Skipping invalid avatar entry {entry.name}: {exc}")
@@ -229,6 +232,9 @@ async def delete_trained_avatar(request):
         rtc_manager = request.app.get("rtc_manager")
         if rtc_manager is not None:
             await rtc_manager.close_sessions_for_avatar(avatar_id)
+        evict_avatar_cache = request.app.get("evict_avatar_cache")
+        if callable(evict_avatar_cache):
+            evict_avatar_cache(remove_avatar_id=avatar_id)
 
         entry, target = resolve_avatar_entry(avatar_id)
         if entry.is_symlink():

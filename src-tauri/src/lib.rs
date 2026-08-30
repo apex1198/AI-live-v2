@@ -81,6 +81,7 @@ fn qwen_service_ready() -> bool {
     let response = String::from_utf8_lossy(&response);
     response.contains("200 OK")
         && (response.contains("\"ready\":true") || response.contains("\"ready\": true"))
+        && response.contains("\"model_loaded\"")
 }
 
 fn runtime_service_probe() -> (bool, Option<String>, bool) {
@@ -151,6 +152,35 @@ fn terminate_runtime_port_owner() -> Result<(), String> {
     Err("The previous AI runtime did not release port 18765".into())
 }
 
+#[cfg(unix)]
+fn terminate_qwen_port_owner() -> Result<(), String> {
+    let output = Command::new("lsof")
+        .args(["-nP", "-tiTCP:18002", "-sTCP:LISTEN"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    let current_pid = std::process::id();
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != current_pid)
+        .collect();
+    if pids.is_empty() {
+        return Err("Could not identify the process using private Qwen TTS port 18002".into());
+    }
+    for pid in pids {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+    for _ in 0..50 {
+        if !port_ready(QWEN_TTS_ADDRESS) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err("The previous Qwen TTS process did not release port 18002".into())
+}
+
 #[cfg(target_os = "windows")]
 fn terminate_runtime_port_owner() -> Result<(), String> {
     let output = Command::new("netstat")
@@ -177,6 +207,34 @@ fn terminate_runtime_port_owner() -> Result<(), String> {
         thread::sleep(Duration::from_millis(100));
     }
     Err("The previous AI runtime did not release port 18765".into())
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_qwen_port_owner() -> Result<(), String> {
+    let output = Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    let pids: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("127.0.0.1:18002") && line.contains("LISTENING"))
+        .filter_map(|line| line.split_whitespace().last().map(str::to_owned))
+        .collect();
+    if pids.is_empty() {
+        return Err("Could not identify the process using private Qwen TTS port 18002".into());
+    }
+    for pid in pids {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .status();
+    }
+    for _ in 0..50 {
+        if !port_ready(QWEN_TTS_ADDRESS) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err("The previous Qwen TTS process did not release port 18002".into())
 }
 
 fn source_workspace_root() -> PathBuf {
@@ -523,9 +581,7 @@ fn start_qwen_tts(paths: &SandboxPaths) -> Result<Option<Child>, String> {
             // alive. Reuse it instead of creating a second listener.
             return Ok(None);
         }
-        return Err(format!(
-            "Qwen TTS port is occupied by a service that is not healthy: {QWEN_TTS_ADDRESS}"
-        ));
+        terminate_qwen_port_owner()?;
     }
     let service = paths.engine.join("services/qwen-tts/server.py");
     let python = first_existing_file([

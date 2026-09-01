@@ -921,6 +921,16 @@ async function runAudit() {
   await server.start();
   assert(true, 'Runtime Server started on port 9876');
 
+  const duplicateRuntime = new IdolRuntimeServer({ port: 9888, enableSimulation: false, databasePath: ':memory:' });
+  let duplicateRuntimeRejected = false;
+  try {
+    await duplicateRuntime.start();
+  } catch (error) {
+    duplicateRuntimeRejected = String(error).includes('Another AI IDOL runtime is active');
+  }
+  assert(duplicateRuntimeRejected, 'Global engine lock rejects a second runtime even when it uses another HTTP port');
+  await duplicateRuntime.stop();
+
   // Verify REST API
   try {
     const res = await fetch('http://localhost:9876/api/status');
@@ -1824,9 +1834,18 @@ async function runAudit() {
     assert(
       qwenServerSource.includes('"model_loaded": engine.model is not None')
         && !qwenServerSource.includes('engine.load()\n    uvicorn.run')
-        && nativeShellSource.includes('response.contains("\\\"model_loaded\\\"")')
-        && nativeShellSource.includes('terminate_qwen_port_owner()?;'),
-      'Native startup replaces legacy Qwen port owners and keeps the TTS model lazy-loaded',
+        && nativeShellSource.includes('tauri_plugin_single_instance::init')
+        && nativeShellSource.includes('.env("QWEN_TTS_RUNTIME_DIR", &paths.qwen_runtime)')
+        && !nativeShellSource.includes('start_qwen_tts(&paths)'),
+      'Native startup is single-instance and keeps Qwen TTS lazy-loaded inside its sandbox',
+    );
+    assert(
+      runtimeServerSource.includes("AI_IDOL_ENGINE_LOCK_PORT")
+        && runtimeServerSource.includes('Another AI IDOL runtime is active')
+        && runtimeServerSource.includes('await this._acquireEngineLock();')
+        && runtimeServerSource.includes("AI_IDOL_NATIVE_PARENT_PID")
+        && nativeShellSource.includes('.env("AI_IDOL_NATIVE_PARENT_PID", std::process::id().to_string())'),
+      'Native and localhost runtimes share one exclusive engine lock',
     );
     assert(
       runtimeServerSource.includes('await this._ensureQwenTtsReady();')

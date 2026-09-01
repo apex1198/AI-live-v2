@@ -63,3 +63,17 @@ them.
 Models, Python environments, secrets, generated avatars, and cloned voice audio
 are machine-local and excluded from Git. Copy `runtime-data` separately only
 when intentionally migrating user data between machines.
+
+## Native single-instance runtime
+
+The packaged Native App owns one exclusive engine session per machine:
+
+- Opening the app again focuses the existing window instead of creating another process.
+- Native and localhost runtimes compete for the same loopback engine lock on port `18760`.
+- If Native is active, a localhost server exits before loading Qwen or LiveTalking.
+- If localhost is active, Native reports the conflict instead of starting a second engine.
+- Qwen TTS is loaded on demand by the owning runtime.
+- A parent-process watchdog shuts down the runtime and its model workers if the Native shell is force-quit.
+
+Close the running Native App before using `pnpm start`, and stop localhost before
+opening Native. This keeps MPS/CUDA memory and WebRTC ownership inside one session.

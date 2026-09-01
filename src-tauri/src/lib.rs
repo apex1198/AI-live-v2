@@ -14,8 +14,8 @@ use std::{
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const SANDBOX_VERSION: &str = "1";
+const ENGINE_LOCK_ADDRESS: &str = "127.0.0.1:18760";
 const RUNTIME_ADDRESS: &str = "127.0.0.1:18765";
-const QWEN_TTS_ADDRESS: &str = "127.0.0.1:18002";
 const STUDIO_URL: &str = "http://127.0.0.1:18765/#studio";
 const UI_SCALE: f64 = 0.8;
 // Desktop OAuth client IDs are public identifiers. The client secret is supplied
@@ -55,7 +55,6 @@ struct MagicSetupState(Arc<Mutex<MagicSetupStatus>>);
 #[derive(Clone, Default)]
 struct ProcessState {
     runtime: Arc<Mutex<Option<Child>>>,
-    qwen_tts: Arc<Mutex<Option<Child>>>,
 }
 
 fn port_ready(address: &str) -> bool {
@@ -63,29 +62,6 @@ fn port_ready(address: &str) -> bool {
         return false;
     };
     TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok()
-}
-
-fn qwen_service_ready() -> bool {
-    let Ok(address) = QWEN_TTS_ADDRESS.parse::<SocketAddr>() else {
-        return false;
-    };
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
-    if stream
-        .write_all(b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
-    let mut response = Vec::new();
-    let _ = stream.read_to_end(&mut response);
-    let response = String::from_utf8_lossy(&response);
-    response.contains("200 OK")
-        && (response.contains("\"ready\":true") || response.contains("\"ready\": true"))
-        && response.contains("\"model_loaded\"")
 }
 
 fn runtime_service_probe() -> (bool, Option<String>, bool) {
@@ -168,35 +144,6 @@ fn terminate_runtime_port_owner() -> Result<(), String> {
     Err("The previous AI runtime did not release port 18765".into())
 }
 
-#[cfg(unix)]
-fn terminate_qwen_port_owner() -> Result<(), String> {
-    let output = Command::new("lsof")
-        .args(["-nP", "-tiTCP:18002", "-sTCP:LISTEN"])
-        .output()
-        .map_err(|error| error.to_string())?;
-    let current_pid = std::process::id();
-    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .filter(|pid| *pid != current_pid)
-        .collect();
-    if pids.is_empty() {
-        return Err("Could not identify the process using private Qwen TTS port 18002".into());
-    }
-    for pid in pids {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
-    }
-    for _ in 0..50 {
-        if !port_ready(QWEN_TTS_ADDRESS) {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    Err("The previous Qwen TTS process did not release port 18002".into())
-}
-
 #[cfg(target_os = "windows")]
 fn terminate_runtime_port_owner() -> Result<(), String> {
     let output = Command::new("netstat")
@@ -223,34 +170,6 @@ fn terminate_runtime_port_owner() -> Result<(), String> {
         thread::sleep(Duration::from_millis(100));
     }
     Err("The previous AI runtime did not release port 18765".into())
-}
-
-#[cfg(target_os = "windows")]
-fn terminate_qwen_port_owner() -> Result<(), String> {
-    let output = Command::new("netstat")
-        .args(["-ano", "-p", "tcp"])
-        .output()
-        .map_err(|error| error.to_string())?;
-    let pids: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.contains("127.0.0.1:18002") && line.contains("LISTENING"))
-        .filter_map(|line| line.split_whitespace().last().map(str::to_owned))
-        .collect();
-    if pids.is_empty() {
-        return Err("Could not identify the process using private Qwen TTS port 18002".into());
-    }
-    for pid in pids {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .status();
-    }
-    for _ in 0..50 {
-        if !port_ready(QWEN_TTS_ADDRESS) {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    Err("The previous Qwen TTS process did not release port 18002".into())
 }
 
 fn source_workspace_root() -> PathBuf {
@@ -431,6 +350,17 @@ fn platform_setup_script(root: &Path) -> PathBuf {
     }
 }
 
+fn qwen_model_directory_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        return "gwen-tts-0.6B";
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "gwen-tts-0.6B-8bit"
+    }
+}
+
 fn perform_magic_setup(app: &AppHandle, state: &MagicSetupState) -> Result<SandboxPaths, String> {
     let paths = sandbox_paths(app)?;
     let resource_dir = app
@@ -530,10 +460,11 @@ fn perform_magic_setup(app: &AppHandle, state: &MagicSetupState) -> Result<Sandb
     if !live_root.join("models/musetalkV15/unet.pth").is_file() {
         copy_tree(&live_seed.join("models"), &live_root.join("models"), false)?;
     }
-    let qwen_model = paths.qwen_runtime.join("gwen-tts-0.6B-8bit");
+    let qwen_model_name = qwen_model_directory_name();
+    let qwen_model = paths.qwen_runtime.join(qwen_model_name);
     if !qwen_model.join("config.json").is_file() {
         copy_tree(
-            &workspace.join("runtime-data/qwen-tts/gwen-tts-0.6B-8bit"),
+            &workspace.join("runtime-data/qwen-tts").join(qwen_model_name),
             &qwen_model,
             false,
         )?;
@@ -639,60 +570,22 @@ fn first_existing_file(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathB
     paths.into_iter().find(|path| path.is_file())
 }
 
-fn start_qwen_tts(paths: &SandboxPaths) -> Result<Option<Child>, String> {
-    if port_ready(QWEN_TTS_ADDRESS) {
-        if qwen_service_ready() {
-            // A previous native session may have left a healthy Qwen worker
-            // alive. Reuse it instead of creating a second listener.
-            return Ok(None);
-        }
-        terminate_qwen_port_owner()?;
-    }
-    let service = paths.engine.join("services/qwen-tts/server.py");
-    let python = first_existing_file([
-        paths.qwen_runtime.join(".venv/bin/python"),
-        paths.qwen_runtime.join(".venv/Scripts/python.exe"),
-    ])
-    .ok_or("Qwen TTS Python environment is missing")?;
-    let model = paths.qwen_runtime.join("gwen-tts-0.6B-8bit");
-    let mut child = Command::new(python)
-        .arg(service)
-        .arg("--model")
-        .arg(model)
-        .arg("--data-dir")
-        .arg(paths.qwen_runtime.join("data"))
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg("18002")
-        .env("PYTHONUNBUFFERED", "1")
-        .env("HF_HOME", paths.cache.join("huggingface"))
-        .env("XDG_CACHE_HOME", &paths.cache)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("Could not start Qwen TTS: {error}"))?;
-    for _ in 0..480 {
-        if qwen_service_ready() {
-            return Ok(Some(child));
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    stop_process(&mut child);
-    Err("Qwen TTS did not become ready within 120 seconds".into())
-}
-
 fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
     let backend = paths.runtime.join("backend/dist/index.js");
     let build_id = runtime_build_id(&backend)?;
     if port_ready(RUNTIME_ADDRESS) {
-        let (healthy, running_build_id, is_idol_runtime) = runtime_service_probe();
-        if healthy && running_build_id.as_deref() == Some(build_id.as_str()) {
-            // Reuse a healthy runtime left by an earlier native session.
-            return Ok(None);
-        }
+        let (healthy, _running_build_id, is_idol_runtime) = runtime_service_probe();
         if healthy && is_idol_runtime {
             terminate_runtime_port_owner()?;
+            for _ in 0..50 {
+                if !port_ready(ENGINE_LOCK_ADDRESS) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            if port_ready(ENGINE_LOCK_ADDRESS) {
+                return Err("The previous AI runtime did not release the exclusive engine lock".into());
+            }
         } else {
             return Err(format!(
                 "Runtime port is occupied by another service: {RUNTIME_ADDRESS}"
@@ -709,6 +602,7 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
         .arg(backend)
         .current_dir(&paths.root)
         .env("AI_IDOL_DESKTOP", "1")
+        .env("AI_IDOL_NATIVE_PARENT_PID", std::process::id().to_string())
         .env("AI_IDOL_RUNTIME_BUILD_ID", &build_id)
         .env("AI_IDOL_SANDBOX_ROOT", &paths.root)
         .env("AI_IDOL_ENGINE_ROOT", &paths.engine)
@@ -742,6 +636,7 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
             "http://127.0.0.1:18765,http://localhost:18765",
         )
         .env("QWEN_TTS_ENDPOINT", "http://127.0.0.1:18002")
+        .env("QWEN_TTS_RUNTIME_DIR", &paths.qwen_runtime)
         .env("LIVETALKING_ENDPOINT", "http://127.0.0.1:18011")
         .env("LIVETALKING_PORT", "18011")
         .env("HF_HOME", paths.cache.join("huggingface"))
@@ -754,6 +649,11 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
     for _ in 0..480 {
         if port_ready(RUNTIME_ADDRESS) {
             return Ok(Some(child));
+        }
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!(
+                "AI runtime exited during startup ({status}). Close any localhost AI IDOL server before opening the Native App."
+            ));
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -788,17 +688,8 @@ fn launch_magic_setup(app: AppHandle, setup: MagicSetupState, processes: Process
             update_setup(
                 &setup,
                 "warmup",
-                "Warming Vietnamese voice",
-                "Loading Qwen TTS into the private runtime.",
-                91,
-            );
-            let qwen = start_qwen_tts(&paths)?;
-            *processes.qwen_tts.lock().expect("Qwen process lock") = qwen;
-            update_setup(
-                &setup,
-                "warmup",
                 "Starting Live Studio",
-                "Launching the native runtime and realtime avatar worker.",
+                "Claiming the exclusive engine and launching the native runtime.",
                 96,
             );
             let runtime = start_runtime(&paths)?;
@@ -877,6 +768,16 @@ pub fn run() {
     let processes_for_exit = processes.clone();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            for label in ["studio", "main"] {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    break;
+                }
+            }
+        }))
         .manage(setup)
         .manage(processes)
         .invoke_handler(tauri::generate_handler![
@@ -926,14 +827,6 @@ pub fn run() {
             {
                 stop_process(&mut child);
             }
-            if let Some(mut child) = processes_for_window
-                .qwen_tts
-                .lock()
-                .expect("Qwen lock")
-                .take()
-            {
-                stop_process(&mut child);
-            }
             window.app_handle().exit(0);
         })
         .build(tauri::generate_context!())
@@ -947,14 +840,6 @@ pub fn run() {
             .runtime
             .lock()
             .expect("runtime lock")
-            .take()
-        {
-            stop_process(&mut child);
-        }
-        if let Some(mut child) = processes_for_exit
-            .qwen_tts
-            .lock()
-            .expect("Qwen lock")
             .take()
         {
             stop_process(&mut child);

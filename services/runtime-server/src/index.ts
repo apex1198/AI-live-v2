@@ -13,6 +13,7 @@
  */
 
 import http from 'http';
+import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -615,6 +616,8 @@ export class IdolRuntimeServer {
   private _projectStorageRoot = path.resolve(process.env['AI_IDOL_PROJECTS_ROOT'] || path.join(process.cwd(), 'local-projects'));
   private _activeProject = 'ai-livestream';
   private readonly _storageConfigPath = path.resolve(process.cwd(), 'runtime-data', 'project-storage.json');
+  private _engineLockServer: net.Server | null = null;
+  private readonly _engineLockPort = Math.max(1, Math.min(65535, parseInt(process.env['AI_IDOL_ENGINE_LOCK_PORT'] || '18760', 10) || 18760));
 
   constructor(config: Partial<ServerConfig> = {}) {
     this._config = {
@@ -2073,9 +2076,17 @@ export class IdolRuntimeServer {
     if (this._isRunning) return;
     this._isRunning = true;
 
+    try {
+      await this._acquireEngineLock();
+    } catch (error) {
+      this._isRunning = false;
+      throw error;
+    }
+
     return new Promise((resolve, reject) => {
       const onError = (error: NodeJS.ErrnoException) => {
         this._isRunning = false;
+        void this._releaseEngineLock();
         const message = error.code === 'EADDRINUSE'
           ? `AI IDOL is already running at http://${this._config.host}:${this._config.port}`
           : error.message;
@@ -2166,11 +2177,41 @@ export class IdolRuntimeServer {
     this._activeObsOutputSessionId = null;
 
     return new Promise((resolve) => {
-      this._httpServer.close(() => {
+      this._httpServer.close(async () => {
         this._db.close();
+        await this._releaseEngineLock();
         resolve();
       });
     });
+  }
+
+  private _acquireEngineLock(): Promise<void> {
+    if (this._engineLockServer) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const lockServer = net.createServer((socket) => {
+        socket.end(`AI IDOL engine owner ${process.pid}\n`);
+      });
+      const onError = (error: NodeJS.ErrnoException) => {
+        lockServer.close();
+        reject(new Error(error.code === 'EADDRINUSE'
+          ? 'Another AI IDOL runtime is active. Close the Native App or localhost server before starting a new engine instance.'
+          : `Could not acquire the AI IDOL engine lock: ${error.message}`));
+      };
+      lockServer.once('error', onError);
+      lockServer.listen(this._engineLockPort, '127.0.0.1', () => {
+        lockServer.off('error', onError);
+        this._engineLockServer = lockServer;
+        this._addLog('info', `Exclusive engine lock acquired on 127.0.0.1:${this._engineLockPort}`);
+        resolve();
+      });
+    });
+  }
+
+  private _releaseEngineLock(): Promise<void> {
+    const lockServer = this._engineLockServer;
+    this._engineLockServer = null;
+    if (!lockServer) return Promise.resolve();
+    return new Promise((resolve) => lockServer.close(() => resolve()));
   }
 
   // ─────────────────────────────────────────────────────────
@@ -5635,6 +5676,13 @@ if (isDirectRun) {
   });
 
   const server = new IdolRuntimeServer();
+  let shuttingDown = false;
+  const shutdown = async (exitCode = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await server.stop().catch((error) => console.error('Runtime shutdown error:', error));
+    process.exit(exitCode);
+  };
   server.start().then(() => {
     console.log(`Idol Runtime Server active on port ${process.env['PORT'] || '8765'}`);
     setInterval(() => {}, 1000 * 3600);
@@ -5643,12 +5691,18 @@ if (isDirectRun) {
     process.exit(1);
   });
 
-  process.on('SIGINT', async () => {
-    await server.stop();
-    process.exit(0);
-  });
-  process.on('SIGTERM', async () => {
-    await server.stop();
-    process.exit(0);
-  });
+  process.on('SIGINT', () => void shutdown(0));
+  process.on('SIGTERM', () => void shutdown(0));
+
+  const nativeParentPid = parseInt(process.env['AI_IDOL_NATIVE_PARENT_PID'] || '', 10);
+  if (Number.isInteger(nativeParentPid) && nativeParentPid > 1) {
+    setInterval(() => {
+      try {
+        process.kill(nativeParentPid, 0);
+      } catch {
+        console.warn(`Native parent ${nativeParentPid} exited; shutting down the isolated runtime.`);
+        void shutdown(0);
+      }
+    }, 1_000);
+  }
 }

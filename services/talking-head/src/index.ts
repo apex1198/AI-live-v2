@@ -352,7 +352,11 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
         const task = statusResponse.data || {};
         const progress = Math.max(0, Math.min(100, Number(task.progress || 0)));
         this._trainingProgress = progress;
-        onProgress?.(Math.min(4, Math.max(1, Math.ceil(progress / 25))), `LiveTalking avatar task: ${task.status || 'running'}`, progress);
+        onProgress?.(
+          Math.min(4, Math.max(1, Math.ceil(progress / 25))),
+          String(task.stage_message || `LiveTalking avatar task: ${task.status || 'running'}`),
+          progress,
+        );
         if (task.status === 'failed') throw new Error(task.error_msg || 'LiveTalking avatar preprocessing failed');
         if (task.status === 'completed') {
           this._trainingState = 'ready';

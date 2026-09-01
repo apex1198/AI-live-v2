@@ -11,12 +11,34 @@ _vae_lock = threading.RLock()
 
 
 def bounded_preprocess_size(width, height):
-    """Return an aspect-preserving frame size capped to 720p per orientation."""
+    """Return an aspect-preserving frame size for the active live quality."""
     width = max(1, int(width))
     height = max(1, int(height))
-    max_width, max_height = ((1280, 720) if width >= height else (720, 1280))
+    quality = os.getenv("LIVETALKING_PREPROCESS_QUALITY", "hd").strip().lower()
+    default_width, default_height = (1920, 1080) if quality == "fhd" else (1280, 720)
+    try:
+        landscape_width = max(320, int(os.getenv("LIVETALKING_MAX_WIDTH", str(default_width))))
+        landscape_height = max(180, int(os.getenv("LIVETALKING_MAX_HEIGHT", str(default_height))))
+    except ValueError:
+        landscape_width, landscape_height = default_width, default_height
+    max_width, max_height = (
+        (landscape_width, landscape_height)
+        if width >= height
+        else (landscape_height, landscape_width)
+    )
     scale = min(1.0, max_width / width, max_height / height)
     return round(width * scale), round(height * scale)
+
+
+def scale_box(box, scale_x, scale_y):
+    """Scale an xyxy box while preserving the integer pixel convention."""
+    x1, y1, x2, y2 = box
+    return [
+        int(round(float(x1) * scale_x)),
+        int(round(float(y1) * scale_y)),
+        int(round(float(x2) * scale_x)),
+        int(round(float(y2) * scale_y)),
+    ]
 
 
 def set_shared_vae(vae):

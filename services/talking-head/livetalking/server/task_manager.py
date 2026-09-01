@@ -16,6 +16,8 @@ class AvatarTask:
         self.params = params
         self.status = "pending"  # pending, running, completed, failed
         self.progress = 0
+        self.stage = "queued"
+        self.stage_message = "Waiting for training worker"
         self.error_msg = ""
         self.notify_url = notify_url
         self.start_time = time.time()
@@ -28,6 +30,8 @@ class AvatarTask:
             "avatar_id": self.avatar_id,
             "status": self.status,
             "progress": self.progress,
+            "stage": self.stage,
+            "stage_message": self.stage_message,
             "error_msg": self.error_msg,
             "notify_url": self.notify_url,
             "start_time": self.start_time,
@@ -88,12 +92,27 @@ class TaskManager:
             return
 
         task.status = "running"
+        task.progress = 1
+        task.stage = "preparing_face_detector"
+        task.stage_message = "Preparing face detector"
         self._notify(task)
         logger.info(f"Starting task {task_id} for model {task.model_type}, avatar {task.avatar_id}")
 
         try:
             def progress_callback(p):
-                task.progress = p
+                task.progress = max(1, min(100, int(p)))
+                if task.progress < 20:
+                    task.stage = "extracting_frames"
+                    task.stage_message = "Extracting video frames"
+                elif task.progress < 50:
+                    task.stage = "detecting_face"
+                    task.stage_message = "Detecting and tracking face"
+                elif task.progress < 90:
+                    task.stage = "building_avatar"
+                    task.stage_message = "Building avatar data"
+                elif task.progress < 100:
+                    task.stage = "finalizing"
+                    task.stage_message = "Finalizing avatar"
 
             if task.model_type == "musetalk":
                 from avatars.musetalk.genavatar import generate_avatar
@@ -137,10 +156,14 @@ class TaskManager:
 
             task.status = "completed"
             task.progress = 100
+            task.stage = "completed"
+            task.stage_message = "Avatar ready"
             self._notify(task)
             logger.info(f"Task {task_id} completed successfully")
         except Exception as e:
             task.status = "failed"
+            task.stage = "failed"
+            task.stage_message = "Training failed"
             task.error_msg = str(e)
             self._notify(task)
             logger.error(f"Task {task_id} failed: {e}")

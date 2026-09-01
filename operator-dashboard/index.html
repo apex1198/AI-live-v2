@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI IDOL STREAMER</title>
   <link rel="stylesheet" href="style.css" />
-  <link rel="stylesheet" href="design-system.css" />
+  <link rel="stylesheet" href="design-system.css?v=20260831-live-layout-9" />
   <script src="material-icons.js"></script>
   <!-- MediaPipe Face Mesh for 468 Landmark Extraction -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
@@ -22,17 +22,18 @@
 
   <!-- ══ TOPBAR WITH EMBEDDED SYSTEM STATUS ═════════════════ -->
   <header class="topbar" data-tauri-drag-region>
-    <div class="tb-left">
+    <div class="tb-left" data-tauri-drag-region>
+      <button class="mobile-nav-toggle" id="mobile-nav-toggle" type="button" aria-label="Open navigation" aria-controls="main-navigation" aria-expanded="false"><span class="material-symbols-rounded" aria-hidden="true">menu</span></button>
       <span class="tb-brand">AI IDOL STREAMER <em>Live Control</em></span>
       <div class="live-pill"><span class="live-dot"></span>OBS</div>
       <span class="stream-clock" id="stream-clock">00:00:00</span>
     </div>
 
     <!-- System Status Bar in Header -->
-    <div class="tb-system">
+    <div class="tb-system" data-tauri-drag-region>
       <div class="sys-item" id="sys-obs-item" title="OBS WebSocket connection">
-        <span class="sys-dot ok" id="sys-obs-dot"></span>
-        <span class="sys-k" id="sys-obs-status">OBS: Ready</span>
+        <span class="sys-dot warn" id="sys-obs-dot"></span>
+        <span class="sys-k" id="sys-obs-status">OBS: Waiting</span>
       </div>
       <div class="sys-item" title="TTS Engine Active">
         <span class="sys-dot ok" id="sys-tts-dot"></span>
@@ -46,8 +47,8 @@
         <span class="sys-k" id="sys-talking-engine">Avatar: Ready</span>
       </div>
       <div class="sys-item" title="Chat input">
-        <span class="sys-dot ok"></span>
-        <span class="sys-k">Chat: Ready</span>
+        <span class="sys-dot warn" id="sys-chat-dot"></span>
+        <span class="sys-k" id="sys-chat-status">Chat: Offline</span>
       </div>
       <div class="sys-latency">
         <span class="lat-tag" id="sys-latency-tag">A/V &lt;35ms</span>
@@ -55,6 +56,9 @@
     </div>
 
     <div class="tb-right">
+      <button class="btn-tb topbar-icon-button" id="btn-magic-connect" type="button" title="Connect video and voice to OBS" aria-label="Magic Connect OBS">
+        <span class="material-symbols-rounded" aria-hidden="true">cable</span><span class="topbar-control-label">Magic Connect</span>
+      </button>
       <button class="btn-tb topbar-icon-button livetalking-worker-button" id="btn-livetalking-worker" type="button" title="Prepare live avatar" aria-label="Prepare live avatar" hidden>
         <span class="livetalking-worker-dot" aria-hidden="true"></span>
         <span class="material-symbols-rounded" aria-hidden="true">power_settings_new</span>
@@ -77,11 +81,11 @@
       <button type="button" class="btn-icon-hdr" id="close-quick-settings" aria-label="Close quick settings"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
     </div>
     <div class="session-quick-list">
-      <label><span><strong>Voice provider</strong><small>Engine used for live replies</small></span><select id="quick-session-voice"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="omnivoice">Omni Voice · Local</option></select></label>
-      <label><span><strong>Voice speed</strong><small id="quick-session-voice-speed-value">1.05x</small></span><input type="range" id="quick-session-voice-speed" min="0.7" max="1.5" step="0.05" value="1.05" /></label>
-      <label><span><strong>Auto Mix</strong><small>Switch clips automatically</small></span><input type="checkbox" id="quick-session-auto-mix" checked /></label>
-      <label><span><strong>Random clips</strong><small>Randomize clips in each state</small></span><input type="checkbox" id="quick-session-random" checked /></label>
-      <label><span><strong>Live captions</strong><small>Show generated captions</small></span><input type="checkbox" id="quick-session-captions" checked /></label>
+      <label><span><strong>Voice provider</strong><small>Reply voice</small></span><select id="quick-session-voice"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="omnivoice">Omni Voice · Local</option></select></label>
+      <label><span><strong>Voice speed</strong><small id="quick-session-voice-speed-value">1.00x</small></span><input type="range" id="quick-session-voice-speed" min="0.7" max="1.5" step="0.05" value="1.00" /></label>
+      <label><span><strong>Auto Mix</strong><small>Auto-switch clips</small></span><input type="checkbox" id="quick-session-auto-mix" checked /></label>
+      <label><span><strong>Random clips</strong><small>Shuffle each state</small></span><input type="checkbox" id="quick-session-random" checked /></label>
+      <label><span><strong>Live captions</strong><small>Show captions</small></span><input type="checkbox" id="quick-session-captions" checked /></label>
     </div>
     <button type="button" class="btn-secondary session-open-settings" id="quick-open-full-settings"><span class="material-symbols-rounded" aria-hidden="true">settings</span>Open full Settings</button>
   </section>
@@ -99,17 +103,15 @@
     <div class="live-session-actions"><span id="live-session-save-status">Runtime will generate a reply skill.</span><button type="button" class="btn-primary" id="save-live-session-settings">Generate & Save Skill</button></div>
   </section>
 
-  <aside class="web-side-nav" aria-label="Main navigation">
+  <aside class="web-side-nav" id="main-navigation" aria-label="Main navigation" aria-hidden="false">
     <div class="web-side-brand" data-tauri-drag-region>
       <span class="material-symbols-rounded" aria-hidden="true">graphic_eq</span>
       <div><strong>AI IDOL STREAMER</strong><small>Creative live studio</small></div>
+      <button class="mobile-nav-close" id="mobile-nav-close" type="button" aria-label="Close navigation"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
     </div>
     <nav class="web-side-menu">
-      <button type="button" class="web-nav-item" data-app-view="avatar">
-        <span class="material-symbols-rounded" aria-hidden="true">person</span><span>AI Profile</span>
-      </button>
-      <button type="button" class="web-nav-item" data-app-view="director">
-        <span class="material-symbols-rounded" aria-hidden="true">psychology</span><span>AI Director</span>
+      <button type="button" class="web-nav-item" data-app-view="live-settings">
+        <span class="material-symbols-rounded" aria-hidden="true">tune</span><span>Live Setting</span>
       </button>
       <button type="button" class="web-nav-item active" data-app-view="studio">
         <span class="material-symbols-rounded" aria-hidden="true">space_dashboard</span><span>Live</span>
@@ -123,6 +125,7 @@
       <div><strong>System ready</strong><small>Local AI runtime</small></div>
     </div>
   </aside>
+  <button class="mobile-nav-scrim" id="mobile-nav-scrim" type="button" aria-label="Close navigation" tabindex="-1"></button>
 
   <main class="web-app-main">
   <section class="web-app-view active" id="view-studio" data-view="studio">
@@ -158,7 +161,7 @@
     </div>
     <div class="workspace-actions">
       <button class="workspace-secondary" id="btn-open-library-hero"><span class="material-symbols-rounded" aria-hidden="true">video_library</span>Library</button>
-      <button class="workspace-primary" id="btn-go-live-hero"><span class="material-symbols-rounded" aria-hidden="true">cable</span>OBS output</button>
+      <button class="workspace-primary" id="btn-go-live-hero"><span class="material-symbols-rounded" aria-hidden="true">cable</span>Magic Connect</button>
     </div>
   </section>
 
@@ -174,8 +177,8 @@
       <section class="panel-section chat-panel">
         <div class="panel-hdr">
           <div class="panel-title-box">
-            <span class="sec-label">Live chat</span>
-            <span class="plat-pill-sm"><span class="dot-amber"></span>TikTok / YT</span>
+            <span class="sec-label">Unify Chat</span>
+            <span class="plat-pill-sm"><span class="dot-amber"></span>YT / FB</span>
           </div>
           <div class="panel-hdr-actions">
             <button class="btn-micro-gift" id="btn-gift-rose" title="Send 10 Roses" aria-label="Send 10 Roses"><span class="material-symbols-rounded" aria-hidden="true">local_florist</span></button>
@@ -184,15 +187,17 @@
           </div>
         </div>
 
-        <!-- Quick Chat Message Box -->
-        <form id="form-chat-send" class="chat-input-form">
-          <input type="text" id="input-chat-msg" placeholder="Type a test message..." />
-          <button type="submit" class="btn-chat-submit">Send</button>
-        </form>
-
         <ul class="chat-stream-list" id="chat-queue" aria-live="polite">
           <li class="ev-empty">No messages yet</li>
         </ul>
+
+        <!-- Quick Chat Message Box -->
+        <form id="form-chat-send" class="chat-input-form">
+          <label class="chat-user-field" for="input-chat-user"><span>User</span><input type="text" id="input-chat-user" maxlength="40" autocomplete="nickname" /></label>
+          <label class="sr-only" for="input-chat-msg">Chat message</label>
+          <input type="text" id="input-chat-msg" placeholder="Write a message..." autocomplete="off" />
+          <button type="submit" class="btn-chat-submit">Send</button>
+        </form>
       </section>
 
       <!-- 2. Video State Mixer & Library -->
@@ -227,10 +232,10 @@
         <!-- Filter Tabs -->
         <div class="lib-filter-tabs">
           <button class="lib-tab active" data-filter="all">All</button>
-          <button class="lib-tab" data-filter="gameplay">1. Gameplay</button>
-          <button class="lib-tab" data-filter="talking">2. Talking</button>
-          <button class="lib-tab" data-filter="reaction">3. Reactions</button>
-          <button class="lib-tab" data-filter="cta">4. CTA / Goals</button>
+          <button class="lib-tab" data-filter="gameplay">Idle</button>
+          <button class="lib-tab" data-filter="talking">Talk</button>
+          <button class="lib-tab" data-filter="cta">CTA</button>
+          <button class="lib-tab" data-filter="afk">AFK</button>
         </div>
 
         <!-- State Groups in Library (with Direct & Modal Upload, and Random State Toggle) -->
@@ -266,26 +271,11 @@
             </div>
           </div>
 
-          <!-- Group 3: Win & Reactions -->
-          <div class="lib-group-card" data-cat="reaction">
-            <div class="lib-gh">
-              <span class="lib-gd" style="background:var(--amber)"></span>
-              <span class="lib-gn">3. Win & Reactions</span>
-              <span class="lib-gc" id="cnt-group-reaction">0</span>
-              <button class="btn-group-random is-active" data-rand-group="reaction" title="Toggle random video (Reactions)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
-              <button class="btn-group-upload" data-upload-target="BIG_WIN" title="Upload a Reaction clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
-              <input type="file" class="group-file-input" data-group-target="BIG_WIN" accept="video/*" multiple style="display:none;" />
-            </div>
-            <div class="clip-list" id="list-group-reaction" data-target-group="BIG_WIN">
-              <div class="lib-empty-notice" data-target-group="BIG_WIN">No clips. Select <b>＋</b> to upload.</div>
-            </div>
-          </div>
-
-          <!-- Group 4: Goals & CTA -->
+          <!-- Group 3: Goals & CTA -->
           <div class="lib-group-card" data-cat="cta">
             <div class="lib-gh">
               <span class="lib-gd" style="background:var(--purple)"></span>
-              <span class="lib-gn">4. Goals & CTA</span>
+              <span class="lib-gn">3. CTA</span>
               <span class="lib-gc" id="cnt-group-cta">0</span>
               <button class="btn-group-random is-active" data-rand-group="cta" title="Toggle random video (Goals & CTA)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
               <button class="btn-group-upload" data-upload-target="CTA" title="Upload a Goals and CTA clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
@@ -293,6 +283,21 @@
             </div>
             <div class="clip-list" id="list-group-cta" data-target-group="CTA">
               <div class="lib-empty-notice" data-target-group="CTA">No clips. Select <b>＋</b> to upload.</div>
+            </div>
+          </div>
+
+          <!-- Group 4: Away from keyboard -->
+          <div class="lib-group-card" data-cat="afk">
+            <div class="lib-gh">
+              <span class="lib-gd" style="background:var(--t3)"></span>
+              <span class="lib-gn">4. AFK</span>
+              <span class="lib-gc" id="cnt-group-afk">0</span>
+              <button class="btn-group-random is-active" data-rand-group="afk" title="Toggle random AFK video"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
+              <button class="btn-group-upload" data-upload-target="AFK" title="Upload an AFK clip"><span class="material-symbols-rounded" aria-hidden="true">add</span></button>
+              <input type="file" class="group-file-input" data-group-target="AFK" accept="video/*" multiple style="display:none;" />
+            </div>
+            <div class="clip-list" id="list-group-afk" data-target-group="AFK">
+              <div class="lib-empty-notice" data-target-group="AFK">No AFK clips. Select <b>＋</b> to upload.</div>
             </div>
           </div>
 
@@ -312,6 +317,10 @@
               <span class="sec-label">Live monitor · 16:9</span>
               <div class="monitor-state-tag" id="monitor-state-tag">GAMEPLAY_IDLE</div>
               <span class="monitor-clip-name" id="monitor-clip-name">gameplay_idle.mp4</span>
+              <div class="live-video-quality" id="live-video-quality" aria-label="Full HD output preset">
+                <span class="live-video-quality-option active" data-video-quality="fhd" title="Full HD 1920 x 1080 at 30 FPS">FHD · 30</span>
+              </div>
+              <span class="sr-only" id="live-video-quality-status" role="status" aria-live="polite">Full HD 1920 by 1080 at 30 FPS</span>
               <div class="talking-live-badge" id="talking-live-badge" title="Live Video Stream Sync">
                 <span class="tl-pulse"></span>
                 <span>Sync</span>
@@ -324,18 +333,11 @@
               </div>
             </div>
 
-            <!-- Queued transition banner: wait for the active clip -->
-            <div class="queued-transition-banner" id="queued-transition-banner" style="display:none;">
-              <span class="material-symbols-rounded q-icon" aria-hidden="true">hourglass_top</span>
-              <span class="q-text">Waiting for the current clip to finish. Next: <b id="queued-target-state">TALKING</b></span>
-              <button type="button" class="btn-skip-queue" id="btn-skip-queue" title="Skip the queue">Switch now ›</button>
-            </div>
-
             <!-- Screen Container (Clean 16:9 Realtime Video Monitor with Seamless Dual-Video Buffer) -->
             <div class="monitor-screen-wrap" id="monitor-screen">
               <video class="monitor-video monitor-video-a standby-layer" id="monitor-video-a" playsinline muted autoplay preload="auto"></video>
               <video class="monitor-video monitor-video-b standby-layer" id="monitor-video-b" playsinline muted autoplay preload="auto"></video>
-              <canvas class="monitor-w2l-canvas" id="monitor-w2l-canvas" width="1280" height="720"></canvas>
+              <canvas class="monitor-w2l-canvas" id="monitor-w2l-canvas" width="1920" height="1080"></canvas>
               <audio id="live-voice-audio" playsinline preload="auto" style="display:none;"></audio>
               
               <div class="monitor-bg" id="monitor-bg">
@@ -351,7 +353,7 @@
                 <div class="mon-br" id="mon-dur">∞ loop</div>
               </div>
 
-              <!-- Live Talking Indicator Badge -->
+              <!-- Lipsync status badge -->
               <div class="mon-w2l-badge" id="mon-w2l-badge">
                 <span class="rec-dot"></span>
                 <span>TALKING STATE</span>
@@ -361,6 +363,13 @@
               <div class="mon-subtitles" id="mon-subtitles">
                 <span id="mon-sub-text"></span>
               </div>
+            </div>
+
+            <!-- Stable playback status row. Its reserved height prevents Monitor layout shifts. -->
+            <div class="queued-transition-banner" id="queued-transition-banner" role="status" aria-live="polite" aria-atomic="true">
+              <span class="material-symbols-rounded q-icon" id="queued-status-icon" aria-hidden="true">check_circle</span>
+              <span class="q-text"><span id="queued-status-prefix">Playback ready</span><b id="queued-target-state"></b></span>
+              <button type="button" class="btn-skip-queue" id="btn-skip-queue" title="Skip the queue" hidden>Switch now ›</button>
             </div>
 
             <!-- Timeline & Progress -->
@@ -384,7 +393,7 @@
                 <span class="vstatus-pulse-dot" id="vstatus-dot"></span>
                 <span class="vstatus-title" id="vstatus-title">AI voice · Ready</span>
               </div>
-              <span class="vstatus-engine-tag" id="vstatus-engine-tag">Qwen TTS · Vietnamese · 1.05x</span>
+              <span class="vstatus-engine-tag" id="vstatus-engine-tag">Qwen TTS · Vietnamese · 1.00x</span>
             </div>
 
             <div class="vstatus-body">
@@ -417,18 +426,10 @@
               </span>
             </div>
             <div class="state-chips" id="state-chips">
-              <button class="sc active" data-state="GAMEPLAY_IDLE">🎮 Idle</button>
-              <button class="sc" data-state="TALKING">🗣️ Talk (Lipsync)</button>
-              <button class="sc win" data-state="BIG_WIN">🎉 Big Win</button>
-              <button class="sc red" data-state="JACKPOT">💥 Jackpot</button>
-              <button class="sc red" data-state="LOSE">😢 Lose</button>
-              <button class="sc" data-state="HAPPY">😊 Happy</button>
-              <button class="sc" data-state="SURPRISED">😲 Surprise</button>
-              <button class="sc" data-state="LAUGH">😂 Laugh</button>
-              <button class="sc purple" data-state="INVITE_PLAY">🕹️ Invite</button>
-              <button class="sc purple" data-state="CTA">📣 CTA</button>
-              <button class="sc" data-state="THANK_DONATION">🙏 Thanks</button>
-              <button class="sc red" data-state="AFK">💤 AFK</button>
+              <button class="sc active" data-state="GAMEPLAY_IDLE"><span class="material-symbols-rounded" aria-hidden="true">motion_photos_paused</span><span>Idle</span></button>
+              <button class="sc" data-state="TALKING" title="Talk with lipsync"><span class="material-symbols-rounded" aria-hidden="true">record_voice_over</span><span>Talk</span></button>
+              <button class="sc purple" data-state="CTA"><span class="material-symbols-rounded" aria-hidden="true">campaign</span><span>CTA</span></button>
+              <button class="sc red" data-state="AFK"><span class="material-symbols-rounded" aria-hidden="true">bedtime</span><span>AFK</span></button>
             </div>
           </section>
 
@@ -487,10 +488,10 @@
               <div class="form-group" style="margin-top:2px;">
                 <div class="label-with-action">
                   <label>Speech rate</label>
-                  <span id="quick-voice-speed-val" style="font-size:11px; font-weight:700; color:var(--accent); font-family:var(--font-mono);">1.05x</span>
+                  <span id="quick-voice-speed-val" style="font-size:11px; font-weight:700; color:var(--accent); font-family:var(--font-mono);">1.00x</span>
                 </div>
                 <div class="speed-slider-wrap">
-                  <input type="range" class="form-range" id="quick-voice-speed" min="0.7" max="1.5" step="0.05" value="1.05" />
+                  <input type="range" class="form-range" id="quick-voice-speed" min="0.7" max="1.5" step="0.05" value="1.00" />
                   <div class="speed-ticks">
                     <span>0.7x</span>
                     <span>1.0x</span>
@@ -561,12 +562,12 @@
       </div><!-- /app-body -->
   </section>
 
-  <section class="web-app-view" id="view-avatar" data-view="avatar">
+  <section class="web-app-view" id="view-live-settings" data-view="live-settings">
     <header class="web-page-head">
       <div>
-        <span class="workspace-eyebrow">AI PROFILE</span>
-        <h1>AI Profile</h1>
-        <p>Shape your Idol, voice, and active live avatar in one place.</p>
+        <span class="workspace-eyebrow">LIVE CONFIGURATION</span>
+        <h1>Live Setting</h1>
+        <p>Set avatar, persona, voice, and replies.</p>
       </div>
       <button type="button" class="web-primary-action" id="btn-create-avatar">
         <span class="material-symbols-rounded" aria-hidden="true">add</span>Add Avatar
@@ -574,36 +575,83 @@
     </header>
     <div class="ai-profile-section-head">
       <span class="material-symbols-rounded" aria-hidden="true">smart_toy</span>
-      <div><h2>Avatar</h2><p>Manage trained avatars and choose one for the live session.</p></div>
+      <div><h2>Avatar</h2><p>Manage and select trained avatars.</p></div>
     </div>
     <div class="avatar-page-toolbar">
       <div><strong>Avatar Library</strong><small id="avatar-page-count">0 avatars</small></div>
-      <span class="avatar-session-rule"><span class="material-symbols-rounded" aria-hidden="true">verified</span>Single session · Active / Inactive</span>
+      <span class="avatar-session-rule" role="status"><span class="material-symbols-rounded" aria-hidden="true">verified</span>Multi Avatar Pool · Active / Inactive</span>
     </div>
     <div class="avatar-library-grid" id="avatar-library-grid">
       <article class="avatar-empty-card">
         <span class="material-symbols-rounded" aria-hidden="true">person_add</span>
         <h2>No avatars yet</h2>
-        <p>Upload media and train your first avatar.</p>
+        <p>Upload media to train an avatar.</p>
         <button type="button" data-create-avatar>Create Avatar</button>
       </article>
     </div>
     <div class="ai-profile-section-head ai-profile-section-head-profile">
       <span class="material-symbols-rounded" aria-hidden="true">face</span>
-      <div><h2>Idol Profile</h2><p>Define the Idol's personality, reply style, and voice.</p></div>
+      <div><h2>Idol Profile</h2><p>Set personality and reply style.</p></div>
     </div>
     <div class="ai-profile-grid">
       <section class="ai-profile-panel">
-        <div class="ai-profile-panel-head"><span class="material-symbols-rounded" aria-hidden="true">badge</span><div><h2>Persona</h2><p>Personality and spoken reply style.</p></div></div>
-        <div class="ai-profile-fields">
-          <label><span>Idol name</span><input id="profile-idol-name" type="text" value="Mimi" /></label>
-          <label><span>Personality</span><textarea id="profile-idol-personality" rows="3" placeholder="Dễ thương, năng động, hài hước..."></textarea></label>
-          <label><span>Reply brief</span><textarea id="profile-idol-prompt" rows="4" placeholder="Cách xưng hô, văn nói, nhịp câu và nguyên tắc trả lời"></textarea></label>
+        <div class="ai-profile-panel-head"><span class="material-symbols-rounded" aria-hidden="true">badge</span><div><h2>Persona</h2><p>How the Idol speaks.</p></div></div>
+        <div class="idol-profile-groups">
+          <section class="idol-profile-group" aria-labelledby="idol-identity-title">
+            <div class="idol-profile-group-head"><div><strong id="idol-identity-title">Identity</strong><small>Name, age and role.</small></div></div>
+            <div class="ai-profile-fields idol-profile-fields-grid">
+              <label class="field-wide"><span>Idol name</span><input id="profile-idol-name" type="text" value="Mimi" /></label>
+              <label><span>Gender</span><select id="profile-idol-gender"><option value="female">Female</option><option value="male">Male</option></select></label>
+              <label><span>Age</span><select id="profile-idol-age"><option value="18-20">18–20</option><option value="21-24" selected>21–24</option><option value="25-27">25–27</option><option value="28-30">28–30</option></select></label>
+              <label><span>Archetype</span><select id="profile-idol-archetype"><option value="friendly">Friendly</option><option value="sweet">Sweet</option><option value="energetic">Energetic</option><option value="playful">Playful</option><option value="elegant">Elegant</option><option value="calm">Calm</option><option value="professional">Professional</option></select></label>
+              <label><span>Relationship</span><select id="profile-idol-relationship"><option value="close-friend">Close friend</option><option value="younger-sister">Younger sister</option><option value="younger-brother">Younger brother</option><option value="host">Live host</option><option value="adviser">Adviser</option><option value="entertainer">Entertainer</option></select></label>
+              <label class="field-wide"><span>Personality</span><textarea id="profile-idol-personality" rows="3" placeholder="Dễ thương, năng động, hài hước..."></textarea></label>
+            </div>
+          </section>
+
+          <details class="idol-profile-group" open>
+            <summary><span><strong>Voice & behavior</strong><small>Speaking style and emotional range.</small></span><span class="material-symbols-rounded" aria-hidden="true">expand_more</span></summary>
+            <div class="ai-profile-fields idol-profile-fields-grid">
+              <label><span>Speaking tone</span><select id="profile-idol-tone"><option value="natural">Natural</option><option value="sweet">Sweet</option><option value="bright">Bright</option><option value="warm">Warm</option><option value="calm">Calm</option><option value="confident">Confident</option></select></label>
+              <label><span>Energy</span><select id="profile-idol-energy"><option value="low">Low</option><option value="balanced" selected>Balanced</option><option value="high">High</option></select></label>
+              <label><span>Humor</span><select id="profile-idol-humor"><option value="none">None</option><option value="light" selected>Light</option><option value="playful">Playful</option></select></label>
+              <label><span>Warmth</span><select id="profile-idol-warmth"><option value="reserved">Reserved</option><option value="warm" selected>Warm</option><option value="very-warm">Very warm</option></select></label>
+              <label><span>Formality</span><select id="profile-idol-formality"><option value="casual" selected>Casual</option><option value="balanced">Balanced</option><option value="polite">Polite</option></select></label>
+              <label><span>Emotion range</span><select id="profile-idol-emotion"><option value="balanced" selected>Balanced</option><option value="expressive">Expressive</option><option value="calm">Calm</option></select></label>
+              <label class="field-wide"><span>Catchphrases</span><input id="profile-idol-catchphrases" placeholder="Optional, separate phrases with commas" /></label>
+            </div>
+          </details>
+
+          <details class="idol-profile-group">
+            <summary><span><strong>Pronouns & goals</strong><small>Keep every reply consistent.</small></span><span class="material-symbols-rounded" aria-hidden="true">expand_more</span></summary>
+            <div class="ai-profile-fields idol-profile-fields-grid">
+              <label><span>Idol self-reference</span><select id="profile-idol-self-pronoun"><option value="em">Em</option><option value="anh">Anh</option><option value="mình">Mình</option><option value="tôi">Tôi</option></select></label>
+              <label><span>Male viewer</span><select id="profile-idol-male-pronoun"><option value="anh">Anh</option><option value="em">Em</option><option value="bạn">Bạn</option></select></label>
+              <label><span>Female viewer</span><select id="profile-idol-female-pronoun"><option value="chị">Chị</option><option value="em">Em</option><option value="bạn">Bạn</option></select></label>
+              <label><span>Unknown viewer</span><select id="profile-idol-unknown-pronoun"><option value="use-name">Use viewer name</option><option value="avoid-pronoun">Avoid pronoun</option><option value="ban">Bạn</option></select></label>
+              <label class="field-wide"><span>Primary goal</span><textarea id="profile-idol-primary-goal" rows="2"></textarea></label>
+              <label class="field-wide"><span>Secondary goal</span><textarea id="profile-idol-secondary-goal" rows="2"></textarea></label>
+              <label><span>Follow-up question</span><select id="profile-idol-follow-up"><option value="25">25% · Occasional</option><option value="45" selected>45% · Natural</option><option value="65">65% · Engaging</option></select></label>
+              <label><span>CTA frequency</span><select id="profile-idol-cta"><option value="off">Off</option><option value="low" selected>Low</option><option value="balanced">Balanced</option></select></label>
+              <label><span>Chats per reply</span><select id="profile-idol-max-chats"><option value="1">1 chat</option><option value="2" selected>Up to 2 chats</option><option value="3">Up to 3 chats</option></select></label>
+            </div>
+          </details>
+
+          <section class="idol-profile-group" aria-labelledby="idol-brief-title">
+            <div class="idol-profile-group-head"><div><strong id="idol-brief-title">Brief source</strong><small>Import Markdown or a public Google Doc.</small></div></div>
+            <input id="profile-brief-file" type="file" accept=".md,text/markdown,text/plain" hidden />
+            <div class="idol-brief-actions">
+              <button type="button" class="btn-secondary" id="profile-brief-upload"><span class="material-symbols-rounded" aria-hidden="true">upload_file</span>Upload .MD</button>
+              <div class="idol-google-doc-input"><label for="profile-brief-google-url">Google Docs URL</label><div><input id="profile-brief-google-url" type="url" placeholder="https://docs.google.com/document/d/..." /><button type="button" class="btn-secondary" id="profile-brief-google-import">Import</button></div></div>
+            </div>
+            <div class="idol-brief-source" id="profile-brief-source" aria-live="polite"><span class="material-symbols-rounded" aria-hidden="true">description</span><span><strong>No brief imported</strong><small>Add a source to give the Idol product or session context.</small></span></div>
+            <label class="idol-brief-preview"><span>Imported brief</span><textarea id="profile-idol-brief" rows="5" placeholder="Imported content appears here and can be edited."></textarea></label>
+          </section>
         </div>
-        <div class="ai-profile-actions"><span id="profile-save-status">Profile is ready.</span><button type="button" class="btn-primary" id="save-ai-profile">Save profile</button></div>
+        <div class="ai-profile-actions"><span id="profile-save-status" aria-live="polite">Profile is ready.</span><button type="button" class="btn-primary" id="save-ai-profile"><span class="material-symbols-rounded" aria-hidden="true">save</span>Save profile</button></div>
       </section>
       <section class="ai-profile-panel">
-        <div class="ai-profile-panel-head"><span class="material-symbols-rounded" aria-hidden="true">record_voice_over</span><div><h2>Voice Setting</h2><p>Choose the voice for live replies.</p></div></div>
+        <div class="ai-profile-panel-head"><span class="material-symbols-rounded" aria-hidden="true">record_voice_over</span><div><h2>Voice Setting</h2><p>Select the reply voice.</p></div></div>
         <label class="ai-profile-provider"><span>Voice provider</span><select id="profile-voice-provider" class="form-select"><option value="qwentts" selected>Qwen TTS · Vietnamese</option><option value="omnivoice">Omni Voice · Local</option></select></label>
         <div class="ai-profile-voice-summary" id="ai-voice-profile-summary" aria-live="polite">Loading active voice...</div>
         <div class="voice-provider-notice" id="voice-provider-notice" aria-live="polite"></div>
@@ -636,7 +684,7 @@
     </div>
     <div class="ai-profile-section-head ai-profile-section-head-profile">
       <span class="material-symbols-rounded" aria-hidden="true">description</span>
-      <div><h2>Live Reply Skill</h2><p>Select the Markdown brief used to generate spoken replies for the live session.</p></div>
+      <div><h2>Live Reply Skill</h2><p>Choose a Markdown reply brief.</p></div>
     </div>
     <section class="ai-profile-panel reply-skill-panel" aria-labelledby="reply-skill-title">
       <div class="reply-skill-toolbar">
@@ -658,12 +706,12 @@
 
   <section class="web-app-view director-view" id="view-director" data-view="director">
     <header class="web-page-head">
-      <div><span class="workspace-eyebrow">DIRECTOR CONTROL PLANE</span><h1>AI Director</h1><p>Combine personality, reply rules, and product knowledge into one live brief.</p></div>
+      <div><span class="workspace-eyebrow">DIRECTOR CONTROL PLANE</span><h1>AI Director</h1><p>Build one live reply brief.</p></div>
       <div class="director-health"><span class="web-health-dot"></span><span id="director-brief-status">Draft not built</span></div>
     </header>
     <div class="director-layout">
       <section class="ai-profile-panel director-brief-panel">
-        <div class="ai-profile-panel-head"><span class="material-symbols-rounded">tune</span><div><h2>Director brief</h2><p>Instructions for how the AI prioritizes and speaks during the stream.</p></div></div>
+        <div class="ai-profile-panel-head"><span class="material-symbols-rounded">tune</span><div><h2>Director brief</h2><p>Control reply priority and tone.</p></div></div>
         <div class="director-fields">
           <label><span>Stream objective</span><input id="director-objective" value="Tăng tương tác, giữ người xem và giới thiệu sản phẩm tự nhiên" /></label>
           <label><span>Personality & voice</span><textarea id="director-personality" rows="4" placeholder="Cá tính, giọng điệu, cách xưng hô và ngôn ngữ..."></textarea></label>
@@ -690,14 +738,16 @@
       <div>
         <span class="workspace-eyebrow">CONFIGURATION</span>
         <h1>Settings</h1>
-        <p>Configure stream output, local storage, and the AI Director.</p>
+        <p>OBS, chat, storage, and engines.</p>
       </div>
     </header>
     <div class="settings-preferences-layout">
       <nav class="settings-section-tabs" role="tablist" aria-label="Settings sections">
         <button type="button" class="settings-section-tab active" role="tab" aria-selected="true" data-settings-target="output"><span class="material-symbols-rounded" aria-hidden="true">live_tv</span><span>OBS &amp; Output</span></button>
+        <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="engine"><span class="material-symbols-rounded" aria-hidden="true">motion_photos_on</span><span>Lipsync Engine</span></button>
+        <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="chat"><span class="material-symbols-rounded" aria-hidden="true">forum</span><span>Live Chat</span></button>
         <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="storage"><span class="material-symbols-rounded" aria-hidden="true">folder_open</span><span>Storage</span></button>
-        <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="director"><span class="material-symbols-rounded" aria-hidden="true">memory</span><span>AI Director</span></button>
+        <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="engines"><span class="material-symbols-rounded" aria-hidden="true">deployed_code</span><span>AI Engines</span></button>
       </nav>
       <div class="web-settings-grid settings-pane-stack">
       <section class="settings-bento-card" style="display:none;">
@@ -706,28 +756,79 @@
         <div class="settings-bento-actions" id="web-settings-voice-actions"></div>
       </section>
       <section class="settings-bento-card active" data-settings-pane="output" role="tabpanel">
-        <div class="settings-bento-head"><span class="material-symbols-rounded">live_tv</span><div><h2>OBS & Output</h2><p>The Live Monitor and generated voice are sent to OBS. Direct platform streaming is disabled.</p></div></div>
+        <div class="settings-bento-head"><span class="material-symbols-rounded">live_tv</span><div><h2>OBS & Output</h2><p>Monitor and voice to OBS.</p></div></div>
         <div class="settings-bento-content" id="web-settings-obs-slot"></div>
         <div class="settings-bento-actions" id="web-settings-obs-actions"></div>
       </section>
+      <section class="settings-bento-card" data-settings-pane="engine" role="tabpanel" hidden>
+        <div class="settings-bento-head"><span class="material-symbols-rounded" aria-hidden="true">motion_photos_on</span><div><h2>Lipsync Engine</h2><p>Realtime lipsync.</p></div><span class="settings-status" id="livetalking-engine-badge" data-state="OFFLINE">Inactive</span></div>
+        <div class="livetalking-engine-summary" role="status" aria-live="polite" aria-atomic="true">
+          <span class="livetalking-engine-dot" id="livetalking-engine-dot" data-state="OFFLINE" aria-hidden="true"></span>
+          <div><strong id="livetalking-engine-status">Inactive</strong><small id="livetalking-engine-detail">Stopped</small></div>
+        </div>
+        <label class="livetalking-engine-toggle" for="cfg-livetalking-always-on">
+          <span><strong>Always on</strong><small id="livetalking-engine-mode">Automatic startup</small></span>
+          <input type="checkbox" id="cfg-livetalking-always-on" role="switch" checked />
+        </label>
+        <div class="settings-bento-actions livetalking-engine-actions">
+          <span id="livetalking-engine-action-status" aria-live="polite">Ready.</span>
+          <div>
+            <button type="button" class="btn-secondary" id="stop-livetalking-engine"><span class="material-symbols-rounded" aria-hidden="true">stop</span>Stop</button>
+            <button type="button" class="btn-primary" id="start-livetalking-engine"><span class="material-symbols-rounded" aria-hidden="true">play_arrow</span>Start</button>
+          </div>
+        </div>
+      </section>
+      <section class="settings-bento-card" data-settings-pane="chat" role="tabpanel" hidden>
+        <div class="settings-bento-head"><span class="material-symbols-rounded" aria-hidden="true">forum</span><div><h2>Live Chat</h2><p>Merge platform chat.</p></div><span class="settings-status" id="platform-chat-source-count">0 live</span></div>
+        <div class="platform-chat-summary">
+          <span class="material-symbols-rounded" aria-hidden="true">hub</span>
+          <div><strong>Unify Chat</strong><small id="platform-chat-summary" role="status" aria-live="polite" aria-atomic="true">No platform connected.</small></div>
+        </div>
+        <div class="platform-chat-source-list">
+          <div class="platform-chat-source" data-platform-source="youtube">
+            <span class="platform-chat-source-code" data-platform="youtube">YT</span>
+            <div class="platform-chat-source-copy"><div><strong>YouTube</strong><span class="platform-chat-state" id="youtube-chat-state">Inactive</span></div><small id="youtube-chat-detail">Connect Google for chat.</small></div>
+            <div class="platform-chat-source-actions">
+              <button type="button" class="btn-secondary platform-chat-connect" id="connect-youtube-chat"><span class="material-symbols-rounded" aria-hidden="true">login</span>Continue with Google</button>
+              <button type="button" class="btn-text-action platform-chat-disconnect" id="disconnect-youtube-chat" hidden>Disconnect</button>
+            </div>
+          </div>
+          <div class="platform-chat-source" data-platform-source="facebook">
+            <span class="platform-chat-source-code" data-platform="facebook">FB</span>
+            <div class="platform-chat-source-copy"><div><strong>Facebook</strong><span class="platform-chat-state" id="facebook-chat-state">Inactive</span></div><small id="facebook-chat-detail">Connect Facebook for chat.</small></div>
+            <div class="platform-chat-source-actions">
+              <button type="button" class="btn-secondary platform-chat-connect" id="connect-facebook-chat"><span class="material-symbols-rounded" aria-hidden="true">login</span>Continue with Facebook</button>
+              <button type="button" class="btn-text-action platform-chat-disconnect" id="disconnect-facebook-chat" hidden>Disconnect</button>
+            </div>
+          </div>
+        </div>
+        <div class="settings-bento-actions"><span>Filtered before reply.</span></div>
+      </section>
       <section class="settings-bento-card" data-settings-pane="storage" role="tabpanel" hidden>
-        <div class="settings-bento-head"><span class="material-symbols-rounded">folder_open</span><div><h2>Project storage</h2><p>Uploads and trained models.</p></div></div>
+        <div class="settings-bento-head"><span class="material-symbols-rounded">folder_open</span><div><h2>Project storage</h2><p>Uploads and models.</p></div></div>
         <div class="settings-storage-fields">
           <label><span>Root folder</span><div class="settings-folder-picker"><input id="project-storage-root" type="text" placeholder="/Users/you/AI-Livestream-Projects" /><button id="select-project-storage-folder" type="button" class="btn-secondary"><span class="material-symbols-rounded">folder_open</span>Select folder</button></div></label>
           <label><span>Project name</span><input id="project-storage-name" type="text" value="ai-livestream" /></label>
         </div>
         <div class="settings-bento-actions"><span id="project-storage-status">Loading settings...</span><button id="save-project-storage" type="button" class="btn-primary">Save folder</button></div>
       </section>
-      <section class="settings-bento-card" data-settings-pane="director" role="tabpanel" hidden>
-        <div class="settings-bento-head"><span class="material-symbols-rounded">memory</span><div><h2>AI Director</h2><p>Choose the reply model used for live chat.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
-        <div class="ai-director-provider-field"><label for="ai-director-provider">Provider</label><select id="ai-director-provider"><option value="ollama">Local Qwen (Ollama)</option><option value="ttm-chatgpt">ChatGPT (TTM API)</option></select></div>
+      <section class="settings-bento-card settings-engines-pane" data-settings-pane="engines" role="tabpanel" hidden>
+        <div class="settings-bento-head"><span class="material-symbols-rounded">deployed_code</span><div><h2>AI Engines</h2><p>Control local engines.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
+        <div class="settings-engine-subhead"><div><strong>Director configuration</strong><small>Qwen primary. ChatGPT fallback.</small></div></div>
+        <div class="ai-director-provider-field"><label for="ai-director-provider">Configuration</label><select id="ai-director-provider"><option value="ollama">Qwen 8B - Primary</option><option value="ttm-chatgpt">ChatGPT - Fallback credential</option></select></div>
         <div class="ai-director-provider-panel" id="ai-director-ollama-panel">
           <div class="local-ai-model-row"><div><label for="local-ai-model-name">Model</label><input id="local-ai-model-name" type="text" value="qwen3:8b" autocomplete="off" spellcheck="false" /></div><div><span>Runtime</span><strong id="local-ai-runtime-state">Checking Ollama...</strong></div></div>
-          <p class="local-ai-note">Replies stay on this machine and use a bounded 8B model by default.</p>
+          <p class="local-ai-note">Qwen primary. ChatGPT fallback.</p>
           <div class="ai-director-inline-actions"><span id="local-ai-install-progress" aria-live="polite"></span><button id="install-local-ai-model" type="button" class="btn-secondary"><span class="material-symbols-rounded">download</span>Install model</button></div>
         </div>
-        <div class="ai-director-provider-panel" id="ai-director-ttm-panel" hidden><div class="ai-director-cloud-fields"><label><span>TTM API Key</span><input id="ai-director-api-key" type="password" autocomplete="off" placeholder="Enter API key" /></label><label><span>ChatGPT model</span><select id="ai-director-chatgpt-model"><option value="chat-latest">chat-latest</option></select></label></div><p class="local-ai-note">Requests use the TTM API gateway. The key is never returned to the interface.</p><div class="ai-director-inline-actions"><span id="ai-director-ttm-status" aria-live="polite">Enter a key, then check models.</span><button id="refresh-ai-director-models" type="button" class="btn-secondary"><span class="material-symbols-rounded">sync</span>Check models</button></div></div>
+        <div class="ai-director-provider-panel" id="ai-director-ttm-panel" hidden><div class="ai-director-cloud-fields"><label><span>TTM API Key</span><input id="ai-director-api-key" type="password" autocomplete="off" placeholder="Enter API key" /></label><label><span>ChatGPT model</span><select id="ai-director-chatgpt-model"><option value="chat-latest">chat-latest</option></select></label></div><p class="local-ai-note">TTM key stays private.</p><div class="ai-director-inline-actions"><span id="ai-director-ttm-status" aria-live="polite">Enter a key to check models.</span><button id="refresh-ai-director-models" type="button" class="btn-secondary"><span class="material-symbols-rounded">sync</span>Check models</button></div></div>
         <div class="settings-bento-actions"><span id="ai-director-save-status" aria-live="polite"></span><button id="save-ai-director" type="button" class="btn-primary"><span class="material-symbols-rounded">save</span>Save AI Director</button></div>
+        <div class="settings-engine-subhead settings-engine-runtime-head"><div><strong>Runtime engines</strong><small id="engine-manager-summary">Checking local engines...</small></div><button type="button" class="btn-icon-hdr" id="refresh-ai-engines" title="Refresh engine status" aria-label="Refresh engine status"><span class="material-symbols-rounded" aria-hidden="true">refresh</span></button></div>
+        <div class="engine-card-grid" id="engine-card-grid" aria-busy="true">
+          <div class="engine-card-skeleton"></div><div class="engine-card-skeleton"></div>
+          <div class="engine-card-skeleton"></div><div class="engine-card-skeleton"></div>
+        </div>
+        <time class="settings-engine-updated" id="engine-manager-updated"></time>
       </section>
       </div>
     </div>
@@ -761,7 +862,7 @@
           <div><span id="avatar-create-status">Ready to upload</span><strong id="avatar-create-progress-label">0%</strong></div>
           <div class="avatar-create-progress-track"><span id="avatar-create-progress-fill"></span></div>
         </div>
-        <div class="avatar-create-message" id="avatar-create-message">Your trained avatar will be saved to the local avatar library.</div>
+        <div class="avatar-create-message" id="avatar-create-message">Saved to Avatar Library.</div>
       </div>
       <div class="modal-ftr avatar-create-footer">
         <button type="button" class="btn-secondary" id="cancel-avatar-create">Cancel</button>
@@ -774,7 +875,7 @@
   <div class="modal-backdrop" id="modal-obs" style="display:none;">
     <div class="modal-card">
       <div class="modal-hdr">
-        <h3>🎥 OBS Studio connection</h3>
+        <h3>OBS Studio connection</h3>
         <button class="modal-close" id="close-modal-obs">&times;</button>
       </div>
       <div class="modal-body">
@@ -791,29 +892,52 @@
 
         <div class="form-group">
           <label>OBS credentials</label>
-          <div class="settings-note">The WebSocket password is managed by the runtime server.</div>
+          <div class="settings-note">Uses local OBS credentials.</div>
         </div>
 
         <div class="form-group">
           <label for="cfg-livetalking-restart-interval">Avatar memory refresh</label>
           <select class="form-input" id="cfg-livetalking-restart-interval"><option value="5">Every 5 minutes</option><option value="10">Every 10 minutes</option><option value="15" selected>Every 15 minutes</option><option value="20">Every 20 minutes</option></select>
-          <div class="settings-note" id="livetalking-maintenance-status" aria-live="polite">Runs only after voice playback finishes.</div>
+          <div class="settings-note" id="livetalking-maintenance-status" aria-live="polite">Waits for voice playback.</div>
         </div>
 
         <div class="form-group">
           <label class="mixer-auto-toggle">
             <input type="checkbox" id="cfg-obs-autoconnect" checked />
-            <span>Reconnect automatically when OBS starts</span>
+            <span>Reconnect with OBS</span>
           </label>
         </div>
 
-        <div class="obs-status-banner" id="obs-status-banner" style="margin-top:12px; padding:10px; border-radius:6px; background:rgba(48,209,88,0.1); border:1px solid rgba(48,209,88,0.3); font-size:12px; color:var(--green);">
-          ● Ready to connect to OBS WebSocket v5 (Scenes: Main Scene, Media: IdolVideo)
+        <div class="form-group">
+          <label for="cfg-playback-overlap-frames">Monitor Library playback</label>
+          <select class="form-input" id="cfg-playback-overlap-frames">
+            <option value="0">Standard loop</option>
+            <option value="1">Overlap 1 frame</option>
+            <option value="2" selected>Overlap 2 frames</option>
+            <option value="3">Overlap 3 frames</option>
+            <option value="4">Overlap 4 frames</option>
+          </select>
+          <div class="settings-note">Preloads next loop; holds final frame.</div>
+        </div>
+
+        <div class="form-group obs-video-preset" id="obs-video-preset" data-state="checking">
+          <label>Stream video preset</label>
+          <div class="obs-preset-grid">
+            <span><b>Canvas</b> <span id="obs-video-canvas-size">1920 x 1080</span></span>
+            <span><b>Frame rate</b> 30 FPS</span>
+            <span><b>Source</b> Browser + audio</span>
+            <span><b>Loop handoff</b> 2 frames</span>
+          </div>
+          <div class="settings-note" id="obs-video-preset-status">Applied before streaming.</div>
+        </div>
+
+        <div class="obs-status-banner" id="obs-status-banner" data-state="waiting" role="status" aria-live="polite">
+          Enable OBS WebSocket, then Magic Connect.
         </div>
       </div>
       <div class="modal-ftr">
         <button class="btn-secondary" id="cancel-modal-obs">Close</button>
-        <button class="btn-primary" id="save-modal-obs">Connect OBS</button>
+        <button class="btn-primary" id="save-modal-obs"><span class="material-symbols-rounded" aria-hidden="true">cable</span><span>Magic Connect</span></button>
       </div>
     </div>
   </div>

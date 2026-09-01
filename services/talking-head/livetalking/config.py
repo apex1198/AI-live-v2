@@ -48,10 +48,12 @@ def parse_args():
                         help='YAML 配置文件路径（设为空字符串可跳过）')
 
     # ─── 音频 ──────────────────────────────────────────────────────────
-    parser.add_argument('--fps', type=float, default=12.5,
+    parser.add_argument('--fps', type=float, default=25.0,
                         help="MuseTalk model generation FPS")
-    parser.add_argument('--output_fps', type=int, default=25,
+    parser.add_argument('--output_fps', type=int, default=30,
                         help="WebRTC output FPS")
+    parser.add_argument('--prebuffer_ms', type=int, default=480,
+                        help="Audio/video startup buffer in milliseconds")
     parser.add_argument('-l', type=int, default=10)
     parser.add_argument('-m', type=int, default=8)
     parser.add_argument('-r', type=int, default=10)
@@ -65,7 +67,7 @@ def parse_args():
                         help="avatar model: musetalk/wav2lip/ultralight")
     parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
                         help="avatar id in data/avatars")
-    parser.add_argument('--batch_size', type=int, default=16, help="infer batch")
+    parser.add_argument('--batch_size', type=int, default=4, help="infer batch")
     parser.add_argument('--modelres', type=int, default=192)
     parser.add_argument('--modelfile', type=str, default='')
 
@@ -121,8 +123,9 @@ def parse_args():
             opt.customopt = json.load(f)
 
     # Keep the model and transport clocks compatible across native and worker
-    # launches. One generated model frame maps to two 25 FPS output frames.
-    opt.fps = 12.5
-    opt.output_fps = 25
+    # launches. MuseTalk renders at its native 25 FPS cadence while WebRTC
+    # publishes a stable 30 FPS stream for OBS.
+    opt.fps = 25.0
+    opt.output_fps = 30
 
     return opt

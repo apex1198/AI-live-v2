@@ -4,14 +4,21 @@
   global.createLiveTalkingWebRTCClient = function createLiveTalkingWebRTCClient(options) {
     const getApp = options.getApp;
     const getStudio = options.getStudio;
+    const getClientId = options.getClientId || (() => '');
+    const onOutputStreamChanged = options.onOutputStreamChanged || (() => {});
+    const onMediaStateChanged = options.onMediaStateChanged || (() => {});
     const client = {
       pc: null,
       sessionId: null,
       videoEl: null,
       audioEl: null,
       endpoint: null,
+      outputStream: new MediaStream(),
       operation: Promise.resolve(),
       connectionStartedAt: 0,
+      heartbeatTimer: null,
+      mediaStateInFlight: false,
+      audioPlayable: false,
 
       isConnected() {
         if (!this.sessionId || !this.pc) return false;
@@ -31,20 +38,93 @@
           || this.pc.iceConnectionState === 'disconnected';
       },
 
+      getOutputStream() {
+        return this.outputStream;
+      },
+
       async ensureAudioPlayback() {
         const audio = this.audioEl;
-        if (!audio) return false;
+        if (!audio) {
+          this.audioPlayable = false;
+          void this.emitMediaState('audio-element-missing');
+          return false;
+        }
         audio.muted = false;
         audio.defaultMuted = false;
         audio.volume = 1;
-        if (getApp().isMuted) return false;
+        if (getApp().isMuted) {
+          this.audioPlayable = true;
+          void this.emitMediaState('audio-muted-by-operator');
+          return false;
+        }
         try {
           await audio.play();
+          this.audioPlayable = true;
+          void this.emitMediaState('audio-playable');
           return true;
         } catch (error) {
+          this.audioPlayable = false;
+          void this.emitMediaState('audio-blocked');
           console.warn('[LiveTalking] WebRTC audio play blocked:', error.message);
           return false;
         }
+      },
+
+      async mediaState(reason = 'heartbeat') {
+        const pc = this.pc;
+        const audioTrack = this.outputStream.getAudioTracks().find(track => track.readyState === 'live');
+        const videoTrack = this.outputStream.getVideoTracks().find(track => track.readyState === 'live');
+        let audioPackets = 0;
+        let videoFrames = 0;
+        if (pc && !['closed', 'failed'].includes(pc.connectionState)) {
+          try {
+            const stats = await pc.getStats();
+            stats.forEach(report => {
+              if (report.type !== 'inbound-rtp') return;
+              if ((report.kind || report.mediaType) === 'audio') audioPackets += Number(report.packetsReceived || 0);
+              if ((report.kind || report.mediaType) === 'video') {
+                videoFrames += Number(report.framesDecoded ?? report.framesReceived ?? 0);
+              }
+            });
+          } catch { /* The connection may have closed while stats were collected. */ }
+        }
+        const rawState = pc?.connectionState || (this.sessionId ? 'connecting' : 'closed');
+        const connectionState = ['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed'].includes(rawState)
+          ? rawState.toUpperCase()
+          : 'DISCONNECTED';
+        return {
+          type: 'LIVETALKING_MEDIA_STATE',
+          clientId: getClientId(),
+          sessionId: this.sessionId,
+          connectionState,
+          audioTrack: Boolean(audioTrack),
+          videoTrack: Boolean(videoTrack),
+          audioPlayable: Boolean(audioTrack && this.audioPlayable),
+          audioPackets: Math.max(0, Math.round(audioPackets)),
+          videoFrames: Math.max(0, Math.round(videoFrames)),
+          reason,
+        };
+      },
+
+      async emitMediaState(reason = 'heartbeat') {
+        if (this.mediaStateInFlight || !getClientId()) return;
+        this.mediaStateInFlight = true;
+        try {
+          onMediaStateChanged(await this.mediaState(reason));
+        } finally {
+          this.mediaStateInFlight = false;
+        }
+      },
+
+      startHeartbeat() {
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = setInterval(() => void this.emitMediaState('heartbeat'), 2000);
+        void this.emitMediaState('heartbeat-started');
+      },
+
+      hasLiveTracks() {
+        return this.outputStream.getAudioTracks().some(track => track.readyState === 'live')
+          && this.outputStream.getVideoTracks().some(track => track.readyState === 'live');
       },
 
       connect(endpoint, avatarId = 'avatar_main') {
@@ -88,9 +168,22 @@
         document.body.appendChild(audio);
         this.videoEl = video;
         this.audioEl = audio;
+        this.audioPlayable = false;
+
+        const reportConnectionState = () => void this.emitMediaState(`peer-${pc.connectionState || pc.iceConnectionState}`);
+        pc.addEventListener('connectionstatechange', reportConnectionState);
+        pc.addEventListener('iceconnectionstatechange', reportConnectionState);
 
         pc.addEventListener('track', event => {
           const stream = event.streams?.[0] || new MediaStream([event.track]);
+          for (const existingTrack of this.outputStream.getTracks()) {
+            if (existingTrack.kind === event.track.kind) this.outputStream.removeTrack(existingTrack);
+          }
+          this.outputStream.addTrack(event.track);
+          event.track.addEventListener('mute', () => void this.emitMediaState(`${event.track.kind}-muted`));
+          event.track.addEventListener('unmute', () => void this.emitMediaState(`${event.track.kind}-unmuted`));
+          event.track.addEventListener('ended', () => void this.emitMediaState(`${event.track.kind}-ended`));
+          onOutputStreamChanged(this.outputStream);
           if (event.track.kind === 'video') {
             video.srcObject = stream;
             video.play().catch(() => {});
@@ -117,7 +210,7 @@
             setTimeout(resolve, 3000);
           });
         }
-        const answer = await global.LiveTalkingApi.offer(pc.localDescription.sdp, 'offer', avatarId);
+        const answer = await global.LiveTalkingApi.offer(pc.localDescription.sdp, 'offer', avatarId, getClientId());
         if (!answer.sdp) throw new Error(answer.error || 'Worker returned no WebRTC SDP');
         this.sessionId = answer.sessionid || null;
         let remoteDescriptionTimer;
@@ -134,6 +227,15 @@
         } finally {
           clearTimeout(remoteDescriptionTimer);
         }
+        const mediaDeadline = Date.now() + 12_000;
+        while (Date.now() < mediaDeadline && !this.hasLiveTracks()) {
+          if (['failed', 'closed'].includes(pc.connectionState)) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (!this.hasLiveTracks()) throw new Error('LiveTalking connected without both audio and video tracks');
+        await this.ensureAudioPlayback();
+        this.startHeartbeat();
+        await this.emitMediaState('media-connected');
         return { sessionId: this.sessionId, health: health.health };
       },
 
@@ -146,13 +248,8 @@
       async _disconnect() {
         const sessionId = this.sessionId;
         this.sessionId = null;
-        if (sessionId) {
-          try {
-            await global.LiveTalkingApi.closeSession(sessionId);
-          } catch (error) {
-            console.warn('[LiveTalking] Could not release worker session:', error.message);
-          }
-        }
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = null;
         if (this.pc) this.pc.close();
         this.pc = null;
         if (this.videoEl) this.videoEl.srcObject = null;
@@ -163,7 +260,18 @@
         }
         this.videoEl = null;
         this.audioEl = null;
+        this.audioPlayable = false;
+        this.outputStream = new MediaStream();
+        onOutputStreamChanged(null);
         this.connectionStartedAt = 0;
+        await this.emitMediaState('disconnected');
+        if (sessionId) {
+          try {
+            await global.LiveTalkingApi.closeSession(sessionId);
+          } catch (error) {
+            console.warn('[LiveTalking] Could not release worker session:', error.message);
+          }
+        }
       },
     };
     global.addEventListener('pagehide', () => client.disconnect());

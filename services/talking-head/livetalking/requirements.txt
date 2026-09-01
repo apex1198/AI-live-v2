@@ -32,8 +32,9 @@ transformers #==4.46.2
 edge_tts
 flask
 #flask_sockets
-opencv-python-headless
-aiortc
+opencv-python-headless==5.0.0.93
+av==15.1.0
+aiortc==1.15.0
 aiohttp_cors
 
 #ffmpeg-python

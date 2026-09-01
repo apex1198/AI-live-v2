@@ -26,6 +26,7 @@
       queuedTransition: null,
       activeFilter: 'all',
       libraryRatio: storage.getItem(storageKeys.LIBRARY_RATIO) === '9:16' ? '9:16' : '16:9',
+      playbackOverlapFrames: 2,
       stateHistory: [{ state: 'GAMEPLAY_IDLE', time: Date.now() - 60000, color: '#d8d8da' }],
       streamContext: {
         lastGameEvent: 'New round in progress',
@@ -50,6 +51,7 @@
         viseme: 'sil',
         currentSpeechDurationMs: 0,
         speechStartedAt: 0,
+        videoQuality: 'fhd',
       },
       voice: {
         provider: ['qwentts', 'omnivoice'].includes(storage.getItem(storageKeys.VOICE_PROVIDER))
@@ -62,7 +64,7 @@
         providerConfigured: false,
         voiceId: storage.getItem(storageKeys.VOICE_ID) || 'qwen-default',
         customVoices: JSON.parse(storage.getItem(storageKeys.CUSTOM_VOICES) || '[]'),
-        speed: parseFloat(storage.getItem(storageKeys.VOICE_SPEED) || '1.05'),
+        speed: parseFloat(storage.getItem(storageKeys.VOICE_SPEED) || '1.0'),
         personaName: storage.getItem(storageKeys.PERSONA_NAME) || 'Mimi',
         personaPrompt: storage.getItem(storageKeys.PERSONA_PROMPT) || 'Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu.',
       },

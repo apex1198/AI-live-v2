@@ -1,3 +1,4 @@
+import os
 import threading
 import unittest
 from unittest.mock import patch
@@ -6,6 +7,7 @@ from avatars.musetalk.model_resources import (
     bounded_preprocess_size,
     get_shared_vae,
     set_shared_vae,
+    scale_box,
     throttle_training,
     vae_lock,
 )
@@ -15,10 +17,26 @@ class ResourcePolicyTestCase(unittest.TestCase):
     def tearDown(self):
         set_shared_vae(None)
 
-    def test_preprocess_caps_landscape_and_portrait_to_720p(self):
-        self.assertEqual(bounded_preprocess_size(3840, 2160), (1280, 720))
-        self.assertEqual(bounded_preprocess_size(2160, 3840), (720, 1280))
-        self.assertEqual(bounded_preprocess_size(640, 360), (640, 360))
+    def test_preprocess_defaults_landscape_and_portrait_to_720p(self):
+        with patch.dict('os.environ', {}, clear=False):
+            os.environ.pop('LIVETALKING_PREPROCESS_QUALITY', None)
+            os.environ.pop('LIVETALKING_MAX_WIDTH', None)
+            os.environ.pop('LIVETALKING_MAX_HEIGHT', None)
+            self.assertEqual(bounded_preprocess_size(3840, 2160), (1280, 720))
+            self.assertEqual(bounded_preprocess_size(2160, 3840), (720, 1280))
+            self.assertEqual(bounded_preprocess_size(640, 360), (640, 360))
+
+    def test_preprocess_supports_fhd_live_session(self):
+        with patch.dict('os.environ', {
+            'LIVETALKING_PREPROCESS_QUALITY': 'fhd',
+            'LIVETALKING_MAX_WIDTH': '1920',
+            'LIVETALKING_MAX_HEIGHT': '1080',
+        }):
+            self.assertEqual(bounded_preprocess_size(3840, 2160), (1920, 1080))
+            self.assertEqual(bounded_preprocess_size(2160, 3840), (1080, 1920))
+
+    def test_scales_legacy_avatar_coordinates_with_the_frame(self):
+        self.assertEqual(scale_box([100, 80, 500, 600], 0.75, 0.75), [75, 60, 375, 450])
 
     def test_training_reuses_the_inference_vae_and_lock(self):
         shared = object()

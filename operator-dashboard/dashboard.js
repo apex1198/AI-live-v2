@@ -16,6 +16,7 @@ const STORAGE_KEYS = {
   LIVETALKING_MODEL:    'idol_livetalking_model',
   LIVETALKING_AVATAR:   'idol_livetalking_avatar',
   ACTIVE_AVATAR:        'idol_active_avatar',
+  AVATAR_POOL:          'idol_selected_avatar_pool',
   PROJECT_STORAGE_ROOT: 'idol_project_storage_root',
   PROJECT_NAME:         'idol_project_name',
   VOICE_ID:     'idol_voice_id',
@@ -42,7 +43,17 @@ const STORAGE_KEYS = {
   OBS_CONFIG:           'idol_obs_config',
   MODEL_TASKS:          'idol_model_tasks',
   STUDIO_COLUMNS:       'idol_studio_columns',
+  VIDEO_QUALITY:        'idol_live_video_quality',
+  MOCK_CHAT_USER:       'idol_mock_chat_user',
 };
+
+const LIVE_VIDEO_PRESETS = Object.freeze({
+  fhd: Object.freeze({ quality: 'fhd', label: 'FHD', width: 1920, height: 1080, fps: 30, maxBitrate: 8_000_000 }),
+});
+
+function liveVideoPreset(quality = App?.talkingEngine?.videoQuality) {
+  return LIVE_VIDEO_PRESETS[quality] || LIVE_VIDEO_PRESETS.fhd;
+}
 
 // Provider secrets are server-side only. Remove credentials persisted by older builds.
 localStorage.removeItem('idol_elevenlabs_key');
@@ -86,6 +97,7 @@ const CLIP_LIBRARY = {
   INVITE_PLAY:    [],
   CTA:            [],
   THANK_DONATION: [],
+  AFK:            [],
 };
 
 const UPLOADED_BLOBS = new Map();
@@ -99,9 +111,320 @@ let runtimeRealtimeConnected = false;
 let runtimeRealtimeReconnectTimer = null;
 let runtimeSpeechState = 'IDLE';
 let pendingRuntimePlaybackCommandId = null;
+const OBS_PUBLISHER_ID_KEY = 'idol_obs_output_publisher_id';
+const OBS_OUTPUT_PUBLISHER_ID = sessionStorage.getItem(OBS_PUBLISHER_ID_KEY)
+  || `dashboard_${crypto.randomUUID().replace(/-/g, '')}`;
+sessionStorage.setItem(OBS_PUBLISHER_ID_KEY, OBS_OUTPUT_PUBLISHER_ID);
+// A duplicated browser tab may copy sessionStorage. Keep ownership unique to
+// this document so a duplicate can never impersonate and replace its session.
+const LIVE_MEDIA_CLIENT_ID = `monitor_${crypto.randomUUID().replace(/-/g, '')}`;
+const LiveMediaOwnership = {
+  state: 'PENDING',
+  ownerClientId: '',
+  mediaReady: false,
+  waiters: new Set(),
+};
+let liveMediaResetPromise = null;
+
+function settleLiveMediaOwnership(state, ownerClientId = '') {
+  LiveMediaOwnership.state = state;
+  LiveMediaOwnership.ownerClientId = ownerClientId;
+  if (state !== 'OWNER') LiveMediaOwnership.mediaReady = false;
+  for (const waiter of LiveMediaOwnership.waiters) waiter();
+  LiveMediaOwnership.waiters.clear();
+}
+
+function applyLiveMediaSnapshot(media = {}) {
+  if (media.ownerClientId !== LIVE_MEDIA_CLIENT_ID) {
+    LiveMediaOwnership.mediaReady = false;
+    return;
+  }
+  LiveMediaOwnership.mediaReady = Boolean(media.ready);
+}
+
+function disconnectLiveMedia(reason, reconnect = false) {
+  if (liveMediaResetPromise) return liveMediaResetPromise;
+  liveMediaResetPromise = Promise.resolve()
+    .then(() => LiveTalkingWebRTCClient?.disconnect?.())
+    .catch(error => addLog(`Could not reset Live Monitor: ${error.message}`, 'warn'))
+    .then(async () => {
+      if (!reconnect || LiveMediaOwnership.state !== 'OWNER' || !LiveTalkingWorker?.ready) return;
+      const avatarId = [LiveAvatarSession?.activeAvatarId, LiveTalkingStudio?.avatarId]
+        .find(id => id && TRAINED_AVATARS.has(id))
+        || TRAINED_AVATARS.keys().next().value;
+      if (avatarId) await reconnectLiveTalkingAvatar(avatarId);
+    })
+    .catch(error => addLog(`Live Monitor reconnect failed: ${error.message}`, 'warn'))
+    .finally(() => {
+      liveMediaResetPromise = null;
+    });
+  if (reason) addLog(`Live Monitor reset: ${reason}`, 'warn');
+  return liveMediaResetPromise;
+}
+
+function registerLiveMediaClient() {
+  return sendRuntimeSignal({
+    type: 'LIVETALKING_MEDIA_REGISTER',
+    clientId: LIVE_MEDIA_CLIENT_ID,
+    priority: document.visibilityState === 'visible' ? 100 : 10,
+  });
+}
+
+async function waitForLiveMediaOwnership(timeoutMs = 5000) {
+  if (LiveMediaOwnership.state === 'OWNER') return true;
+  if (LiveMediaOwnership.state === 'STANDBY') {
+    throw new Error('Live Monitor is active in another tab');
+  }
+  if (!runtimeRealtimeConnected) connectRuntimeRealtime();
+  registerLiveMediaClient();
+  await new Promise(resolve => {
+    const timer = setTimeout(() => {
+      LiveMediaOwnership.waiters.delete(done);
+      resolve();
+    }, timeoutMs);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    LiveMediaOwnership.waiters.add(done);
+  });
+  if (LiveMediaOwnership.state !== 'OWNER') {
+    throw new Error(LiveMediaOwnership.state === 'STANDBY'
+      ? 'Live Monitor is active in another tab'
+      : 'Live Monitor ownership is unavailable');
+  }
+  return true;
+}
+
+function sendRuntimeSignal(payload) {
+  if (!runtimeRealtimeSocket || runtimeRealtimeSocket.readyState !== WebSocket.OPEN) return false;
+  runtimeRealtimeSocket.send(JSON.stringify(payload));
+  return true;
+}
+
+const OBSOutputBridge = {
+  pc: null,
+  videoSender: null,
+  audioSender: null,
+  stream: null,
+  monitorStream: null,
+  monitorCanvas: null,
+  monitorContext: null,
+  monitorRenderFrame: 0,
+  silentAudioContext: null,
+  silentAudioTrack: null,
+  receiverReady: false,
+  pendingCandidates: [],
+  publishRun: 0,
+  sessionId: '',
+  negotiationId: '',
+
+  applyVideoPreset(preset, republish = false) {
+    if (!preset) return;
+    const sizeChanged = Boolean(this.monitorCanvas)
+      && (this.monitorCanvas.width !== preset.width || this.monitorCanvas.height !== preset.height);
+    if (this.monitorCanvas && sizeChanged) {
+      this.monitorCanvas.width = preset.width;
+      this.monitorCanvas.height = preset.height;
+    }
+    if (sizeChanged && republish && this.receiverReady && this.sessionId) {
+      this.closePeer();
+      void this.publish();
+    }
+  },
+
+  updateStream(stream) {
+    this.stream = stream;
+    if (this.audioSender && this.pc && !['closed', 'failed'].includes(this.pc.connectionState)) {
+      const audioTrack = stream?.getAudioTracks().find(track => track.readyState === 'live') || this.ensureSilentAudioTrack();
+      void this.audioSender.replaceTrack(audioTrack).catch(error => {
+        addLog(`OBS audio track update failed: ${error.message}`, 'warn');
+      });
+      return;
+    }
+    if (this.receiverReady && !this.pc) void this.publish();
+  },
+
+  ensureMonitorStream() {
+    if (this.monitorStream?.getVideoTracks().some(track => track.readyState === 'live')) return this.monitorStream;
+    const preset = liveVideoPreset();
+    const canvas = document.createElement('canvas');
+    canvas.width = preset.width;
+    canvas.height = preset.height;
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context || typeof canvas.captureStream !== 'function') return this.stream;
+    this.monitorCanvas = canvas;
+    this.monitorContext = context;
+    this.monitorStream = canvas.captureStream(30);
+
+    const renderMonitor = () => {
+      const target = this.monitorCanvas;
+      const ctx = this.monitorContext;
+      if (!target || !ctx) return;
+      const talkingCanvas = $('monitor-w2l-canvas');
+      const source = talkingCanvas?.classList.contains('is-visible') ? talkingCanvas : getActiveMonitorVideo();
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, target.width, target.height);
+      const sourceWidth = source?.videoWidth || source?.width || 0;
+      const sourceHeight = source?.videoHeight || source?.height || 0;
+      if (source && sourceWidth > 0 && sourceHeight > 0) {
+        const scale = Math.max(target.width / sourceWidth, target.height / sourceHeight);
+        const width = Math.round(sourceWidth * scale);
+        const height = Math.round(sourceHeight * scale);
+        ctx.drawImage(source, Math.round((target.width - width) / 2), Math.round((target.height - height) / 2), width, height);
+      }
+      this.monitorRenderFrame = requestAnimationFrame(renderMonitor);
+    };
+    this.monitorRenderFrame = requestAnimationFrame(renderMonitor);
+    return this.monitorStream;
+  },
+
+  ensureSilentAudioTrack() {
+    if (this.silentAudioTrack?.readyState === 'live') return this.silentAudioTrack;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return null;
+    const context = new AudioContextClass();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const destination = context.createMediaStreamDestination();
+    gain.gain.value = 0;
+    oscillator.connect(gain).connect(destination);
+    oscillator.start();
+    this.silentAudioContext = context;
+    this.silentAudioTrack = destination.stream.getAudioTracks()[0] || null;
+    return this.silentAudioTrack;
+  },
+
+  outputStream() {
+    const monitor = this.ensureMonitorStream();
+    if (!monitor) return this.stream;
+    const videoTrack = monitor.getVideoTracks()[0];
+    const audioTrack = this.stream?.getAudioTracks().find(track => track.readyState === 'live') || this.ensureSilentAudioTrack();
+    return new MediaStream([videoTrack, audioTrack].filter(Boolean));
+  },
+
+  closePeer() {
+    this.publishRun += 1;
+    this.pendingCandidates.length = 0;
+    if (this.pc) this.pc.close();
+    this.pc = null;
+    this.videoSender = null;
+    this.audioSender = null;
+    this.negotiationId = '';
+  },
+
+  async publish() {
+    const stream = this.outputStream();
+    if (!this.sessionId || !this.receiverReady || !runtimeRealtimeConnected || !stream) return;
+    if (!stream.getVideoTracks().length) return;
+    const runId = ++this.publishRun;
+    if (this.pc) this.pc.close();
+    const negotiationId = `neg_${crypto.randomUUID().replace(/-/g, '')}`;
+    this.negotiationId = negotiationId;
+    const pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan' });
+    this.pc = pc;
+    this.pendingCandidates.length = 0;
+    for (const track of stream.getTracks()) {
+      const sender = pc.addTrack(track, stream);
+      if (track.kind === 'video') {
+        this.videoSender = sender;
+        track.contentHint = 'detail';
+        const preset = liveVideoPreset();
+        const parameters = sender.getParameters();
+        if (!parameters.encodings?.length) parameters.encodings = [{}];
+        parameters.encodings[0].maxBitrate = preset.maxBitrate;
+        parameters.encodings[0].maxFramerate = preset.fps;
+        if ('degradationPreference' in parameters) {
+          parameters.degradationPreference = 'maintain-framerate';
+        }
+        await sender.setParameters(parameters).catch(error => {
+          addLog(`OBS video quality parameters were not applied: ${error.message}`, 'warn');
+        });
+      }
+      if (track.kind === 'audio') this.audioSender = sender;
+    }
+    pc.addEventListener('icecandidate', event => {
+      if (event.candidate && runId === this.publishRun) {
+        sendRuntimeSignal({
+          type: 'OBS_OUTPUT_ICE',
+          sessionId: this.sessionId,
+          negotiationId,
+          candidate: event.candidate.toJSON(),
+        });
+      }
+    });
+    pc.addEventListener('connectionstatechange', () => {
+      if (runId !== this.publishRun) return;
+      if (['failed', 'closed'].includes(pc.connectionState)) {
+        this.closePeer();
+        if (this.receiverReady) setTimeout(() => void this.publish(), 1000);
+      }
+    });
+    const offer = await pc.createOffer();
+    if (runId !== this.publishRun) return;
+    await pc.setLocalDescription(offer);
+    sendRuntimeSignal({
+      type: 'OBS_OUTPUT_OFFER',
+      sessionId: this.sessionId,
+      negotiationId,
+      description: { type: 'offer', sdp: pc.localDescription.sdp },
+    });
+  },
+
+  async handleSignal(payload) {
+    if (payload.type === 'OBS_OUTPUT_SESSION_ASSIGNED') {
+      if (this.sessionId && this.sessionId !== payload.sessionId) this.closePeer();
+      this.sessionId = payload.sessionId;
+      this.receiverReady = Boolean(payload.receiverReady);
+      if (!this.pc) await this.publish();
+      return true;
+    }
+    if (payload.type === 'OBS_OUTPUT_SESSION_REVOKED') {
+      if (this.sessionId === payload.sessionId) {
+        this.receiverReady = false;
+        this.sessionId = '';
+        this.closePeer();
+      }
+      return true;
+    }
+    if (payload.type === 'OBS_OUTPUT_READY') {
+      if (payload.sessionId !== this.sessionId) return true;
+      this.receiverReady = true;
+      if (!this.pc) await this.publish();
+      return true;
+    }
+    if (payload.type === 'OBS_OUTPUT_RECEIVER_CLOSED') {
+      if (payload.sessionId !== this.sessionId) return true;
+      this.receiverReady = false;
+      this.closePeer();
+      applyObsStatus({ connected: true, mediaConnected: false });
+      return true;
+    }
+    if (payload.type === 'OBS_OUTPUT_MEDIA_CONNECTED') {
+      if (payload.sessionId !== this.sessionId || payload.negotiationId !== this.negotiationId) return true;
+      applyObsStatus({ connected: true, mediaConnected: true, sourceName: 'AI IDOL Streamer' });
+      return true;
+    }
+    if (payload.type === 'OBS_OUTPUT_ANSWER' && this.pc) {
+      if (payload.sessionId !== this.sessionId || payload.negotiationId !== this.negotiationId) return true;
+      await this.pc.setRemoteDescription(payload.description);
+      const candidates = this.pendingCandidates.splice(0);
+      for (const candidate of candidates) await this.pc.addIceCandidate(candidate).catch(() => {});
+      return true;
+    }
+    if (payload.type === 'OBS_OUTPUT_ICE' && this.pc) {
+      if (payload.sessionId !== this.sessionId || payload.negotiationId !== this.negotiationId) return true;
+      if (this.pc.remoteDescription) await this.pc.addIceCandidate(payload.candidate).catch(() => {});
+      else this.pendingCandidates.push(payload.candidate);
+      return true;
+    }
+    return false;
+  },
+};
 
 function applyRuntimeSpeechState(speech = {}) {
   if (speech.state) runtimeSpeechState = speech.state;
+  updateLiveVideoQualityAvailability();
   const providerBadge = $('sys-dialogue-provider');
   if (providerBadge && speech.dialogueProvider) {
     const isFallback = /mock|fallback/i.test(speech.dialogueProvider);
@@ -115,7 +438,7 @@ function applyRuntimeSpeechState(speech = {}) {
   if (speech.state === 'SPEAKING') {
     App.isAiSpeaking = true;
     updateVoiceStatusUI('speaking', speech.provider || 'runtime', 100);
-    LiveTalkingWebRTCClient?.ensureAudioPlayback?.();
+    if (LiveMediaOwnership.state === 'OWNER') LiveTalkingWebRTCClient?.ensureAudioPlayback?.();
     const subBox = $('mon-subtitles');
     const subTxt = $('mon-sub-text');
     if (subBox && subTxt) {
@@ -137,20 +460,163 @@ function applyRuntimeSpeechState(speech = {}) {
   }
 }
 
+function applyObsStatus(obs = {}) {
+  const connected = Boolean(obs.connected);
+  const mediaConnected = Boolean(obs.mediaConnected);
+  const dot = $('sys-obs-dot');
+  const label = $('sys-obs-status');
+  const banner = $('obs-status-banner');
+  if (dot) {
+    dot.classList.toggle('ok', connected);
+    dot.classList.toggle('warn', !connected);
+  }
+  if (label) label.textContent = connected ? 'OBS: Connected' : 'OBS: Waiting';
+  if (banner) {
+    banner.dataset.state = connected && mediaConnected ? 'connected' : (connected ? 'connecting' : 'waiting');
+    banner.textContent = connected && mediaConnected
+      ? `Connected · ${obs.sourceName || 'AI IDOL Streamer'} · Video + voice`
+      : connected
+        ? `Connected · ${obs.sourceName || 'AI IDOL Streamer'} · Waiting for Monitor`
+      : 'Enable OBS WebSocket, then Magic Connect.';
+  }
+}
+
+function platformChatStateCopy(platform, source = {}) {
+  const provider = platform === 'youtube' ? 'YouTube' : 'Facebook';
+  if (!source.configured) return { label: 'Setup required', detail: `${provider} login not configured.` };
+  if (source.state === 'CONNECTING') return { label: 'Connecting', detail: `Approve ${provider} access.` };
+  if (source.state === 'LISTENING') return { label: 'Listening', detail: source.liveTitle ? `${source.accountName || provider} · ${source.liveTitle}` : `${source.accountName || provider} · Live chat connected` };
+  if (source.state === 'WAITING_FOR_LIVE') return { label: 'Waiting for live', detail: `${source.accountName || provider} · Start live for chat.` };
+  if (source.state === 'ERROR') return { label: 'Needs attention', detail: source.error || `${provider} chat could not connect.` };
+  return { label: 'Signed out', detail: platform === 'youtube' ? 'Connect Google for chat.' : 'Connect Facebook for chat.' };
+}
+
+function applyPlatformChatStatus(platformChat = {}) {
+  const sources = platformChat.sources || {};
+  let authenticatedCount = 0;
+  let listeningCount = 0;
+  ['youtube', 'facebook'].forEach(platform => {
+    const source = sources[platform] || { platform, configured: false, authenticated: false, state: 'NOT_CONFIGURED' };
+    const copy = platformChatStateCopy(platform, source);
+    if (source.authenticated) authenticatedCount += 1;
+    if (source.state === 'LISTENING') listeningCount += 1;
+    const state = $(`${platform}-chat-state`);
+    const detail = $(`${platform}-chat-detail`);
+    const connect = $(`connect-${platform}-chat`);
+    const disconnect = $(`disconnect-${platform}-chat`);
+    if (state) {
+      state.textContent = copy.label;
+      state.dataset.state = source.state || 'SIGNED_OUT';
+    }
+    if (detail) detail.textContent = copy.detail;
+    if (connect) {
+      connect.hidden = Boolean(source.authenticated);
+      connect.disabled = !source.configured || source.state === 'CONNECTING';
+    }
+    if (disconnect) disconnect.hidden = !source.authenticated;
+  });
+
+  const sourceCount = $('platform-chat-source-count');
+  const summary = $('platform-chat-summary');
+  const headerDot = $('sys-chat-dot');
+  const headerStatus = $('sys-chat-status');
+  if (sourceCount) sourceCount.textContent = `${listeningCount} live`;
+  if (summary) summary.textContent = listeningCount
+    ? `${listeningCount} live source${listeningCount === 1 ? '' : 's'}.`
+    : authenticatedCount
+      ? `${authenticatedCount} source${authenticatedCount === 1 ? '' : 's'} waiting for live.`
+      : 'No platform connected.';
+  if (headerDot) {
+    headerDot.classList.toggle('ok', listeningCount > 0);
+    headerDot.classList.toggle('warn', listeningCount === 0);
+  }
+  if (headerStatus) headerStatus.textContent = listeningCount ? `Chat: ${listeningCount} live` : authenticatedCount ? 'Chat: Waiting' : 'Chat: Offline';
+}
+
+async function connectPlatformChat(platform) {
+  const button = $(`connect-${platform}-chat`);
+  const summary = $('platform-chat-summary');
+  if (button) button.disabled = true;
+  if (summary) summary.textContent = `Opening ${platform === 'youtube' ? 'Google' : 'Facebook'} login...`;
+  try {
+    const payload = await window.RuntimeApi.post(`/api/platform-chat/${platform}/connect`, {});
+    applyPlatformChatStatus(payload.platformChat || {});
+  } catch (error) {
+    if (summary) summary.textContent = error.message;
+    if (button) button.disabled = false;
+  }
+}
+
+async function disconnectPlatformChat(platform) {
+  const summary = $('platform-chat-summary');
+  try {
+    const payload = await window.RuntimeApi.delete(`/api/platform-chat/${platform}`);
+    applyPlatformChatStatus(payload.platformChat || {});
+  } catch (error) {
+    if (summary) summary.textContent = error.message;
+  }
+}
+
 function handleRuntimeRealtimeMessage(payload) {
+  if (payload.type === 'LIVETALKING_MEDIA_OWNER_GRANTED') {
+    settleLiveMediaOwnership('OWNER', payload.clientId || LIVE_MEDIA_CLIENT_ID);
+    applyLiveMediaSnapshot(payload.media || {});
+    if (!LiveTalkingWebRTCClient?.sessionId && LiveTalkingWorker?.ready && TRAINED_AVATARS.size > 0) {
+      void disconnectLiveMedia('', true);
+    }
+    return;
+  }
+  if (payload.type === 'LIVETALKING_MEDIA_STANDBY') {
+    settleLiveMediaOwnership('STANDBY', payload.ownerClientId || '');
+    void disconnectLiveMedia('another Dashboard owns the Live Monitor');
+    return;
+  }
+  if (payload.type === 'LIVETALKING_MEDIA_REVOKED') {
+    settleLiveMediaOwnership('STANDBY', payload.ownerClientId || '');
+    void disconnectLiveMedia(payload.reason || 'ownership revoked');
+    return;
+  }
+  if (payload.type === 'LIVETALKING_MEDIA_RESET_REQUIRED') {
+    LiveMediaOwnership.mediaReady = false;
+    LiveTalkingWorker.sessionFailureCount = 3;
+    void disconnectLiveMedia(payload.reason || 'worker session changed', true);
+    return;
+  }
+  if (payload.type === 'LIVETALKING_MEDIA_STATUS') {
+    applyLiveMediaSnapshot(payload.media || {});
+    return;
+  }
+  if (payload.type?.startsWith('OBS_OUTPUT_')) {
+    void OBSOutputBridge.handleSignal(payload).catch(error => {
+      addLog(`OBS output link failed: ${error.message}`, 'warn');
+    });
+    return;
+  }
   if (payload.type === 'INITIAL_STATE') {
     const visual = payload.state?.currentVisual;
     if (visual) setVisualState(visual, 7, 'runtime-snapshot', false, true);
     if (payload.speech) applyRuntimeSpeechState(payload.speech);
     if (payload.settings) applyRuntimeSettingsUI(payload.settings);
+    if (payload.media) applyLiveMediaSnapshot(payload.media);
     return;
   }
   if (payload.type === 'STATE_CHANGE' && payload.toState) {
     setVisualState(payload.toState, 7, payload.reason || 'runtime', false, true, payload.asset || null);
-  } else if (payload.type === 'SPEECH_PLAYBACK_PENDING' && payload.commandId) {
+  } else if (payload.type === 'SPEECH_PLAYBACK_PENDING' && payload.commandId && LiveMediaOwnership.state === 'OWNER') {
     queueRuntimeSpeechPlayback(payload.commandId);
   } else if (payload.type === 'SPEECH_STATE') {
     applyRuntimeSpeechState(payload.speech);
+  } else if (payload.type === 'AVATAR_STATE_CHANGED' && payload.avatarId) {
+    LiveAvatarSession.activeAvatarId = payload.avatarId;
+    LiveTalkingStudio.avatarId = payload.avatarId;
+    if (Array.isArray(payload.selectedAvatarIds)) {
+      LiveAvatarSession.selectedAvatarIds = [...new Set(payload.selectedAvatarIds.map(String).filter(Boolean))];
+    }
+    localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, payload.avatarId);
+    localStorage.setItem(STORAGE_KEYS.LIVETALKING_AVATAR, payload.avatarId);
+    localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
+    updateAvatarPoolCount();
+    updateLibraryTransientState();
   } else if (payload.type === 'DIRECTOR_INTENT' && payload.intent?.dialogueProvider) {
     applyRuntimeSpeechState({ dialogueProvider: payload.intent.dialogueProvider });
   } else if (payload.type === 'SETTINGS_UPDATED' && payload.settings) {
@@ -161,6 +627,12 @@ function handleRuntimeRealtimeMessage(payload) {
     applyLiveTalkingWorkerState(payload.worker);
   } else if (payload.type === 'LIVETALKING_MAINTENANCE_STATE' && payload.maintenance) {
     applyLiveTalkingMaintenanceState(payload.maintenance);
+  } else if (payload.type === 'OBS_STATUS' && payload.obs) {
+    applyObsStatus(payload.obs);
+  } else if (payload.type === 'PLATFORM_CHAT_STATUS' && payload.platformChat) {
+    applyPlatformChatStatus(payload.platformChat);
+  } else if (payload.type === 'CHAT_MESSAGE' && payload.message) {
+    renderChatMessage(payload.message);
   }
 }
 
@@ -169,12 +641,35 @@ function connectRuntimeRealtime() {
   if (runtimeRealtimeSocket && runtimeRealtimeSocket.readyState < WebSocket.CLOSING) return;
   runtimeRealtimeSocket = window.RuntimeApi.connectRealtime(handleRuntimeRealtimeMessage, state => {
     runtimeRealtimeConnected = state === 'open';
+    if (state === 'open') {
+      registerLiveMediaClient();
+      sendRuntimeSignal({
+        type: 'OBS_OUTPUT_REGISTER',
+        role: 'publisher',
+        peerId: OBS_OUTPUT_PUBLISHER_ID,
+        priority: document.visibilityState === 'visible' ? 100 : 10,
+      });
+    }
     if (state === 'closed') {
+      settleLiveMediaOwnership('PENDING');
+      void disconnectLiveMedia('runtime connection closed');
+      OBSOutputBridge.closePeer();
       clearTimeout(runtimeRealtimeReconnectTimer);
       runtimeRealtimeReconnectTimer = setTimeout(connectRuntimeRealtime, 2000);
     }
   });
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!runtimeRealtimeConnected) return;
+  registerLiveMediaClient();
+  sendRuntimeSignal({
+    type: 'OBS_OUTPUT_REGISTER',
+    role: 'publisher',
+    peerId: OBS_OUTPUT_PUBLISHER_ID,
+    priority: document.visibilityState === 'visible' ? 100 : 10,
+  });
+});
 
 // ── DOM Helpers ───────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -213,14 +708,14 @@ function ctaCountdown(ms) {
 }
 
 // ── Audio Context Unlocker ────────────────────────────────
-function unlockAudio() {
+async function unlockAudio(requirePlayback = false) {
   try {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (AudioContextClass && !App.audioCtx) {
       App.audioCtx = new AudioContextClass();
     }
     if (App.audioCtx && App.audioCtx.state === 'suspended') {
-      App.audioCtx.resume();
+      await App.audioCtx.resume();
     }
     
     if ('speechSynthesis' in window) {
@@ -230,10 +725,8 @@ function unlockAudio() {
     // Must run inside the user's click gesture. WebRTC audio can arrive several
     // seconds later, after TTS/MuseTalk inference, so autoplay alone is not
     // reliable (especially Safari/Chrome with strict media policies).
-    LiveTalkingWebRTCClient?.ensureAudioPlayback?.().catch(err => {
-      console.warn('[LiveTalking] Remote audio unlock:', err.message);
-    });
-
+    const playbackReady = await LiveTalkingWebRTCClient?.ensureAudioPlayback?.();
+    if (!playbackReady) throw new Error('Live Monitor audio is not ready');
     App.isAudioUnlocked = true;
     const audioButton = $('btn-test-sound');
     if (audioButton) {
@@ -244,8 +737,14 @@ function unlockAudio() {
     }
     addLog('Audio enabled.', 'ok');
   } catch (err) {
-    console.warn('Audio unlock warning:', err);
+    App.isAudioUnlocked = false;
+    if (requirePlayback) {
+      console.warn('Audio unlock warning:', err);
+      throw err;
+    }
+    return false;
   }
+  return true;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -602,7 +1101,7 @@ async function loadPersistedAvatar() {
       if ($('lt-avatar-id-input')) $('lt-avatar-id-input').value = LiveTalkingStudio.avatarId;
 
       updateLiveTalkingUI();
-      console.log('✅ Loaded persisted LiveTalking Avatar from IndexedDB');
+      console.log('Loaded persisted Lipsync avatar from IndexedDB');
     }
   } catch (err) {
     console.warn('Persisted avatar load error:', err);
@@ -2030,6 +2529,17 @@ const MuseTalkRealtimeEngine = {
 const LiveTalkingWebRTCClient = window.createLiveTalkingWebRTCClient({
   getApp: () => App,
   getStudio: () => LiveTalkingStudio,
+  getClientId: () => LIVE_MEDIA_CLIENT_ID,
+  onOutputStreamChanged: stream => OBSOutputBridge.updateStream(stream),
+  onMediaStateChanged: media => {
+    if (media.clientId === LIVE_MEDIA_CLIENT_ID && LiveMediaOwnership.state === 'OWNER') {
+      LiveMediaOwnership.mediaReady = media.connectionState === 'CONNECTED'
+        && media.audioTrack
+        && media.videoTrack
+        && media.audioPlayable;
+    }
+    sendRuntimeSignal(media);
+  },
 });
 window.LiveTalkingWebRTCClient = LiveTalkingWebRTCClient;
 
@@ -2048,7 +2558,7 @@ const LiveTalkingStudio = {
   isTrainedReady: false,
   isSpeaking: false,
   voiceProvider: 'qwentts',
-  voiceSpeed: 1.05,
+  voiceSpeed: 1.0,
   activeCtrlTab: 'face',
   landmarks468: [],
   coords: [],
@@ -2066,10 +2576,18 @@ const LiveTalkingStudio = {
 
 const LiveAvatarSession = {
   activeAvatarId: localStorage.getItem(STORAGE_KEYS.ACTIVE_AVATAR) || '',
+  selectedAvatarIds: (() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEYS.AVATAR_POOL) || '[]');
+      return Array.isArray(stored) ? [...new Set(stored.map(String).filter(Boolean))] : [];
+    } catch {
+      return [];
+    }
+  })(),
   excludedAvatarIds: [],
 };
 
-const AvatarCreateFlow = { status: 'upload', progress: 0, file: null, files: [], items: [] };
+const AvatarCreateFlow = { status: 'upload', progress: 0, stageMessage: '', file: null, files: [], items: [] };
 const VoiceProfileState = {
   profiles: [],
   providers: {},
@@ -2083,9 +2601,15 @@ const ReplySkillState = {
   activeSkillId: '',
   busy: false,
 };
+const PersonaBriefState = {
+  sourceType: 'none',
+  sourceName: '',
+  sourceUrl: '',
+};
 const LiveTalkingWorker = {
   state: 'OFFLINE',
   ready: false,
+  alwaysOn: true,
   error: '',
   instanceKey: '',
   pollTimer: null,
@@ -2093,7 +2617,96 @@ const LiveTalkingWorker = {
   refreshing: false,
 };
 let liveTalkingReconnectPromise = null;
+let liveVideoQualityChangePromise = null;
 const avatarDeletionsInProgress = new Set();
+
+function updateLiveVideoQualityAvailability() {
+  const group = $('live-video-quality');
+  const speechBusy = runtimeSpeechState === 'GENERATING' || runtimeSpeechState === 'SPEAKING';
+  const workerBusy = LiveTalkingWorker.state === 'STARTING' || LiveTalkingWorker.state === 'STOPPING';
+  const busy = Boolean(liveVideoQualityChangePromise || speechBusy || LiveTalkingStudio.isTraining || workerBusy);
+  group?.setAttribute('aria-busy', String(Boolean(liveVideoQualityChangePromise)));
+  group?.classList.toggle('is-switching', Boolean(liveVideoQualityChangePromise));
+  document.querySelectorAll('[data-video-quality]').forEach(button => {
+    button.disabled = busy;
+  });
+}
+
+function applyLiveVideoQualityUI(quality, { persist = true, republish = true } = {}) {
+  const preset = liveVideoPreset(quality);
+  const previousQuality = App.talkingEngine.videoQuality;
+  App.talkingEngine.videoQuality = preset.quality;
+  if (persist) localStorage.setItem(STORAGE_KEYS.VIDEO_QUALITY, preset.quality);
+
+  document.querySelectorAll('[data-video-quality]').forEach(button => {
+    const selected = button.dataset.videoQuality === preset.quality;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-checked', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+
+  const monitorCanvas = $('monitor-w2l-canvas');
+  if (monitorCanvas && (monitorCanvas.width !== preset.width || monitorCanvas.height !== preset.height)) {
+    monitorCanvas.width = preset.width;
+    monitorCanvas.height = preset.height;
+  }
+  const canvasSize = $('obs-video-canvas-size');
+  if (canvasSize) canvasSize.textContent = `${preset.width} x ${preset.height}`;
+  const status = $('live-video-quality-status');
+  if (status) status.textContent = `${preset.label} selected: ${preset.width} by ${preset.height} at ${preset.fps} FPS`;
+
+  OBSOutputBridge.applyVideoPreset(preset, republish && previousQuality !== preset.quality);
+  updateLiveVideoQualityAvailability();
+  return preset;
+}
+
+async function reconnectLiveMonitorAfterQualityChange() {
+  await disconnectLiveMedia('', false);
+  await refreshLiveTalkingWorkerStatus({ silent: true });
+  const sessionViable = LiveTalkingWebRTCClient.isViable?.()
+    ?? LiveTalkingWebRTCClient.isConnected?.()
+    ?? Boolean(LiveTalkingWebRTCClient.sessionId);
+  if (sessionViable || LiveMediaOwnership.state !== 'OWNER' || !LiveTalkingWorker.ready) return;
+  const avatarId = [LiveAvatarSession.activeAvatarId, LiveTalkingStudio.avatarId]
+    .find(id => id && TRAINED_AVATARS.has(id))
+    || TRAINED_AVATARS.keys().next().value;
+  if (avatarId) await reconnectLiveTalkingAvatar(avatarId);
+}
+
+async function setLiveVideoQuality(quality) {
+  const preset = LIVE_VIDEO_PRESETS[quality];
+  if (!preset || quality === App.talkingEngine.videoQuality) return;
+  if (liveVideoQualityChangePromise) return liveVideoQualityChangePromise;
+  const status = $('live-video-quality-status');
+  const operation = (async () => {
+    if (status) status.textContent = `Switching Live to ${preset.label}. Please wait.`;
+    try {
+      const payload = await (window.LiveTalkingApi?.setVideoQuality
+        ? window.LiveTalkingApi.setVideoQuality(quality)
+        : window.RuntimeApi.post('/api/settings/live-video', { quality }));
+      const appliedPreset = applyLiveVideoQualityUI(payload.quality || quality);
+      if (payload.workerRestarted) await reconnectLiveMonitorAfterQualityChange();
+      const presetStatus = $('obs-video-preset-status');
+      if (presetStatus) {
+        presetStatus.textContent = `${appliedPreset.label} active: ${appliedPreset.width} x ${appliedPreset.height} at ${appliedPreset.fps} FPS.`;
+      }
+      addLog(`Live video: ${appliedPreset.label} · ${appliedPreset.width}x${appliedPreset.height} · ${appliedPreset.fps} FPS.`, 'ok');
+      return payload;
+    } catch (error) {
+      if (status) status.textContent = `Video quality was not changed. ${error.message}`;
+      addLog(`Video quality was not changed: ${error.message}`, 'warn');
+      throw error;
+    }
+  })();
+  liveVideoQualityChangePromise = operation;
+  updateLiveVideoQualityAvailability();
+  try {
+    return await operation;
+  } finally {
+    liveVideoQualityChangePromise = null;
+    updateLiveVideoQualityAvailability();
+  }
+}
 
 function reconnectLiveTalkingAvatar(avatarId) {
   if (liveTalkingReconnectPromise) return liveTalkingReconnectPromise;
@@ -2105,18 +2718,28 @@ function reconnectLiveTalkingAvatar(avatarId) {
 function applyLiveTalkingWorkerState(worker = {}) {
   LiveTalkingWorker.state = worker.state || (worker.ready ? 'READY' : 'OFFLINE');
   LiveTalkingWorker.ready = Boolean(worker.ready);
+  if (typeof worker.alwaysOn === 'boolean') LiveTalkingWorker.alwaysOn = worker.alwaysOn;
+  if (worker.videoQuality) applyLiveVideoQualityUI(worker.videoQuality);
   LiveTalkingWorker.error = worker.error || '';
   LiveTalkingWorker.instanceKey = worker.ready
     ? `${worker.endpoint || ''}:${worker.pid || 'external'}:${worker.startedAt || 0}`
     : '';
   const button = $('btn-livetalking-worker');
   const label = $('livetalking-worker-label');
+  const badge = $('livetalking-engine-badge');
+  const dot = $('livetalking-engine-dot');
+  const status = $('livetalking-engine-status');
+  const detail = $('livetalking-engine-detail');
+  const mode = $('livetalking-engine-mode');
+  const alwaysOn = $('cfg-livetalking-always-on');
+  const startButton = $('start-livetalking-engine');
+  const stopButton = $('stop-livetalking-engine');
   const labels = {
-    OFFLINE: 'Prepare live avatar',
-    STARTING: 'Preparing live avatar',
-    READY: 'Live avatar ready',
-    STOPPING: 'Stopping live avatar',
-    ERROR: 'Retry live avatar',
+    OFFLINE: 'Inactive',
+    STARTING: 'Starting',
+    READY: 'Active',
+    STOPPING: 'Stopping',
+    ERROR: 'Error',
   };
   if (button) {
     button.dataset.state = LiveTalkingWorker.state;
@@ -2128,7 +2751,33 @@ function applyLiveTalkingWorkerState(worker = {}) {
       : 'Prepare the live avatar');
     button.setAttribute('aria-label', button.title);
   }
-  if (label) label.textContent = labels[LiveTalkingWorker.state] || 'Prepare live avatar';
+  if (label) label.textContent = LiveTalkingWorker.state === 'READY' ? 'Lipsync active' : (labels[LiveTalkingWorker.state] || 'Prepare lipsync');
+  const currentLabel = labels[LiveTalkingWorker.state] || 'Inactive';
+  if (badge) {
+    badge.textContent = currentLabel;
+    badge.dataset.state = LiveTalkingWorker.state;
+  }
+  if (dot) dot.dataset.state = LiveTalkingWorker.state;
+  if (status) status.textContent = currentLabel;
+  if (detail) detail.textContent = LiveTalkingWorker.error || ({
+    OFFLINE: 'Stopped',
+    STARTING: 'Loading',
+    READY: 'Lipsync ready',
+    STOPPING: 'Stopping',
+    ERROR: 'Retry start',
+  }[LiveTalkingWorker.state] || 'Stopped');
+  if (mode) mode.textContent = LiveTalkingWorker.alwaysOn ? 'Automatic startup' : 'Manual startup';
+  if (alwaysOn && document.activeElement !== alwaysOn) alwaysOn.checked = LiveTalkingWorker.alwaysOn;
+  const transitioning = LiveTalkingWorker.state === 'STARTING' || LiveTalkingWorker.state === 'STOPPING';
+  if (startButton) {
+    startButton.disabled = transitioning || LiveTalkingWorker.ready;
+    startButton.setAttribute('aria-busy', String(LiveTalkingWorker.state === 'STARTING'));
+  }
+  if (stopButton) {
+    stopButton.disabled = transitioning || !LiveTalkingWorker.ready;
+    stopButton.setAttribute('aria-busy', String(LiveTalkingWorker.state === 'STOPPING'));
+  }
+  updateLiveVideoQualityAvailability();
 }
 
 async function refreshLiveTalkingWorkerStatus({ silent = false } = {}) {
@@ -2151,6 +2800,10 @@ async function refreshLiveTalkingWorkerStatus({ silent = false } = {}) {
       && LiveTalkingWorker.instanceKey
       && previousInstanceKey !== LiveTalkingWorker.instanceKey,
     );
+    if (LiveMediaOwnership.state !== 'OWNER') {
+      LiveTalkingWorker.sessionFailureCount = 0;
+      return LiveTalkingWorker;
+    }
     let sessionViable = LiveTalkingWebRTCClient.isViable?.()
       ?? LiveTalkingWebRTCClient.isConnected?.()
       ?? Boolean(LiveTalkingWebRTCClient.sessionId);
@@ -2187,7 +2840,7 @@ async function refreshLiveTalkingWorkerStatus({ silent = false } = {}) {
   } catch (error) {
     if (!silent) {
       applyLiveTalkingWorkerState({ state: 'ERROR', ready: false, error: error.message });
-      addLog(`LiveTalking worker status failed: ${error.message}`, 'warn');
+      addLog(`Lipsync Engine status failed: ${error.message}`, 'warn');
     }
   } finally {
     LiveTalkingWorker.refreshing = false;
@@ -2201,12 +2854,52 @@ async function startLiveTalkingWorker() {
   try {
     const payload = await window.LiveTalkingApi.startWorker();
     applyLiveTalkingWorkerState(payload.worker || { state: 'STARTING' });
-    addLog('LiveTalking worker startup requested.', 'ok');
+    addLog('Lipsync Engine startup requested.', 'ok');
     return LiveTalkingWorker;
   } catch (error) {
     applyLiveTalkingWorkerState({ state: 'ERROR', ready: false, error: error.message });
-    addLog(`LiveTalking worker could not start: ${error.message}`, 'err');
+    addLog(`Lipsync Engine could not start: ${error.message}`, 'err');
     throw error;
+  }
+}
+
+async function stopLiveTalkingWorker() {
+  if (!LiveTalkingWorker.ready && LiveTalkingWorker.state !== 'STARTING') return LiveTalkingWorker;
+  applyLiveTalkingWorkerState({ ...LiveTalkingWorker, state: 'STOPPING', ready: false });
+  const actionStatus = $('livetalking-engine-action-status');
+  if (actionStatus) actionStatus.textContent = 'Stopping engine...';
+  try {
+    const payload = await window.LiveTalkingApi.stopWorker();
+    LiveTalkingWorker.alwaysOn = false;
+    applyLiveTalkingWorkerState(payload.worker || { state: 'STOPPING', ready: false, alwaysOn: false });
+    if (actionStatus) actionStatus.textContent = 'Stopped. Always on is off.';
+    addLog('Lipsync Engine stopped.', 'ok');
+    return LiveTalkingWorker;
+  } catch (error) {
+    await refreshLiveTalkingWorkerStatus({ silent: true });
+    if (actionStatus) actionStatus.textContent = error.message;
+    addLog(`Lipsync Engine could not stop: ${error.message}`, 'err');
+    throw error;
+  }
+}
+
+async function setLiveTalkingAlwaysOn(alwaysOn) {
+  const toggle = $('cfg-livetalking-always-on');
+  const actionStatus = $('livetalking-engine-action-status');
+  if (toggle) toggle.disabled = true;
+  if (actionStatus) actionStatus.textContent = alwaysOn ? 'Enabling automatic startup...' : 'Switching to manual startup...';
+  try {
+    const payload = await window.RuntimeApi.post('/api/settings/talking', { alwaysOn: Boolean(alwaysOn) });
+    LiveTalkingWorker.alwaysOn = Boolean(payload.settings?.alwaysOn);
+    applyLiveTalkingWorkerState({ ...LiveTalkingWorker, alwaysOn: LiveTalkingWorker.alwaysOn });
+    if (actionStatus) actionStatus.textContent = LiveTalkingWorker.alwaysOn ? 'Always on enabled.' : 'Manual startup enabled.';
+    if (LiveTalkingWorker.alwaysOn) await refreshLiveTalkingWorkerStatus({ silent: true });
+  } catch (error) {
+    if (toggle) toggle.checked = LiveTalkingWorker.alwaysOn;
+    if (actionStatus) actionStatus.textContent = error.message;
+    throw error;
+  } finally {
+    if (toggle) toggle.disabled = false;
   }
 }
 
@@ -2217,9 +2910,9 @@ async function ensureLiveTalkingWorkerReady(timeoutMs = 180000) {
   while (!LiveTalkingWorker.ready && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     await refreshLiveTalkingWorkerStatus({ silent: true });
-    if (LiveTalkingWorker.state === 'ERROR') throw new Error(LiveTalkingWorker.error || 'LiveTalking worker failed to start');
+    if (LiveTalkingWorker.state === 'ERROR') throw new Error(LiveTalkingWorker.error || 'Lipsync Engine failed to start');
   }
-  if (!LiveTalkingWorker.ready) throw new Error('LiveTalking worker startup timed out');
+  if (!LiveTalkingWorker.ready) throw new Error('Lipsync Engine startup timed out');
   return LiveTalkingWorker;
 }
 
@@ -2271,41 +2964,63 @@ async function renameProjectAvatar(avatar, name) {
   return updated;
 }
 
+async function updateProjectAvatarState(avatar, avatarState) {
+  const allowedStates = ['normal', 'happy', 'laughing', 'grateful', 'surprised', 'excited', 'sad', 'angry', 'playful', 'focused'];
+  const state = allowedStates.includes(String(avatarState || '').toLowerCase())
+    ? String(avatarState).toLowerCase()
+    : 'normal';
+  const updated = await registerProjectAvatar({
+    id: avatar.id,
+    name: avatar.name || avatar.id,
+    modelType: avatar.modelType === 'wav2lip' ? 'wav2lip' : 'musetalk',
+    status: avatar.status === 'failed' ? 'failed' : 'ready',
+    profileId: avatar.profileId || avatar.id,
+    avatarState: state,
+    ...(Number.isFinite(Number(avatar.trainedAt)) ? { trainedAt: Number(avatar.trainedAt) } : {}),
+  });
+  await refreshLiveTalkingAvatarList();
+  return updated;
+}
+
 async function deleteProjectAvatar(avatarId) {
   if (location.protocol === 'file:') throw new Error('Open the dashboard through localhost to manage avatars');
   avatarDeletionsInProgress.add(avatarId);
-  const wasSelected = LiveAvatarSession.activeAvatarId === avatarId;
+  const previous = {
+    activeAvatarId: LiveAvatarSession.activeAvatarId,
+    selectedAvatarIds: [...LiveAvatarSession.selectedAvatarIds],
+    studioAvatarId: LiveTalkingStudio.avatarId,
+  };
   const legacyAvatar = await IdolDB.getAvatar('livetalking_avatar').catch(() => null);
   const legacyAvatarId = legacyAvatar?.meta?.avatarId || '';
   try {
-    if (wasSelected) LiveAvatarSession.activeAvatarId = '';
-    await saveActiveAvatarSession();
-    if (LiveTalkingStudio.avatarId === avatarId && LiveTalkingWebRTCClient.sessionId) {
-      await LiveTalkingWebRTCClient.disconnect();
-    }
     const payload = await window.LiveTalkingApi.deleteAvatar(avatarId);
     // Older builds kept one preview copy under a singleton IndexedDB key.
     // Remove it too, otherwise a reload can restore the deleted avatar.
     if (!legacyAvatarId || legacyAvatarId === avatarId) {
       await IdolDB.deleteAvatar('livetalking_avatar').catch(() => {});
     }
-    if (LiveTalkingStudio.avatarId === avatarId) {
-      LiveTalkingStudio.avatarId = '';
+    LiveAvatarSession.activeAvatarId = payload.session?.activeAvatarId || '';
+    LiveAvatarSession.selectedAvatarIds = [...new Set((payload.session?.selectedAvatarIds || []).map(String).filter(Boolean))];
+    LiveAvatarSession.excludedAvatarIds = [...new Set((payload.session?.excludedAvatarIds || []).map(String).filter(Boolean))];
+    if (previous.studioAvatarId === avatarId) LiveTalkingStudio.avatarId = LiveAvatarSession.activeAvatarId;
+    if (!LiveTalkingStudio.avatarId) {
       LiveTalkingStudio.isTrainedReady = false;
       LiveTalkingStudio.trainProgress = 0;
       localStorage.removeItem(STORAGE_KEYS.LIVETALKING_AVATAR);
+    } else {
+      localStorage.setItem(STORAGE_KEYS.LIVETALKING_AVATAR, LiveTalkingStudio.avatarId);
     }
     if (localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) === avatarId) {
       localStorage.removeItem(STORAGE_KEYS.LIVETALKING_AVATAR);
     }
     localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
+    localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
     await refreshLiveTalkingAvatarList();
     return payload;
   } catch (error) {
-    if (wasSelected && TRAINED_AVATARS.has(avatarId)) {
-      LiveAvatarSession.activeAvatarId = avatarId;
-      await saveActiveAvatarSession().catch(() => {});
-    }
+    LiveAvatarSession.activeAvatarId = previous.activeAvatarId;
+    LiveAvatarSession.selectedAvatarIds = previous.selectedAvatarIds;
+    LiveTalkingStudio.avatarId = previous.studioAvatarId;
     throw error;
   } finally {
     avatarDeletionsInProgress.delete(avatarId);
@@ -2444,7 +3159,7 @@ function populateChatGptModels(models = [], preferredModel = '') {
 }
 
 function applyAiDirectorSettings(persona = {}) {
-  const provider = persona.llmProvider === 'ttm-chatgpt' ? 'ttm-chatgpt' : 'ollama';
+  const provider = persona.llmProvider === 'ollama' ? 'ollama' : 'ttm-chatgpt';
   const model = persona.llmModel || (provider === 'ttm-chatgpt' ? 'chat-latest' : 'qwen3:8b');
   AiDirectorState.provider = provider;
   AiDirectorState.model = model;
@@ -2467,6 +3182,12 @@ function applyLiveTalkingMaintenanceState(maintenance = {}) {
   if (!status) return;
   const stateLabel = maintenance.state === 'RESTARTING'
     ? 'Refreshing avatar memory now.'
+    : maintenance.state === 'WAITING_FOR_TRAINING'
+      ? 'Waiting for avatar training to finish.'
+      : maintenance.state === 'WAITING_FOR_WORKER'
+        ? 'Keeping the avatar worker running until its training state is available.'
+      : maintenance.state === 'WAITING_FOR_SESSION_END'
+        ? 'Waiting for the Live Monitor session to close.'
     : maintenance.state === 'WAITING_FOR_IDLE'
       ? 'Waiting for voice playback to finish.'
       : `Memory refresh every ${interval} minutes, after voice playback finishes.`;
@@ -2715,11 +3436,13 @@ function updateAvatarCreateUI() {
   const steps = [...document.querySelectorAll('[data-create-step]')];
   const current = AvatarCreateFlow.status;
   const order = ['upload', 'config', 'training', 'done'];
+  const activeItem = AvatarCreateFlow.items.find(item => item.status === 'training');
+  const trainingMessage = activeItem?.stageMessage || AvatarCreateFlow.stageMessage || 'Preparing avatar';
 
   if (fill) fill.style.width = `${progress}%`;
   if (label) label.textContent = `${progress}%`;
   if (status) status.textContent = current === 'done' ? 'Avatar ready'
-    : current === 'training' ? 'Training model…'
+    : current === 'training' ? trainingMessage
     : current === 'config' ? 'Ready to train'
     : 'Ready to upload';
 
@@ -2741,10 +3464,11 @@ function updateAvatarCreateUI() {
   if (message) message.textContent = current === 'done'
     ? `${AvatarCreateFlow.items.filter(item => item.status === 'completed').length} avatar(s) ready. ${AvatarCreateFlow.items.filter(item => item.status === 'failed').length} failed.`
     : current === 'training'
-      ? 'The app is preparing the avatar for realtime speech.'
+      ? trainingMessage
       : failedItems.length
         ? `Training failed: ${failedItems[0].error || 'The avatar engine rejected the task.'}`
       : 'Your trained avatar will be saved to the local avatar library.';
+  updateLiveVideoQualityAvailability();
 }
 
 function cleanAvatarId(value, fallback = 'avatar') {
@@ -2782,8 +3506,8 @@ function renderAvatarBatchQueue() {
     state.className = 'avatar-batch-state';
     state.textContent = item.status === 'failed'
       ? 'Failed'
-      : item.status === 'completed' ? 'Ready' : item.status === 'training' ? `${Math.round(item.progress || 0)}%` : item.status === 'uploading' ? 'Upload…' : 'Queued';
-    state.title = item.error || '';
+      : item.status === 'completed' ? 'Ready' : item.status === 'training' ? (item.stageMessage || `${Math.round(item.progress || 0)}%`) : item.status === 'uploading' ? 'Upload…' : 'Queued';
+    state.title = item.error || item.stageMessage || '';
     row.append(filename, idInput, modelLabel, state);
     queue.appendChild(row);
   });
@@ -2801,6 +3525,7 @@ async function loadAvatarTrainingFiles(fileList) {
   const files = [...(fileList || [])].slice(0, 20);
   if (!files.length) return;
   AvatarCreateFlow.progress = 0;
+  AvatarCreateFlow.stageMessage = '';
   AvatarCreateFlow.files = files;
   AvatarCreateFlow.file = files[0];
   const baseId = cleanAvatarId($('avatar-create-id')?.value, `avatar_${String(Date.now()).slice(-6)}`);
@@ -2814,6 +3539,7 @@ async function loadAvatarTrainingFiles(fileList) {
     taskId: '',
     storedPath: '',
     error: '',
+    stageMessage: '',
   }));
   renderAvatarBatchQueue();
   await loadAvatarTrainingFile(files[0], false);
@@ -2912,7 +3638,7 @@ async function startLiveTalkingTrainingSimulation() {
   LiveTalkingStudio.modelType = modelType;
   LiveTalkingStudio.avatarId = avatarId;
 
-  logLiveTalkingTerminal(`⚡ Starting LiveTalking and MuseTalk preprocessing [${avatarId}]...`, 'info');
+  logLiveTalkingTerminal(`Starting Lipsync preprocessing [${avatarId}]...`, 'info');
 
   try {
     const vid = LiveTalkingStudio.videoEl;
@@ -3070,8 +3796,8 @@ async function startLiveTalkingTrainingSimulation() {
     App.avatar.museTalkDataset = LiveTalkingStudio.museTalkDataset;
 
     updateLiveTalkingUI();
-    logLiveTalkingTerminal('✅ LIVETALKING + MUSETALK PREPROCESSING COMPLETE. Voice and LipSync testing unlocked.', 'ok');
-    addLog(`✅ LiveTalking MuseTalk data preparation complete [${avatarId}]!`, 'ok');
+    logLiveTalkingTerminal('Lipsync preprocessing complete. Voice testing unlocked.', 'ok');
+    addLog(`Lipsync data ready [${avatarId}].`, 'ok');
 
     // ── STAGE 5: Sample real video frames for realistic video-based LipSync ──
     // This runs asynchronously after training — it scans the video, extracts
@@ -3134,10 +3860,14 @@ async function refreshLiveTalkingAvatarList() {
   if (sessionResult.status === 'fulfilled' && sessionResult.value.session) {
     const persistedAvatarId = sessionResult.value.session.activeAvatarId || '';
     LiveAvatarSession.activeAvatarId = persistedAvatarId && records.has(persistedAvatarId) ? persistedAvatarId : '';
+    LiveAvatarSession.selectedAvatarIds = (sessionResult.value.session.selectedAvatarIds || (persistedAvatarId ? [persistedAvatarId] : []))
+      .map(String)
+      .filter(id => records.has(id));
     LiveAvatarSession.excludedAvatarIds = (sessionResult.value.session.excludedAvatarIds || [])
       .map(String)
       .filter(id => records.has(id));
     localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
+    localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
     if (persistedAvatarId && !LiveAvatarSession.activeAvatarId && localResult.status === 'fulfilled' && localResult.value.workerAvailable !== false) {
       void window.LiveTalkingApi.saveActiveAvatarSession(null)
         .catch(error => addLog(`Could not clear an unavailable avatar session: ${error.message}`, 'warn'));
@@ -3147,9 +3877,14 @@ async function refreshLiveTalkingAvatarList() {
   TRAINED_AVATARS.clear();
   avatars.forEach(avatar => TRAINED_AVATARS.set(avatar.id, avatar));
   const validIds = new Set(avatars.map(avatar => avatar.id));
+  const validSelectedIds = [...new Set(LiveAvatarSession.selectedAvatarIds.filter(id => validIds.has(id)))];
   const persistedSelectedId = validIds.has(LiveAvatarSession.activeAvatarId) ? LiveAvatarSession.activeAvatarId : '';
   const cachedActiveId = validIds.has(LiveTalkingStudio.avatarId) ? LiveTalkingStudio.avatarId : '';
-  const validActiveId = persistedSelectedId || cachedActiveId || avatars[0]?.id || '';
+  if (!validSelectedIds.length && (persistedSelectedId || cachedActiveId || avatars[0]?.id)) {
+    validSelectedIds.push(persistedSelectedId || cachedActiveId || avatars[0].id);
+  }
+  const validActiveId = persistedSelectedId || cachedActiveId || validSelectedIds[0] || '';
+  LiveAvatarSession.selectedAvatarIds = validSelectedIds;
   LiveAvatarSession.activeAvatarId = validActiveId;
   LiveTalkingStudio.avatarId = validActiveId;
   if (validActiveId) {
@@ -3158,6 +3893,7 @@ async function refreshLiveTalkingAvatarList() {
     localStorage.removeItem(STORAGE_KEYS.LIVETALKING_AVATAR);
   }
   localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
+  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
   if (select) {
     select.replaceChildren(...avatars.map(avatar => {
       const option = document.createElement('option');
@@ -3189,14 +3925,18 @@ function renderAvatarLibrary(avatars) {
 
   grid.replaceChildren(...valid.map(avatar => {
     const card = document.createElement('article');
-    const selected = LiveAvatarSession.activeAvatarId === avatar.id;
+    const selected = LiveAvatarSession.selectedAvatarIds.includes(avatar.id);
     card.className = `avatar-library-card${selected ? ' selected' : ''}`;
+    card.tabIndex = 0;
+    card.setAttribute('role', 'checkbox');
+    card.setAttribute('aria-checked', String(selected));
+    card.setAttribute('aria-label', `${selected ? 'Deactivate' : 'Activate'} ${avatar.name || avatar.id} in the Avatar pool`);
 
     const preview = document.createElement('div');
     preview.className = 'avatar-card-preview';
     const status = document.createElement('span');
     status.className = 'avatar-card-status';
-    status.textContent = 'Ready';
+    status.textContent = selected ? 'Active' : 'Inactive';
     const fallback = document.createElement('span');
     fallback.className = 'material-symbols-rounded avatar-card-fallback';
     fallback.setAttribute('aria-hidden', 'true');
@@ -3246,7 +3986,8 @@ function renderAvatarLibrary(avatars) {
     edit.title = `Rename ${avatar.name || avatar.id}`;
     edit.setAttribute('aria-label', `Rename ${avatar.name || avatar.id}`);
     edit.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">edit</span>';
-    edit.addEventListener('click', async () => {
+    edit.addEventListener('click', async event => {
+      event.stopPropagation();
       const nextName = prompt('Avatar name', avatar.name || avatar.id);
       if (nextName === null || nextName.trim() === (avatar.name || avatar.id)) return;
       edit.disabled = true;
@@ -3265,7 +4006,8 @@ function renderAvatarLibrary(avatars) {
     remove.title = `Delete ${avatar.id}`;
     remove.setAttribute('aria-label', `Delete ${avatar.id}`);
     remove.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">delete</span>';
-    remove.addEventListener('click', async () => {
+    remove.addEventListener('click', async event => {
+      event.stopPropagation();
       const confirmed = await showAppConfirm({
         title: 'Delete avatar?',
         message: `Delete avatar ${avatar.id} and its trained model files?`,
@@ -3290,36 +4032,71 @@ function renderAvatarLibrary(avatars) {
     const title = document.createElement('h3');
     title.textContent = avatar.name || avatar.id;
     const meta = document.createElement('p');
-    meta.textContent = `${avatar.id} · Trained avatar`;
-    const live = document.createElement('label');
-    live.className = 'avatar-live-check';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'radio';
-    checkbox.name = 'active-live-avatar';
-    checkbox.checked = selected;
-    checkbox.setAttribute('aria-label', `Use ${avatar.id} in live session`);
-    const label = document.createElement('span');
-    label.textContent = 'Use in live session';
-    checkbox.addEventListener('change', async () => {
-      LiveAvatarSession.activeAvatarId = checkbox.checked ? avatar.id : '';
-      if (checkbox.checked) {
-        LiveAvatarSession.excludedAvatarIds = LiveAvatarSession.excludedAvatarIds.filter(id => id !== avatar.id);
-      }
-      card.classList.toggle('selected', checkbox.checked);
-      updateAvatarPoolCount();
-      checkbox.disabled = true;
+    const durationMs = Number(avatar.durationMs || avatar.duration_ms || 0);
+    const durationLabel = durationMs > 0 ? `${(durationMs / 1000).toFixed(1)}s` : 'ready';
+    meta.textContent = `${String(avatar.avatarState || 'normal').toUpperCase()} · ${durationLabel} · ${avatar.id}`;
+    const stateField = document.createElement('label');
+    stateField.className = 'avatar-state-field';
+    const stateLabel = document.createElement('span');
+    stateLabel.textContent = 'Emotion';
+    const stateSelect = document.createElement('select');
+    stateSelect.setAttribute('aria-label', `Emotion state for ${avatar.name || avatar.id}`);
+    const avatarStates = ['normal', 'happy', 'laughing', 'grateful', 'surprised', 'excited', 'sad', 'angry', 'playful', 'focused'];
+    stateSelect.replaceChildren(...avatarStates.map(stateName => {
+      const option = document.createElement('option');
+      option.value = stateName;
+      option.textContent = stateName.charAt(0).toUpperCase() + stateName.slice(1);
+      option.selected = stateName === String(avatar.avatarState || 'normal').toLowerCase();
+      return option;
+    }));
+    stateSelect.addEventListener('click', event => event.stopPropagation());
+    stateSelect.addEventListener('change', async event => {
+      event.stopPropagation();
+      stateSelect.disabled = true;
       try {
-        await saveActiveAvatarSession();
-        if (checkbox.checked) await activateLiveTalkingAvatar(avatar.id);
+        await updateProjectAvatarState(avatar, stateSelect.value);
+        addLog(`${avatar.id} emotion state: ${stateSelect.value}`, 'ok');
       } catch (error) {
-        addLog(`Could not activate avatar: ${error.message}`, 'warn');
+        stateSelect.value = String(avatar.avatarState || 'normal');
+        addLog(`Could not update Avatar emotion: ${error.message}`, 'warn');
       } finally {
-        checkbox.disabled = false;
+        stateSelect.disabled = false;
       }
     });
-    live.append(checkbox, label);
-    body.append(title, meta, live);
+    stateField.append(stateLabel, stateSelect);
+    const live = document.createElement('div');
+    live.className = 'avatar-live-check';
+    const poolIcon = document.createElement('span');
+    poolIcon.className = 'material-symbols-rounded';
+    poolIcon.setAttribute('aria-hidden', 'true');
+    poolIcon.textContent = selected ? 'check_circle' : 'circle';
+    const label = document.createElement('span');
+    label.textContent = selected ? 'Active in Avatar Pool' : 'Inactive';
+    live.append(poolIcon, label);
+    body.append(title, meta, stateField, live);
     card.append(preview, body);
+
+    const toggleSelection = async () => {
+      if (card.getAttribute('aria-busy') === 'true') return;
+      card.setAttribute('aria-busy', 'true');
+      try {
+        await setAvatarPoolSelection(avatar.id, !LiveAvatarSession.selectedAvatarIds.includes(avatar.id));
+      } catch (error) {
+        addLog(`Avatar Pool was not changed: ${error.message}`, 'warn');
+      } finally {
+        card.removeAttribute('aria-busy');
+      }
+    };
+    card.addEventListener('click', event => {
+      if (event.target.closest('button, select')) return;
+      void toggleSelection();
+    });
+    card.addEventListener('keydown', event => {
+      if (event.target !== card) return;
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      void toggleSelection();
+    });
     return card;
   }));
 }
@@ -3334,16 +4111,23 @@ function renderActiveAvatarOptions(ids) {
   }
   list.replaceChildren(...validIds.map(id => {
     const label = document.createElement('label');
-    label.className = `avatar-pool-item${LiveAvatarSession.activeAvatarId === id ? ' active' : ''}`;
+    const selected = LiveAvatarSession.selectedAvatarIds.includes(id);
+    label.className = `avatar-pool-item${selected ? ' active' : ''}`;
     const input = document.createElement('input');
-    input.type = 'radio';
+    input.type = 'checkbox';
     input.name = 'active-live-avatar-pool';
     input.value = id;
-    input.checked = LiveAvatarSession.activeAvatarId === id;
-    input.addEventListener('change', () => {
-      LiveAvatarSession.activeAvatarId = input.checked ? input.value : '';
-      label.classList.toggle('active', input.checked);
-      updateAvatarPoolCount();
+    input.checked = selected;
+    input.addEventListener('change', async () => {
+      input.disabled = true;
+      try {
+        await setAvatarPoolSelection(input.value, input.checked);
+      } catch (error) {
+        input.checked = !input.checked;
+        addLog(`Avatar Pool was not changed: ${error.message}`, 'warn');
+      } finally {
+        input.disabled = false;
+      }
     });
     const name = document.createElement('span');
     name.textContent = id;
@@ -3360,29 +4144,70 @@ function renderActiveAvatarOptions(ids) {
 }
 
 function updateAvatarPoolCount() {
-  if ($('lt-avatar-pool-count')) $('lt-avatar-pool-count').textContent = LiveAvatarSession.activeAvatarId
-    ? `Active avatar: ${LiveAvatarSession.activeAvatarId}`
-    : 'No active avatar';
+  if ($('lt-avatar-pool-count')) $('lt-avatar-pool-count').textContent = LiveAvatarSession.selectedAvatarIds.length
+    ? `${LiveAvatarSession.selectedAvatarIds.length} active Avatar${LiveAvatarSession.selectedAvatarIds.length === 1 ? '' : 's'}`
+    : 'No active Avatar';
 }
 
 async function saveActiveAvatarSession() {
   LiveAvatarSession.activeAvatarId = String(LiveAvatarSession.activeAvatarId || '').trim();
+  LiveAvatarSession.selectedAvatarIds = [...new Set(LiveAvatarSession.selectedAvatarIds.map(String).filter(Boolean))];
   localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
+  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
   if (location.protocol !== 'file:') {
-    await window.LiveTalkingApi.saveActiveAvatarSession(
+    const payload = await window.LiveTalkingApi.saveActiveAvatarSession(
       LiveAvatarSession.activeAvatarId || null,
+      LiveAvatarSession.selectedAvatarIds,
       LiveAvatarSession.excludedAvatarIds,
     );
+    if (payload.session) {
+      LiveAvatarSession.activeAvatarId = payload.session.activeAvatarId || '';
+      LiveAvatarSession.selectedAvatarIds = [...new Set((payload.session.selectedAvatarIds || []).map(String).filter(Boolean))];
+      LiveAvatarSession.excludedAvatarIds = [...new Set((payload.session.excludedAvatarIds || []).map(String).filter(Boolean))];
+    }
   }
-  addLog(`Saved active avatar: ${LiveAvatarSession.activeAvatarId || 'none'}`, 'ok');
+  localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
+  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
+  addLog(`Avatar Pool saved: ${LiveAvatarSession.selectedAvatarIds.length} active`, 'ok');
+}
+
+async function setAvatarPoolSelection(avatarId, selected) {
+  const id = String(avatarId || '').trim();
+  if (!id || !TRAINED_AVATARS.has(id)) throw new Error('Avatar is not available');
+  const previous = {
+    activeAvatarId: LiveAvatarSession.activeAvatarId,
+    selectedAvatarIds: [...LiveAvatarSession.selectedAvatarIds],
+    excludedAvatarIds: [...LiveAvatarSession.excludedAvatarIds],
+  };
+  const next = new Set(previous.selectedAvatarIds);
+  if (selected) next.add(id);
+  else next.delete(id);
+  if (next.size === 0 && TRAINED_AVATARS.size > 0) {
+    throw new Error('Keep at least one Avatar active in the Pool');
+  }
+  LiveAvatarSession.selectedAvatarIds = [...next];
+  LiveAvatarSession.excludedAvatarIds = LiveAvatarSession.excludedAvatarIds.filter(item => item !== id);
+  if (!LiveAvatarSession.activeAvatarId) LiveAvatarSession.activeAvatarId = LiveAvatarSession.selectedAvatarIds[0] || '';
+  try {
+    await saveActiveAvatarSession();
+    renderActiveAvatarOptions([...TRAINED_AVATARS.keys()]);
+    renderAvatarLibrary([...TRAINED_AVATARS.values()]);
+    lastLibraryRenderSignature = '';
+    renderLibraryUI();
+    updateAvatarPoolCount();
+  } catch (error) {
+    Object.assign(LiveAvatarSession, previous);
+    throw error;
+  }
 }
 
 async function selectAvatarForSpeech() {
-  const selectedId = [LiveAvatarSession.activeAvatarId, LiveTalkingStudio.avatarId]
-    .find(id => id && TRAINED_AVATARS.has(id))
-    || TRAINED_AVATARS.keys().next().value;
+  await waitForLiveMediaOwnership();
+  const pool = LiveAvatarSession.selectedAvatarIds.filter(id => TRAINED_AVATARS.has(id));
+  const selectedId = [LiveTalkingStudio.avatarId, LiveAvatarSession.activeAvatarId]
+    .find(id => id && pool.includes(id))
+    || pool[0];
   if (!selectedId) throw new Error('No trained avatar is ready');
-  LiveAvatarSession.activeAvatarId = selectedId;
   let sessionViable = LiveTalkingWebRTCClient.isViable?.()
     ?? LiveTalkingWebRTCClient.isConnected?.()
     ?? Boolean(LiveTalkingWebRTCClient.sessionId);
@@ -3395,36 +4220,81 @@ async function selectAvatarForSpeech() {
       sessionViable = false;
     }
   }
-  if (selectedId && (selectedId !== LiveTalkingStudio.avatarId || !sessionViable)) {
+  if (selectedId && !sessionViable) {
     await activateLiveTalkingAvatar(selectedId);
   }
   return selectedId;
 }
 
 async function activateLiveTalkingAvatar(avatarId) {
+  await waitForLiveMediaOwnership();
   const id = String(avatarId || '').trim();
   if (!id) throw new Error('Invalid avatar ID');
   if (TRAINED_AVATARS.size > 0 && !TRAINED_AVATARS.has(id)) {
     throw new Error(`Avatar ${id} is not trained or is unavailable`);
   }
+  const previous = {
+    activeAvatarId: LiveAvatarSession.activeAvatarId,
+    selectedAvatarIds: [...LiveAvatarSession.selectedAvatarIds],
+    studioAvatarId: LiveTalkingStudio.avatarId,
+    isTrainedReady: LiveTalkingStudio.isTrainedReady,
+    trainProgress: LiveTalkingStudio.trainProgress,
+  };
+  App.talkingEngine.provider = 'livetalking';
+  App.talkingEngine.model = 'musetalk';
+  localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, 'livetalking');
+  localStorage.setItem(STORAGE_KEYS.LIVETALKING_MODEL, 'musetalk');
+  let result;
+  try {
+    result = await LiveTalkingWebRTCClient.connect(App.talkingEngine.endpoint, id);
+  } catch (error) {
+    LiveAvatarSession.activeAvatarId = previous.activeAvatarId;
+    LiveAvatarSession.selectedAvatarIds = previous.selectedAvatarIds;
+    LiveTalkingStudio.avatarId = previous.studioAvatarId;
+    LiveTalkingStudio.isTrainedReady = previous.isTrainedReady;
+    LiveTalkingStudio.trainProgress = previous.trainProgress;
+    throw error;
+  }
   LiveAvatarSession.activeAvatarId = id;
+  if (!LiveAvatarSession.selectedAvatarIds.includes(id)) LiveAvatarSession.selectedAvatarIds.push(id);
   LiveAvatarSession.excludedAvatarIds = LiveAvatarSession.excludedAvatarIds.filter(avatarId => avatarId !== id);
   LiveTalkingStudio.avatarId = id;
   LiveTalkingStudio.isTrainedReady = true;
   LiveTalkingStudio.trainProgress = 100;
   localStorage.setItem(STORAGE_KEYS.LIVETALKING_AVATAR, id);
+  localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, id);
+  localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
   if ($('lt-avatar-id-input')) $('lt-avatar-id-input').value = id;
-  App.talkingEngine.provider = 'livetalking';
-  App.talkingEngine.model = 'musetalk';
-  localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, 'livetalking');
-  localStorage.setItem(STORAGE_KEYS.LIVETALKING_MODEL, 'musetalk');
-  const result = await LiveTalkingWebRTCClient.connect(App.talkingEngine.endpoint, id);
+  await saveActiveAvatarSession().catch(error => {
+    addLog(`Avatar connected, but Pool persistence is pending: ${error.message}`, 'warn');
+  });
   updateLiveTalkingUI();
   loadPersistedSettings();
   renderLibraryUI();
   logLiveTalkingTerminal(`Activated ${id} for the live session (${result.sessionId || 'active'})`, 'ok');
   addLog(`Active live avatar: ${id}`, 'ok');
   return result;
+}
+
+async function switchPooledAvatar(avatarId) {
+  const id = String(avatarId || '').trim();
+  if (!LiveAvatarSession.selectedAvatarIds.includes(id)) {
+    await setAvatarPoolSelection(id, true);
+  }
+  const sessionViable = LiveTalkingWebRTCClient.isViable?.()
+    ?? LiveTalkingWebRTCClient.isConnected?.()
+    ?? Boolean(LiveTalkingWebRTCClient.sessionId);
+  if (!sessionViable) return activateLiveTalkingAvatar(id);
+  const payload = await window.LiveTalkingApi.activateAvatar(id);
+  LiveAvatarSession.activeAvatarId = payload.session?.activeAvatarId || id;
+  LiveAvatarSession.selectedAvatarIds = [...new Set((payload.session?.selectedAvatarIds || LiveAvatarSession.selectedAvatarIds).map(String).filter(Boolean))];
+  LiveTalkingStudio.avatarId = id;
+  localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, id);
+  localStorage.setItem(STORAGE_KEYS.LIVETALKING_AVATAR, id);
+  updateAvatarPoolCount();
+  lastLibraryRenderSignature = '';
+  renderLibraryUI();
+  return payload;
 }
 
 async function startAvatarBatchTraining() {
@@ -3441,6 +4311,7 @@ async function startAvatarBatchTraining() {
   LiveTalkingStudio.trainProgress = 0;
   AvatarCreateFlow.status = 'training';
   AvatarCreateFlow.progress = 0;
+  AvatarCreateFlow.stageMessage = 'Preparing avatar engine';
   updateLiveTalkingUI();
 
   try {
@@ -3449,15 +4320,18 @@ async function startAvatarBatchTraining() {
 
     await Promise.all(items.map(async item => {
       item.status = 'uploading';
+      item.stageMessage = 'Uploading source video';
       renderAvatarBatchQueue();
       try {
         const stored = await persistProjectFile(item.file, 'avatars/source', item.avatarId);
         if (!stored?.path) throw new Error('Upload returned no project path');
         item.storedPath = stored.path;
         item.status = 'queued';
+        item.stageMessage = 'Waiting for training worker';
       } catch (error) {
         item.status = 'failed';
         item.error = error.message;
+        item.stageMessage = '';
       }
       renderAvatarBatchQueue();
     }));
@@ -3479,7 +4353,8 @@ async function startAvatarBatchTraining() {
         }
         item.taskId = task.task_id;
         item.status = 'training';
-        item.progress = 0;
+        item.progress = Math.max(1, Number(task.progress) || 1);
+        item.stageMessage = task.stage_message || 'Waiting for training worker';
       });
       renderAvatarBatchQueue();
     }
@@ -3492,12 +4367,16 @@ async function startAvatarBatchTraining() {
           const payload = await window.LiveTalkingApi.getTask(item.taskId);
           const task = payload.data || {};
           item.progress = Math.max(0, Math.min(100, Number(task.progress) || 0));
+          item.stageMessage = String(task.stage_message || (item.progress > 0 ? 'Training avatar' : 'Waiting for training worker'));
+          AvatarCreateFlow.stageMessage = item.stageMessage;
           if (task.status === 'completed') {
             item.status = 'completed';
             item.progress = 100;
+            item.stageMessage = 'Avatar ready';
           } else if (task.status === 'failed') {
             item.status = 'failed';
             item.error = task.error_msg || 'Worker training failed';
+            item.stageMessage = '';
           }
         } catch (error) {
           item.error = error.message;
@@ -3532,13 +4411,20 @@ async function startAvatarBatchTraining() {
       await persistProjectJson('models', 'training-result.json', record, item.avatarId).catch(() => {});
     }));
 
-    if (completed[0]?.avatarId) LiveAvatarSession.activeAvatarId = completed[0].avatarId;
+    if (completed.length) {
+      LiveAvatarSession.selectedAvatarIds = [...new Set([
+        ...LiveAvatarSession.selectedAvatarIds,
+        ...completed.map(item => item.avatarId),
+      ])];
+      if (!LiveAvatarSession.activeAvatarId) LiveAvatarSession.activeAvatarId = completed[0].avatarId;
+    }
     await saveActiveAvatarSession().catch(() => {});
     LiveTalkingStudio.isTraining = false;
     LiveTalkingStudio.isTrainedReady = completed.length > 0;
     LiveTalkingStudio.trainProgress = completed.length ? 100 : 0;
     AvatarCreateFlow.status = completed.length ? 'done' : 'config';
     AvatarCreateFlow.progress = completed.length ? 100 : 0;
+    AvatarCreateFlow.stageMessage = '';
     if (completed[0]) {
       const primary = completed[0];
       LiveTalkingStudio.avatarId = primary.avatarId;
@@ -3568,6 +4454,7 @@ async function startAvatarBatchTraining() {
     LiveTalkingStudio.isTraining = false;
     AvatarCreateFlow.status = 'config';
     AvatarCreateFlow.progress = 0;
+    AvatarCreateFlow.stageMessage = '';
     items.filter(item => !['completed', 'failed'].includes(item.status)).forEach(item => {
       item.status = 'failed';
       item.error = error.message;
@@ -3592,6 +4479,7 @@ async function startLiveTalkingTraining() {
 
   LiveTalkingStudio.isTraining = true;
   AvatarCreateFlow.status = 'training';
+  AvatarCreateFlow.stageMessage = 'Waiting for training worker';
   LiveTalkingStudio.isTrainedReady = false;
   LiveTalkingStudio.trainProgress = 1;
   LiveTalkingStudio.avatarId = avatarId;
@@ -3614,6 +4502,7 @@ async function startLiveTalkingTraining() {
       const statusPayload = await window.LiveTalkingApi.getTask(taskId);
       task = statusPayload.data;
       LiveTalkingStudio.trainProgress = Math.max(1, Math.min(100, Number(task.progress) || 1));
+      AvatarCreateFlow.stageMessage = String(task.stage_message || 'Training avatar');
       updateLiveTalkingUI();
       if (task.status === 'completed') break;
       if (task.status === 'failed') throw new Error(task.error_msg || 'Worker failed to create the avatar');
@@ -3645,6 +4534,7 @@ async function startLiveTalkingTraining() {
     await registerProjectAvatar({ id: avatarId, name: file.name, modelType: model, taskId, status: 'ready', trainedAt: Date.now() }).catch(() => {});
     await persistProjectJson('models', 'training-result.json', LiveTalkingStudio.trainedDataset, avatarId).catch(() => {});
     LiveAvatarSession.activeAvatarId = avatarId;
+    LiveAvatarSession.selectedAvatarIds = [...new Set([...LiveAvatarSession.selectedAvatarIds, avatarId])];
     await saveActiveAvatarSession().catch(() => {});
     updateLiveTalkingUI();
     await refreshLiveTalkingAvatarList();
@@ -3656,14 +4546,14 @@ async function startLiveTalkingTraining() {
       AvatarCreateFlow.status = 'done';
       updateLiveTalkingUI();
       logLiveTalkingTerminal(`⚠️ Avatar saved, but the live WebRTC session is not connected yet: ${activationError.message}`, 'warn');
-      addLog(`Avatar ${avatarId} is saved. Connect the LiveTalking worker before going live.`, 'warn');
+      addLog(`Avatar ${avatarId} is saved. Start the Lipsync Engine before going live.`, 'warn');
     }
   } catch (err) {
     LiveTalkingStudio.isTraining = false;
     AvatarCreateFlow.status = 'config';
     updateLiveTalkingUI();
     logLiveTalkingTerminal(`❌ Neural avatar creation failed: ${err.message}`, 'err');
-    addLog(`❌ LiveTalking avatar: ${err.message}`, 'warn');
+    addLog(`Lipsync avatar: ${err.message}`, 'warn');
   }
 }
 
@@ -3756,7 +4646,7 @@ function renderLiveTalkingStep1Preview(ctx, width, height) {
           bboxList: [LiveTalkingStudio.faceBox || { x1: 0.32, y1: 0.14, x2: 0.68, y2: 0.54 }],
           latentList: [new Float32Array(512)],
           maskList: [{ topCutoff: 0.45, featherHeight: 0.15 }],
-          fps: 25,
+          fps: 30,
         };
         const seqLen = dataset.sequence.length || 1;
         const currentSeqIndex = Math.floor(vid.currentTime * (dataset.fps || 25)) % seqLen;
@@ -3846,7 +4736,7 @@ function renderLiveTalkingLipSync(ctx, width, height, isSpeaking, avatarData) {
       bboxList: [LiveTalkingStudio.faceBox || { x1: 0.32, y1: 0.14, x2: 0.68, y2: 0.54 }],
       latentList: [new Float32Array(512)],
       maskList: [{ topCutoff: 0.45, featherHeight: 0.15 }],
-      fps: 25,
+      fps: 30,
       bboxShift: 0
     };
 
@@ -3941,7 +4831,7 @@ function renderLiveTalkingLipSync(ctx, width, height, isSpeaking, avatarData) {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#00e5ff';
   ctx.font = 'bold 12px sans-serif';
-  ctx.fillText('LiveTalking + MuseTalk Native Pipeline', width / 2, height / 2 - 10);
+  ctx.fillText('Lipsync Engine', width / 2, height / 2 - 10);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
   ctx.font = '10px sans-serif';
   ctx.fillText('MPS · Lockstep Frame Synchronization · 50 FPS target', width / 2, height / 2 + 10);
@@ -4072,7 +4962,10 @@ function stopLiveSpeech() {
 }
 
 async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
-  if (!LiveTalkingWebRTCClient.sessionId) throw new Error('Activate a LiveTalking avatar first');
+  await waitForLiveMediaOwnership();
+  if (!LiveTalkingWebRTCClient.sessionId) throw new Error('Activate a Lipsync avatar first');
+  if (!LiveTalkingWebRTCClient.hasLiveTracks?.()) throw new Error('Live Monitor audio/video tracks are not ready');
+  await LiveTalkingWebRTCClient.ensureAudioPlayback();
   const runId = ++liveTalkingSpeechRun;
   const runtimeProvider = ['qwentts', 'omnivoice'].includes(provider) ? provider : 'qwentts';
   const normalizedEmotion = ['neutral', 'happy', 'excited', 'surprised', 'sad', 'angry', 'playful', 'focused', 'grateful', 'laughing'].includes(emotion)
@@ -4090,9 +4983,19 @@ async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
   if (!command.commandId) throw new Error(command.error || 'Could not start speech');
 
   let playbackStarted = false;
+  let consecutivePollFailures = 0;
   const startedAt = Date.now();
   while (runId === liveTalkingSpeechRun) {
-    const payload = await window.LiveTalkingApi.speechStatus();
+    let payload;
+    try {
+      payload = await window.LiveTalkingApi.speechStatus();
+      consecutivePollFailures = 0;
+    } catch (error) {
+      consecutivePollFailures += 1;
+      if (consecutivePollFailures >= 8 || Date.now() - startedAt > 120_000) throw error;
+      await new Promise(resolve => setTimeout(resolve, Math.min(1000, 150 * consecutivePollFailures)));
+      continue;
+    }
     const speech = payload.speech || {};
     if (speech.commandId !== command.commandId) {
       if (Date.now() - startedAt > 30_000) throw new Error('Speech command did not enter the runtime queue');
@@ -4110,7 +5013,7 @@ async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
         const subBox = $('mon-subtitles');
         const subTxt = $('mon-sub-text');
         if (subBox && subTxt) { subTxt.textContent = text; subBox.classList.add('visible'); }
-        addLog('LiveTalking WebRTC audio and lipsync started.', 'ok');
+        addLog('Lipsync audio and video started.', 'ok');
       }
       updateVoiceStatusUI('speaking', runtimeProvider, 100);
     } else if (speech.state === 'IDLE' && playbackStarted) {
@@ -4136,7 +5039,7 @@ async function speakAI(text, emotion = 'happy') {
 
   // Read current provider from Step 2 if open, else App.voice (defaulting to webspeech)
   const prov = $('lt-voice-provider-select')?.value || App.voice.provider || 'qwentts';
-  const speed = (parseFloat($('lt-voice-speed-slider')?.value || '105') / 100) || App.voice.speed || 1.05;
+  const speed = (parseFloat($('lt-voice-speed-slider')?.value || '100') / 100) || App.voice.speed || 1.0;
 
   if (App.talkingEngine.provider === 'livetalking') {
     await selectAvatarForSpeech();
@@ -4182,7 +5085,7 @@ async function speakWithLiveTalkingText(text, emotion, voiceURI, speed) {
 
 async function startSynchronizedPlayback(audioElement, text, emotion, voiceLabel, durMs) {
   if (App.talkingEngine.provider === 'livetalking') {
-    return speakWithLiveTalkingText(text, emotion, '', App.voice.speed || 1.05);
+    return speakWithLiveTalkingText(text, emotion, '', App.voice.speed || 1.0);
   }
   if (audioElement) {
     connectAudioToAnalyser(audioElement);
@@ -4226,7 +5129,7 @@ async function requestProviderAudio({ provider, text, emotion, voiceId, modelId,
   return new Blob([bytes], { type: payload.mediaType || 'audio/mpeg' });
 }
 
-async function speakWithQwenTts(text, emotion = 'happy', voiceId = 'qwen-default', speed = 1.05) {
+async function speakWithQwenTts(text, emotion = 'happy', voiceId = 'qwen-default', speed = 1.0) {
   updateVoiceStatusUI('generating', 'Qwen TTS is generating Vietnamese voice…', 30);
   try {
     const blob = await requestProviderAudio({
@@ -4245,7 +5148,7 @@ async function speakWithQwenTts(text, emotion = 'happy', voiceId = 'qwen-default
   }
 }
 
-async function speakWithOmniVoice(text, emotion = 'happy', voice = 'vi-female', speed = 1.05) {
+async function speakWithOmniVoice(text, emotion = 'happy', voice = 'vi-female', speed = 1.0) {
   updateVoiceStatusUI('generating', `Runtime TTS [OmniVoice · ${voice}]...`, 30);
   addLog(`Runtime is generating OmniVoice audio [${voice}].`, 'hi');
 
@@ -4255,7 +5158,7 @@ async function speakWithOmniVoice(text, emotion = 'happy', voice = 'vi-female', 
     await handleAudioResponse(new Response(blob, { headers: { 'Content-Type': blob.type } }), text, emotion, `OmniVoice-${voice}`);
   } catch (err) {
     console.error('[Runtime OmniVoice TTS Error]:', err);
-    addLog(`OmniVoice unavailable: ${err.message}. Using the LiveTalking voice fallback.`, 'err');
+    addLog(`OmniVoice unavailable: ${err.message}. Using the Lipsync voice fallback.`, 'err');
     if (App.talkingEngine.provider === 'livetalking') {
       return speakWithLiveTalkingText(text, emotion, '', speed);
     }
@@ -4276,7 +5179,7 @@ async function handleAudioResponse(res, text, emotion, voiceLabel) {
   }
 
   App.audioElement.src = audioUrl;
-  App.audioElement.playbackRate = App.voice.speed || 1.05;
+  App.audioElement.playbackRate = App.voice.speed || 1.0;
 
   App.audioElement.ontimeupdate = () => {
     if (App.audioElement.duration) {
@@ -4338,9 +5241,9 @@ function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', custom
     window.speechSynthesis.resume();
 
     const u = new SpeechSynthesisUtterance(text);
-    const speed = customSpeed || App.voice.speed || 1.05;
+    const speed = customSpeed || App.voice.speed || 1.0;
     u.rate = speed;
-    u.pitch = emotion === 'happy' || emotion === 'excited' ? 1.15 : 1.0;
+    u.pitch = 1.0;
     u.volume = 1.0;
 
     const voices = cachedVoices.length > 0 ? cachedVoices : window.speechSynthesis.getVoices();
@@ -4472,14 +5375,16 @@ function renderSavedVoicesList() {
 function getGroupForState(state) {
   if (state === 'GAMEPLAY_IDLE' || state === 'GAMEPLAY_FOCUS') return 'gameplay';
   if (state === 'TALKING') return 'talking';
+  if (state === 'AFK') return 'afk';
   if (['JACKPOT', 'BIG_WIN', 'HAPPY', 'SURPRISED', 'LAUGH', 'LOSE'].includes(state)) return 'reaction';
   return 'cta';
 }
 
 function getActiveTalkingAvatarClip() {
+  const pool = LiveAvatarSession.selectedAvatarIds.filter(id => TRAINED_AVATARS.has(id));
   const avatarId = [LiveAvatarSession.activeAvatarId, LiveTalkingStudio.avatarId]
-    .find(id => id && TRAINED_AVATARS.has(id))
-    || TRAINED_AVATARS.keys().next().value;
+    .find(id => id && pool.includes(id))
+    || pool[0];
   if (!avatarId) return null;
   const avatar = TRAINED_AVATARS.get(avatarId);
   return {
@@ -4627,6 +5532,7 @@ function createLibraryRenderSignature() {
   return JSON.stringify({
     clips,
     avatars,
+    selectedAvatarIds: LiveAvatarSession.selectedAvatarIds,
     excludedAvatarIds: LiveAvatarSession.excludedAvatarIds,
     ratio: App.libraryRatio,
     filter: App.activeFilter,
@@ -4636,12 +5542,12 @@ function createLibraryRenderSignature() {
 function renderLibraryUI() {
   const groupGameplay = $('list-group-gameplay');
   const groupTalking = $('list-group-talking');
-  const groupReaction = $('list-group-reaction');
+  const groupAfk = $('list-group-afk');
   const groupCta = $('list-group-cta');
   const libraryBody = $('lib-body');
   const ratio = App.libraryRatio === '9:16' ? '9:16' : '16:9';
   const renderSignature = createLibraryRenderSignature();
-  const groupsReady = groupGameplay && groupTalking && groupReaction && groupCta;
+  const groupsReady = groupGameplay && groupTalking && groupAfk && groupCta;
   if (groupsReady && renderSignature === lastLibraryRenderSignature) {
     updateLibraryTransientState();
     return;
@@ -4668,7 +5574,7 @@ function renderLibraryUI() {
   // 2. Talking & Chat
   const talkingClips = CLIP_LIBRARY.TALKING || [];
   const talkingAvatars = [...TRAINED_AVATARS.values()]
-    .filter(avatar => !LiveAvatarSession.excludedAvatarIds.includes(avatar.id));
+    .filter(avatar => LiveAvatarSession.selectedAvatarIds.includes(avatar.id));
   const talkingItemCount = talkingClips.length + talkingAvatars.length;
   totalCount += talkingItemCount;
   if ($('cnt-group-talking')) $('cnt-group-talking').textContent = talkingItemCount;
@@ -4681,24 +5587,7 @@ function renderLibraryUI() {
         ].join('');
   }
 
-  // 3. Reactions
-  const reactionClips = [
-    ...(CLIP_LIBRARY.JACKPOT || []),
-    ...(CLIP_LIBRARY.BIG_WIN || []),
-    ...(CLIP_LIBRARY.HAPPY || []),
-    ...(CLIP_LIBRARY.SURPRISED || []),
-    ...(CLIP_LIBRARY.LAUGH || []),
-    ...(CLIP_LIBRARY.LOSE || []),
-  ];
-  totalCount += reactionClips.length;
-  if ($('cnt-group-reaction')) $('cnt-group-reaction').textContent = reactionClips.length;
-  if (groupReaction) {
-    groupReaction.innerHTML = reactionClips.length === 0
-      ? '<div class="lib-empty-notice" data-target-group="BIG_WIN">No clips. Select <b>＋</b> to upload.</div>'
-      : reactionClips.map(clip => renderClipCardHTML(clip, clip.state || 'BIG_WIN')).join('');
-  }
-
-  // 4. CTA & Goals
+  // 3. CTA & Goals
   const ctaClips = [
     ...(CLIP_LIBRARY.INVITE_PLAY || []),
     ...(CLIP_LIBRARY.CTA || []),
@@ -4710,6 +5599,16 @@ function renderLibraryUI() {
     groupCta.innerHTML = ctaClips.length === 0
       ? '<div class="lib-empty-notice" data-target-group="CTA">No clips. Select <b>＋</b> to upload.</div>'
       : ctaClips.map(clip => renderClipCardHTML(clip, clip.state || 'CTA')).join('');
+  }
+
+  // 4. AFK
+  const afkClips = CLIP_LIBRARY.AFK || [];
+  totalCount += afkClips.length;
+  if ($('cnt-group-afk')) $('cnt-group-afk').textContent = afkClips.length;
+  if (groupAfk) {
+    groupAfk.innerHTML = afkClips.length === 0
+      ? '<div class="lib-empty-notice" data-target-group="AFK">No AFK clips. Select <b>＋</b> to upload.</div>'
+      : afkClips.map(clip => renderClipCardHTML(clip, 'AFK')).join('');
   }
 
   if ($('lib-total-count')) $('lib-total-count').textContent = `${totalCount} items`;
@@ -4807,7 +5706,7 @@ function renderClipCardHTML(clip, state) {
       <div class="clip-actions">
         ${modeBtnHtml}
         <div class="now-badge" style="display:${isPlaying ? 'block' : 'none'};">NOW</div>
-        <button class="btn-delete-clip" data-del-id="${clip.id}" data-del-state="${state}" title="Delete clip"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
+        <button type="button" class="btn-delete-clip" data-del-id="${clip.id}" data-del-state="${state}" title="Delete clip" aria-label="Delete clip"><span class="material-symbols-rounded" aria-hidden="true">delete</span></button>
       </div>
     </div>
   `;
@@ -4861,6 +5760,20 @@ function cycleStateClip(direction = 1) {
 
 let autoReturnTimer = null;
 
+function setQueuedTransitionStatus(targetState = '') {
+  const banner = $('queued-transition-banner');
+  const prefix = $('queued-status-prefix');
+  const targetLabel = $('queued-target-state');
+  const icon = $('queued-status-icon');
+  const skipButton = $('btn-skip-queue');
+  const isWaiting = Boolean(targetState);
+  if (banner) banner.classList.toggle('is-waiting', isWaiting);
+  if (prefix) prefix.textContent = isWaiting ? 'Waiting for the current clip to finish. Next: ' : 'Playback ready';
+  if (targetLabel) targetLabel.textContent = isWaiting ? targetState : '';
+  if (icon) icon.textContent = isWaiting ? 'hourglass_top' : 'check_circle';
+  if (skipButton) skipButton.hidden = !isWaiting;
+}
+
 // State changes wait for the current video to finish
 function requestStateTransition(targetState, priority = 5, reason = '', forceRandom = false, immediate = false) {
   if (runtimeRealtimeConnected) {
@@ -4875,12 +5788,7 @@ function requestStateTransition(targetState, priority = 5, reason = '', forceRan
 
   if (isPlaying && !immediate && App.currentState !== targetState) {
     App.queuedTransition = { state: targetState, priority, reason, forceRandom };
-    const banner = $('queued-transition-banner');
-    const targetLabel = $('queued-target-state');
-    if (banner && targetLabel) {
-      targetLabel.textContent = targetState;
-      banner.style.display = 'flex';
-    }
+    setQueuedTransitionStatus(targetState);
     addLog(`⏳ Waiting for the current clip. Next: ${targetState} (${reason || 'request'})`, 'ok');
     return;
   }
@@ -4891,8 +5799,7 @@ function requestStateTransition(targetState, priority = 5, reason = '', forceRan
 
 function clearQueuedTransition() {
   App.queuedTransition = null;
-  const banner = $('queued-transition-banner');
-  if (banner) banner.style.display = 'none';
+  setQueuedTransitionStatus();
 }
 
 function getActiveMonitorVideo() {
@@ -4934,9 +5841,11 @@ async function waitForTalkingVideoFrame(timeoutMs = 2500) {
 }
 
 async function commitRuntimeSpeechPlayback(commandId) {
+  if (LiveMediaOwnership.state !== 'OWNER') return;
   if (!commandId || commandId !== pendingRuntimePlaybackCommandId) return;
   await waitForTalkingVideoFrame();
   if (commandId !== pendingRuntimePlaybackCommandId) return;
+  clearQueuedTransition();
   setVisualState('TALKING', 7, 'idle-complete-speech-ready', true, true);
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   try {
@@ -4963,12 +5872,7 @@ function queueRuntimeSpeechPlayback(commandId) {
       forceRandom: true,
       commandId,
     };
-    const banner = $('queued-transition-banner');
-    const targetLabel = $('queued-target-state');
-    if (banner && targetLabel) {
-      targetLabel.textContent = 'TALKING';
-      banner.style.display = 'flex';
-    }
+    setQueuedTransitionStatus('TALKING');
     updateMonitorScreen(App.currentState, App.currentClip);
     return;
   }
@@ -5039,7 +5943,7 @@ function isSameMediaSource(videoEl, source) {
   return videoEl.getAttribute('src') === source || videoEl.currentSrc === source || videoEl.src === source;
 }
 
-function updateMonitorScreen(state, clip) {
+function updateMonitorScreen(state, clip, forcePlaybackSwap = false) {
   const switchToken = ++monitorSwitchToken;
   const color = STATE_COLOR[state] || 'var(--green)';
   const videoA = $('monitor-video-a');
@@ -5099,14 +6003,23 @@ function updateMonitorScreen(state, clip) {
         const mode = candidate.mode || (candidate.loop ? 'loop' : 'once');
         return mode !== 'off';
       });
-      const shouldNativeLoop = isLoop && playableClips.length <= 1 && !App.queuedTransition;
+      const overlapFrames = Math.max(0, Math.min(4, Number(App.playbackOverlapFrames) || 0));
+      const shouldNativeLoop = overlapFrames === 0 && isLoop && playableClips.length <= 1 && !App.queuedTransition;
 
       const setupEndHandler = (el) => {
         let didAdvance = false;
+        if (el._loopBoundaryFrameCallback && typeof el.cancelVideoFrameCallback === 'function') {
+          el.cancelVideoFrameCallback(el._loopBoundaryFrameCallback);
+          el._loopBoundaryFrameCallback = 0;
+        }
         const advance = () => {
           if (didAdvance) return;
           didAdvance = true;
           el.ontimeupdate = null;
+          if (el._loopBoundaryFrameCallback && typeof el.cancelVideoFrameCallback === 'function') {
+            el.cancelVideoFrameCallback(el._loopBoundaryFrameCallback);
+            el._loopBoundaryFrameCallback = 0;
+          }
           if (autoReturnTimer) {
             clearTimeout(autoReturnTimer);
             autoReturnTimer = null;
@@ -5146,8 +6059,12 @@ function updateMonitorScreen(state, clip) {
             }
           }
           if (isLoop || App.currentState === 'GAMEPLAY_IDLE') {
-            el.currentTime = 0;
-            el.play().catch(() => {});
+            if (overlapFrames > 0) {
+              updateMonitorScreen(App.currentState, App.currentClip, true);
+            } else {
+              el.currentTime = 0;
+              el.play().catch(() => {});
+            }
           } else if (App.autoMix) {
             setVisualState('GAMEPLAY_IDLE', 7, 'clip-ended-return', App.globalRandom);
           }
@@ -5160,20 +6077,30 @@ function updateMonitorScreen(state, clip) {
           return;
         }
 
-        el.onended = advance;
-        el.ontimeupdate = () => {
+        const overlapSeconds = overlapFrames / 25;
+        const checkBoundary = (mediaTime = el.currentTime) => {
           if (el.paused || !Number.isFinite(el.duration) || el.duration <= 0) return;
-          // Start the ready-frame swap just before decode reaches EOF. Waiting
-          // for `ended` lets some browsers briefly clear the last video frame.
-          if (el.duration - el.currentTime <= 0.32) advance();
+          if (overlapFrames > 0 && el.duration - mediaTime <= overlapSeconds) advance();
         };
+        el.onended = advance;
+        if (overlapFrames > 0 && typeof el.requestVideoFrameCallback === 'function') {
+          const watchFrame = (_now, metadata) => {
+            if (didAdvance) return;
+            checkBoundary(Number(metadata?.mediaTime) || el.currentTime);
+            if (!didAdvance) el._loopBoundaryFrameCallback = el.requestVideoFrameCallback(watchFrame);
+          };
+          el._loopBoundaryFrameCallback = el.requestVideoFrameCallback(watchFrame);
+          el.ontimeupdate = null;
+        } else {
+          el.ontimeupdate = () => checkBoundary(el.currentTime);
+        }
       };
 
       setupEndHandler(activeEl);
       setupEndHandler(standbyEl);
 
       // If active video already playing this exact clip
-      if (isSameMediaSource(activeEl, clip.blobUrl) && !activeEl.paused && activeEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+      if (!forcePlaybackSwap && isSameMediaSource(activeEl, clip.blobUrl) && !activeEl.paused && activeEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
         setMonitorVideoLayer(activeEl, true);
         setMonitorVideoLayer(standbyEl, false);
         setMonitorCanvasVisible(false);
@@ -5352,51 +6279,83 @@ function handleVideoUpload(files, targetState = 'GAMEPLAY_IDLE', playMode = 'loo
 
 // Chat replies are generated by the runtime Director and Dialogue Agent.
 
-function addChatMessage(viewerName, messageText, isGift = false, giftIcon = '') {
+const RenderedChatMessageKeys = new Set();
+
+function chatPlatformLabel(platform = 'mock') {
+  if (platform === 'youtube') return '[YT]';
+  if (platform === 'facebook') return '[FB]';
+  return '';
+}
+
+function renderChatMessage(message = {}) {
   const chatList = $('chat-queue');
   if (!chatList) return;
+
+  const platform = String(message.platform || 'mock');
+  const viewerName = String(message.viewerName || 'Viewer');
+  const messageText = String(message.message || '');
+  const timestamp = Number(message.timestamp || Date.now());
+  const messageKey = `${platform}\u0000${message.viewerId || viewerName}\u0000${messageText}\u0000${timestamp}`;
+  if (RenderedChatMessageKeys.has(messageKey)) return;
+  RenderedChatMessageKeys.add(messageKey);
+  if (RenderedChatMessageKeys.size > 200) {
+    const oldest = RenderedChatMessageKeys.values().next().value;
+    if (oldest) RenderedChatMessageKeys.delete(oldest);
+  }
 
   const emptyNotice = chatList.querySelector('.ev-empty');
   if (emptyNotice) emptyNotice.remove();
 
-  const timeStr = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+  const timeStr = new Date(timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
   const li = document.createElement('li');
   li.className = 'chat-item';
-  li.innerHTML = `
-    <div class="chat-viewer">${viewerName} ${isGift ? `<span style="font-size:11px;">${giftIcon}</span>` : ''}</div>
-    <div class="chat-msg">${messageText}</div>
-    <div class="chat-age">${timeStr}</div>
-  `;
+  li.dataset.platform = platform;
+  const viewer = document.createElement('div');
+  viewer.className = 'chat-viewer';
+  const badge = document.createElement('span');
+  badge.className = 'chat-platform-badge';
+  badge.dataset.platform = platform;
+  badge.textContent = chatPlatformLabel(platform);
+  const name = document.createElement('span');
+  name.className = 'chat-viewer-name';
+  name.textContent = viewerName;
+  if (badge.textContent) viewer.append(badge);
+  viewer.append(name);
+  const body = document.createElement('div');
+  body.className = 'chat-msg';
+  body.textContent = messageText;
+  const age = document.createElement('div');
+  age.className = 'chat-age';
+  age.textContent = timeStr;
+  li.append(viewer, body, age);
   chatList.prepend(li);
   while (chatList.children.length > 30) chatList.lastElementChild?.remove();
 
-  // Keep the visible chat history for operator context only. Reply generation stays server-owned.
   App.chatHistory.push({
+    platform,
     viewerName,
     messageText,
-    isGift,
-    giftIcon,
-    timestamp: Date.now(),
+    isGift: Boolean(message.isSuperChat),
+    timestamp,
   });
   if (App.chatHistory.length > 20) App.chatHistory.shift();
+}
 
-  // Send to backend runtime server in background
+async function addChatMessage(viewerName, messageText, isGift = false) {
+  const timestamp = Date.now();
   try {
-    fetch('/api/chat/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        platform: 'mock',
-        viewerId: 'usr_' + viewerName.toLowerCase().replace(/[^a-z0-9]/g, ''),
-        viewerName: viewerName,
-        message: messageText,
-        isSuperChat: isGift,
-        timestamp: Date.now()
-      })
-    }).catch(() => {});
-  } catch {}
-
-  // Runtime is the only owner of chat reply generation and speech orchestration.
+    const payload = await window.RuntimeApi.post('/api/chat/send', {
+      platform: 'mock',
+      viewerId: 'usr_' + viewerName.toLowerCase().replace(/[^a-z0-9]/g, ''),
+      viewerName,
+      message: messageText,
+      isSuperChat: isGift,
+      timestamp,
+    });
+    if (!runtimeRealtimeConnected && payload.message) renderChatMessage(payload.message);
+  } catch (error) {
+    addLog(`Chat send failed: ${error.message}`, 'warn');
+  }
 }
 
 // ──────────────────────────────────────────────────────────
@@ -5486,11 +6445,18 @@ function applyRuntimeSettingsUI(settings = {}) {
   if (settings.liveAvatarMaintenance) {
     applyLiveTalkingMaintenanceState(settings.liveAvatarMaintenance);
   }
+  if (settings.realtimeStatus) applyLiveTalkingWorkerState(settings.realtimeStatus);
   if (settings.obs) {
     if ($('cfg-obs-host') && document.activeElement !== $('cfg-obs-host')) $('cfg-obs-host').value = settings.obs.host || 'localhost';
     if ($('cfg-obs-port') && document.activeElement !== $('cfg-obs-port')) $('cfg-obs-port').value = String(settings.obs.port || 4455);
     if ($('cfg-obs-autoconnect')) $('cfg-obs-autoconnect').checked = Boolean(settings.obs.autoConnect);
+    if (Number.isInteger(settings.obs.playbackOverlapFrames)) {
+      App.playbackOverlapFrames = Math.max(0, Math.min(4, settings.obs.playbackOverlapFrames));
+      if ($('cfg-playback-overlap-frames')) $('cfg-playback-overlap-frames').value = String(App.playbackOverlapFrames);
+    }
+    applyObsStatus(settings.obs);
   }
+  if (settings.platformChat) applyPlatformChatStatus(settings.platformChat);
   loadPersistedSettings();
 }
 
@@ -5612,8 +6578,9 @@ function loadPersistedSettings() {
 
 const DIRECTOR_STORAGE_KEY = 'idol_director_brief_v1';
 function setupDirectorBrief() {
-  if ($('view-director')?.dataset.initialized === 'true') return;
-  if ($('view-director')) $('view-director').dataset.initialized = 'true';
+  const briefPanel = document.querySelector('.director-brief-panel');
+  if (briefPanel?.dataset.initialized === 'true') return;
+  if (briefPanel) briefPanel.dataset.initialized = 'true';
   let data = {}; try { data = JSON.parse(localStorage.getItem(DIRECTOR_STORAGE_KEY) || '{}'); } catch {}
   ['objective', 'personality', 'playbook', 'products'].forEach(key => { const el = $(`director-${key}`); if (el && data[key]) el.value = data[key]; });
   const sources = Array.isArray(data.sources) ? data.sources : [];
@@ -5625,6 +6592,107 @@ function setupDirectorBrief() {
   $('director-save-source')?.addEventListener('click', () => { const file = $('director-source-file')?.files?.[0]; const name = $('director-source-name')?.value.trim() || file?.name || 'Reference source'; const url = $('director-source-url')?.value.trim(); sources.push({ name, detail: file ? `${file.name} · local file` : (url || 'Manual reference'), kind: file ? 'file' : 'link' }); render(); save(false); $('director-source-form').hidden = true; });
   $('director-source-list')?.addEventListener('click', e => { const button = e.target.closest('[data-remove-source]'); if (!button) return; sources.splice(Number(button.dataset.removeSource), 1); render(); save(false); });
   $('build-director-brief')?.addEventListener('click', async () => { save(true); const settings = { goal: $('director-objective').value, personaBrief: $('director-personality').value, context: `${$('director-playbook').value}\n\nProduct knowledge:\n${$('director-products').value}\n\nReferences: ${sources.map(s => s.name).join(', ')}` }; if (location.protocol !== 'file:') await window.RuntimeApi.post('/api/settings/live-session', settings).catch(() => {}); });
+}
+
+function setupLiveSettingPreferences() {
+  const view = $('view-live-settings');
+  if (!view || view.dataset.preferencesReady === 'true') return;
+  view.dataset.preferencesReady = 'true';
+
+  const pageHead = view.querySelector(':scope > .web-page-head');
+  const avatarHead = view.querySelector(':scope > .ai-profile-section-head:not(.ai-profile-section-head-profile)');
+  const avatarToolbar = view.querySelector(':scope > .avatar-page-toolbar');
+  const avatarLibrary = view.querySelector(':scope > .avatar-library-grid');
+  const profileHeads = [...view.querySelectorAll(':scope > .ai-profile-section-head-profile')];
+  const profileGrid = view.querySelector(':scope > .ai-profile-grid');
+  const personaPanel = profileGrid?.children[0] || null;
+  const voicePanel = profileGrid?.children[1] || null;
+  const replySkillPanel = view.querySelector(':scope > .reply-skill-panel');
+  const directorView = $('view-director');
+  const directorLayout = directorView?.querySelector('.director-layout');
+  const directorHealth = directorView?.querySelector('.director-health');
+
+  const layout = document.createElement('div');
+  layout.className = 'live-setting-preferences-layout';
+  const tabs = document.createElement('nav');
+  tabs.className = 'live-setting-section-tabs';
+  tabs.setAttribute('role', 'tablist');
+  tabs.setAttribute('aria-label', 'Live Setting sections');
+  const stack = document.createElement('div');
+  stack.className = 'live-setting-pane-stack';
+
+  const definitions = [
+    { id: 'avatar', label: 'Avatar', icon: 'smart_toy' },
+    { id: 'profile', label: 'Idol Profile', icon: 'badge' },
+    { id: 'voice', label: 'Voice Setting', icon: 'record_voice_over' },
+    { id: 'skill', label: 'Live Reply Skill', icon: 'description' },
+  ];
+  const panes = new Map();
+  definitions.forEach((definition, index) => {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = `live-setting-section-tab${index === 0 ? ' active' : ''}`;
+    tab.dataset.liveSettingTarget = definition.id;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(index === 0));
+    tab.tabIndex = index === 0 ? 0 : -1;
+    tab.innerHTML = `<span class="material-symbols-rounded" aria-hidden="true">${definition.icon}</span><span>${definition.label}</span>`;
+    tabs.append(tab);
+
+    const pane = document.createElement('section');
+    pane.className = `live-setting-pane${index === 0 ? ' active' : ''}`;
+    pane.dataset.liveSettingPane = definition.id;
+    pane.setAttribute('role', 'tabpanel');
+    pane.toggleAttribute('hidden', index !== 0);
+    stack.append(pane);
+    panes.set(definition.id, pane);
+  });
+
+  [avatarHead, avatarToolbar, avatarLibrary].forEach(node => { if (node) panes.get('avatar')?.append(node); });
+  [profileHeads[0], personaPanel].forEach(node => { if (node) panes.get('profile')?.append(node); });
+  if (voicePanel) panes.get('voice')?.append(voicePanel);
+  [profileHeads[1], replySkillPanel, directorHealth, directorLayout].forEach(node => { if (node) panes.get('skill')?.append(node); });
+  profileGrid?.remove();
+  directorView?.remove();
+  layout.append(tabs, stack);
+  pageHead?.after(layout);
+
+  const setPane = (target = 'avatar', focus = false) => {
+    const selected = definitions.some(item => item.id === target) ? target : 'avatar';
+    tabs.querySelectorAll('.live-setting-section-tab').forEach(tab => {
+      const active = tab.dataset.liveSettingTarget === selected;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+      if (active && focus) tab.focus();
+    });
+    stack.querySelectorAll('.live-setting-pane').forEach(pane => {
+      const active = pane.dataset.liveSettingPane === selected;
+      pane.classList.toggle('active', active);
+      pane.toggleAttribute('hidden', !active);
+    });
+    $('btn-create-avatar')?.toggleAttribute('hidden', selected !== 'avatar');
+    if (selected === 'avatar') void refreshLiveTalkingAvatarList();
+    if (selected === 'skill') setupDirectorBrief();
+  };
+
+  tabs.addEventListener('click', event => {
+    const tab = event.target.closest('[data-live-setting-target]');
+    if (tab) setPane(tab.dataset.liveSettingTarget);
+  });
+  tabs.addEventListener('keydown', event => {
+    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    const items = [...tabs.querySelectorAll('.live-setting-section-tab')];
+    const current = items.indexOf(document.activeElement);
+    if (current < 0) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0
+      : event.key === 'End' ? items.length - 1
+        : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+    setPane(items[next].dataset.liveSettingTarget, true);
+  });
+  window.setLiveSettingPane = setPane;
+  setPane('avatar');
 }
 function saveVoiceSettings(newSettings = {}) {
   Object.assign(App.voice, newSettings);
@@ -5835,13 +6903,89 @@ function applyAiProfileUI(settings = {}) {
     localStorage.setItem(STORAGE_KEYS.PERSONA_PROMPT, persona.systemPrompt);
   }
   const name = persona.name || App.voice.personaName || 'Mimi';
-  if ($('profile-idol-name')) $('profile-idol-name').value = name;
-  if ($('profile-idol-personality')) $('profile-idol-personality').value = persona.personality || '';
-  if ($('profile-idol-prompt')) $('profile-idol-prompt').value = persona.systemPrompt || App.voice.personaPrompt || '';
+  const fields = {
+    'profile-idol-name': name,
+    'profile-idol-gender': persona.gender || 'female',
+    'profile-idol-age': persona.ageRange || '21-24',
+    'profile-idol-archetype': persona.archetype || 'friendly',
+    'profile-idol-relationship': persona.relationshipStyle || 'close-friend',
+    'profile-idol-personality': persona.personality || '',
+    'profile-idol-tone': persona.speakingTone || 'natural',
+    'profile-idol-energy': persona.energy || 'balanced',
+    'profile-idol-humor': persona.humor || 'light',
+    'profile-idol-warmth': persona.warmth || 'warm',
+    'profile-idol-formality': persona.formality || 'casual',
+    'profile-idol-emotion': persona.emotionStyle || 'balanced',
+    'profile-idol-catchphrases': persona.catchphrases || '',
+    'profile-idol-self-pronoun': persona.selfPronoun || 'em',
+    'profile-idol-male-pronoun': persona.maleViewerPronoun || 'anh',
+    'profile-idol-female-pronoun': persona.femaleViewerPronoun || 'chị',
+    'profile-idol-unknown-pronoun': persona.unknownViewerStrategy || 'use-name',
+    'profile-idol-primary-goal': persona.primaryGoal || 'Trả lời tự nhiên, tạo cảm giác gần gũi và giữ người xem trong phiên live.',
+    'profile-idol-secondary-goal': persona.secondaryGoal || 'Khuyến khích người xem tiếp tục trò chuyện bằng câu hỏi ngắn phù hợp.',
+    'profile-idol-follow-up': String(persona.followUpRate ?? 45),
+    'profile-idol-cta': persona.ctaFrequency || 'low',
+    'profile-idol-max-chats': String(persona.maxChatsPerReply ?? 2),
+    'profile-idol-brief': persona.briefMarkdown || '',
+    'profile-brief-google-url': persona.briefSourceUrl || '',
+  };
+  Object.entries(fields).forEach(([id, value]) => {
+    const field = $(id);
+    if (field && document.activeElement !== field) field.value = value;
+  });
+  PersonaBriefState.sourceType = persona.briefSourceType || 'none';
+  PersonaBriefState.sourceName = persona.briefSourceName || '';
+  PersonaBriefState.sourceUrl = persona.briefSourceUrl || '';
+  renderPersonaBriefSource();
   syncPersonaPreviewCopy(name);
   const provider = ['qwentts', 'omnivoice'].includes(voice.provider) ? voice.provider : 'qwentts';
   if ($('profile-voice-provider')) $('profile-voice-provider').value = provider;
   updateVoiceProfileBuilder(provider);
+}
+
+function renderPersonaBriefSource(message = '') {
+  const source = $('profile-brief-source');
+  if (!source) return;
+  const title = source.querySelector('strong');
+  const caption = source.querySelector('small');
+  source.classList.toggle('has-source', PersonaBriefState.sourceType !== 'none');
+  if (title) title.textContent = PersonaBriefState.sourceName || 'No brief imported';
+  if (caption) caption.textContent = message || (PersonaBriefState.sourceType === 'google-doc'
+    ? 'Google Doc imported. Save the profile to apply it.'
+    : PersonaBriefState.sourceType === 'markdown'
+      ? 'Markdown imported. Save the profile to apply it.'
+      : 'Add a source to give the Idol product or session context.');
+}
+
+function collectIdolProfile() {
+  return {
+    name: $('profile-idol-name')?.value.trim() || 'Mimi',
+    gender: $('profile-idol-gender')?.value === 'male' ? 'male' : 'female',
+    ageRange: $('profile-idol-age')?.value || '21-24',
+    archetype: $('profile-idol-archetype')?.value || 'friendly',
+    relationshipStyle: $('profile-idol-relationship')?.value || 'close-friend',
+    personality: $('profile-idol-personality')?.value.trim() || '',
+    speakingTone: $('profile-idol-tone')?.value || 'natural',
+    energy: $('profile-idol-energy')?.value || 'balanced',
+    humor: $('profile-idol-humor')?.value || 'light',
+    warmth: $('profile-idol-warmth')?.value || 'warm',
+    formality: $('profile-idol-formality')?.value || 'casual',
+    emotionStyle: $('profile-idol-emotion')?.value || 'balanced',
+    catchphrases: $('profile-idol-catchphrases')?.value.trim() || '',
+    selfPronoun: $('profile-idol-self-pronoun')?.value || 'em',
+    maleViewerPronoun: $('profile-idol-male-pronoun')?.value || 'anh',
+    femaleViewerPronoun: $('profile-idol-female-pronoun')?.value || 'chị',
+    unknownViewerStrategy: $('profile-idol-unknown-pronoun')?.value || 'use-name',
+    primaryGoal: $('profile-idol-primary-goal')?.value.trim() || '',
+    secondaryGoal: $('profile-idol-secondary-goal')?.value.trim() || '',
+    followUpRate: Number($('profile-idol-follow-up')?.value || 45),
+    ctaFrequency: $('profile-idol-cta')?.value || 'low',
+    maxChatsPerReply: Number($('profile-idol-max-chats')?.value || 2),
+    briefSourceType: PersonaBriefState.sourceType,
+    briefSourceName: PersonaBriefState.sourceName,
+    briefSourceUrl: PersonaBriefState.sourceUrl,
+    briefMarkdown: $('profile-idol-brief')?.value.trim() || '',
+  };
 }
 
 function updateVoiceProfileBuilder(provider) {
@@ -6038,7 +7182,7 @@ async function previewSelectedVoice() {
       modelId: profile.provider === 'qwentts'
         ? 'gwen-tts-0.6B-vi-8bit'
         : 'omnivoice',
-      speed: App.voice.speed || 1.05,
+      speed: App.voice.speed || 1.0,
     });
     VoiceProfileState.previewUrl = URL.createObjectURL(blob);
     VoiceProfileState.previewAudio = new Audio(VoiceProfileState.previewUrl);
@@ -6113,20 +7257,72 @@ function bindAiProfileControls() {
     }
   });
 
+  $('profile-brief-upload')?.addEventListener('click', () => $('profile-brief-file')?.click());
+  $('profile-brief-file')?.addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!/\.md$/i.test(file.name)) {
+      renderPersonaBriefSource('Only Markdown (.md) files are supported.');
+      return;
+    }
+    try {
+      const markdown = (await file.text()).trim();
+      if (!markdown) throw new Error('The Markdown file is empty.');
+      if (new Blob([markdown]).size > 32_000) throw new Error('Keep the brief under 32 KB.');
+      PersonaBriefState.sourceType = 'markdown';
+      PersonaBriefState.sourceName = file.name;
+      PersonaBriefState.sourceUrl = '';
+      if ($('profile-idol-brief')) $('profile-idol-brief').value = markdown;
+      if ($('profile-brief-google-url')) $('profile-brief-google-url').value = '';
+      renderPersonaBriefSource();
+    } catch (error) {
+      renderPersonaBriefSource(error.message);
+    }
+  });
+
+  $('profile-brief-google-import')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    const url = $('profile-brief-google-url')?.value.trim() || '';
+    if (!url) {
+      renderPersonaBriefSource('Paste a Google Docs URL first.');
+      return;
+    }
+    button.disabled = true;
+    button.textContent = 'Importing…';
+    renderPersonaBriefSource('Reading the public Google Doc...');
+    try {
+      const payload = await window.RuntimeApi.post('/api/settings/persona/brief/google-doc', { url });
+      PersonaBriefState.sourceType = 'google-doc';
+      PersonaBriefState.sourceName = payload.name || 'Google Doc';
+      PersonaBriefState.sourceUrl = payload.url || url;
+      if ($('profile-idol-brief')) $('profile-idol-brief').value = payload.markdown || '';
+      renderPersonaBriefSource();
+    } catch (error) {
+      renderPersonaBriefSource(error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Import';
+    }
+  });
+
   $('save-ai-profile')?.addEventListener('click', async () => {
     const status = $('profile-save-status');
-    const name = $('profile-idol-name')?.value.trim() || 'Mimi';
-    const personality = $('profile-idol-personality')?.value.trim() || '';
-    const systemPrompt = $('profile-idol-prompt')?.value.trim() || '';
+    const button = $('save-ai-profile');
+    const profile = collectIdolProfile();
+    if (status) status.textContent = 'Saving and applying profile...';
+    if (button) button.disabled = true;
     try {
-      const payload = await window.RuntimeApi.post('/api/settings/persona', { name, personality, systemPrompt });
-      const savedPersona = payload.settings || { name, personality, systemPrompt };
+      const payload = await window.RuntimeApi.post('/api/settings/persona', profile);
+      const savedPersona = payload.settings || profile;
       applyAiProfileUI({ persona: savedPersona, voice: { provider: App.voice.provider } });
-      saveVoiceSettings({ personaName: savedPersona.name || name, personaPrompt: savedPersona.systemPrompt || systemPrompt });
-      syncPersonaPreviewCopy(savedPersona.name || name);
-      if (status) status.textContent = 'Idol profile saved.';
+      saveVoiceSettings({ personaName: savedPersona.name || profile.name, personaPrompt: savedPersona.systemPrompt || '' });
+      syncPersonaPreviewCopy(savedPersona.name || profile.name);
+      if (status) status.textContent = 'Profile saved and applied to Live Reply.';
     } catch (error) {
       if (status) status.textContent = error.message;
+    } finally {
+      if (button) button.disabled = false;
     }
   });
 
@@ -6338,6 +7534,75 @@ function openUploadModalForTargetState(targetState = 'GAMEPLAY_IDLE') {
   openModal('modal-upload-clip');
 }
 
+async function magicConnectObs(triggerButton = null) {
+  await unlockAudio(true);
+  const buttons = [$('save-modal-obs'), $('btn-magic-connect'), $('btn-go-live-hero')].filter(Boolean);
+  const banner = $('obs-status-banner');
+  const obsSettings = {
+    host: $('cfg-obs-host')?.value || 'localhost',
+    port: Number($('cfg-obs-port')?.value || 4455),
+    autoConnect: true,
+    playbackOverlapFrames: Number($('cfg-playback-overlap-frames')?.value || 2),
+  };
+  const restartIntervalMinutes = Number($('cfg-livetalking-restart-interval')?.value || 15);
+  localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify(obsSettings));
+  buttons.forEach(button => {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.dataset.magicConnectState = 'connecting';
+  });
+  if (banner) {
+    banner.dataset.state = 'connecting';
+    banner.textContent = 'Connecting to OBS and preparing video + voice...';
+  }
+  try {
+    const [payload] = await Promise.all([
+      window.RuntimeApi.post('/api/obs/magic-connect', obsSettings),
+      window.RuntimeApi.post('/api/settings/talking', { restartIntervalMinutes }),
+    ]);
+    const output = payload.output || {};
+    const selectedPreset = liveVideoPreset();
+    const outputPreset = output.videoPreset || selectedPreset;
+    const outputPresetLabel = outputPreset.width >= 1920 ? 'FHD' : 'HD';
+    const outputPresetCopy = `${outputPresetLabel} ${outputPreset.width} x ${outputPreset.height} / ${outputPreset.fps} FPS`;
+    applyObsStatus({ ...output, connected: true, mediaConnected: false });
+    const presetStatus = $('obs-video-preset-status');
+    const presetCard = $('obs-video-preset');
+    if (output.videoPreset?.matches) {
+      if (presetCard) presetCard.dataset.state = 'ready';
+      if (presetStatus) presetStatus.textContent = `Ready: OBS and AI IDOL use ${outputPresetCopy}.`;
+    } else if (output.videoPreset?.streamActive) {
+      if (presetCard) presetCard.dataset.state = 'pending';
+      if (presetStatus) presetStatus.textContent = `OBS is live. Stop streaming, then press Magic Connect once to apply ${outputPresetCopy} safely.`;
+    } else {
+      if (presetCard) presetCard.dataset.state = 'error';
+      if (presetStatus) presetStatus.textContent = 'Video preset could not be applied. Check OBS video settings.';
+    }
+    applyLiveTalkingMaintenanceState({ restartIntervalMinutes, state: 'SCHEDULED' });
+    buttons.forEach(button => { button.dataset.magicConnectState = 'connected'; });
+    addLog(`OBS ready: ${output.sourceName || 'AI IDOL Streamer'} in ${output.sceneName || 'current scene'}${output.videoPreset?.matches ? ` at ${outputPresetCopy}` : ''}.`, 'ok');
+    return output;
+  } catch (error) {
+    applyObsStatus({ connected: false });
+    if (banner) {
+      banner.dataset.state = 'error';
+      banner.textContent = `Magic Connect failed: ${error.message}`;
+    }
+    buttons.forEach(button => { button.dataset.magicConnectState = 'error'; });
+    addLog(`OBS Magic Connect failed: ${error.message}`, 'err');
+    if (triggerButton === $('btn-magic-connect') || triggerButton === $('btn-go-live-hero')) {
+      window.openStudioSettings?.('output');
+    }
+    throw error;
+  } finally {
+    buttons.forEach(button => {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      if (button.dataset.magicConnectState === 'connecting') delete button.dataset.magicConnectState;
+    });
+  }
+}
+
 // ── Event Listeners ───────────────────────────────────────
 function bindEventListeners() {
   // Topbar Modals
@@ -6349,41 +7614,50 @@ function bindEventListeners() {
   $('cancel-modal-upload')?.addEventListener('click', () => closeModal('modal-upload-clip'));
 
   // OBS Settings Inputs Persistence
-  ['cfg-obs-host', 'cfg-obs-port', 'cfg-obs-autoconnect'].forEach(id => {
+  ['cfg-obs-host', 'cfg-obs-port', 'cfg-obs-autoconnect', 'cfg-playback-overlap-frames'].forEach(id => {
     $(id)?.addEventListener('input', () => {
-      localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify({
+      const obsSettings = {
         host: $('cfg-obs-host')?.value || 'localhost',
         port: $('cfg-obs-port')?.value || '4455',
         autoConnect: $('cfg-obs-autoconnect')?.checked || false,
-      }));
+        playbackOverlapFrames: Number($('cfg-playback-overlap-frames')?.value || 2),
+      };
+      App.playbackOverlapFrames = obsSettings.playbackOverlapFrames;
+      localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify(obsSettings));
     });
   });
-  $('save-modal-obs')?.addEventListener('click', async () => {
-    const obsSettings = {
+  $('cfg-playback-overlap-frames')?.addEventListener('change', event => {
+    const playbackOverlapFrames = Math.max(0, Math.min(4, Number(event.target.value) || 0));
+    App.playbackOverlapFrames = playbackOverlapFrames;
+    window.RuntimeApi.post('/api/settings/obs', {
       host: $('cfg-obs-host')?.value || 'localhost',
       port: Number($('cfg-obs-port')?.value || 4455),
       autoConnect: $('cfg-obs-autoconnect')?.checked || false,
-    };
-    const restartIntervalMinutes = Number($('cfg-livetalking-restart-interval')?.value || 15);
-    localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify(obsSettings));
-    const banner = $('obs-status-banner');
-    const button = $('save-modal-obs');
-    if (button) button.disabled = true;
-    if (banner) banner.textContent = 'Connecting to OBS…';
-    try {
-      const [obsResult] = await Promise.all([
-        window.RuntimeApi.post('/api/settings/obs', obsSettings),
-        window.RuntimeApi.post('/api/settings/talking', { restartIntervalMinutes }),
-      ]);
-      if (banner) banner.textContent = obsResult.isConnected ? 'OBS connected' : 'OBS settings saved. Waiting for OBS.';
-      applyLiveTalkingMaintenanceState({ restartIntervalMinutes, state: 'SCHEDULED' });
-      addLog('OBS output settings saved.', 'ok');
-    } catch (error) {
-      if (banner) banner.textContent = `OBS connection failed: ${error.message}`;
-      addLog(`OBS output error: ${error.message}`, 'err');
-    } finally {
-      if (button) button.disabled = false;
-    }
+      playbackOverlapFrames,
+    }).catch(error => addLog(`Playback setting could not be saved: ${error.message}`, 'warn'));
+  });
+  $('save-modal-obs')?.addEventListener('click', event => {
+    void magicConnectObs(event.currentTarget).catch(() => {});
+  });
+  $('btn-magic-connect')?.addEventListener('click', event => {
+    void magicConnectObs(event.currentTarget).catch(() => {});
+  });
+  const qualityControl = $('live-video-quality');
+  qualityControl?.addEventListener('click', event => {
+    const button = event.target.closest('[data-video-quality]');
+    if (!button || button.disabled) return;
+    void setLiveVideoQuality(button.dataset.videoQuality).catch(() => {});
+  });
+  qualityControl?.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    const qualities = ['fhd'];
+    const direction = event.key === 'ArrowRight' ? 1 : -1;
+    const currentIndex = qualities.indexOf(App.talkingEngine.videoQuality);
+    const quality = qualities[(currentIndex + direction + qualities.length) % qualities.length];
+    const button = qualityControl.querySelector(`[data-video-quality="${quality}"]`);
+    button?.focus();
+    if (!button?.disabled) void setLiveVideoQuality(quality).catch(() => {});
   });
 
   // Video Mixer Controls
@@ -6504,6 +7778,19 @@ function bindEventListeners() {
   $('btn-livetalking-worker')?.addEventListener('click', () => {
     startLiveTalkingWorker().catch(() => {});
   });
+  $('start-livetalking-engine')?.addEventListener('click', () => {
+    const actionStatus = $('livetalking-engine-action-status');
+    if (actionStatus) actionStatus.textContent = 'Starting engine...';
+    startLiveTalkingWorker()
+      .then(() => { if (actionStatus) actionStatus.textContent = 'Startup requested.'; })
+      .catch(error => { if (actionStatus) actionStatus.textContent = error.message; });
+  });
+  $('stop-livetalking-engine')?.addEventListener('click', () => {
+    stopLiveTalkingWorker().catch(() => {});
+  });
+  $('cfg-livetalking-always-on')?.addEventListener('change', event => {
+    setLiveTalkingAlwaysOn(event.currentTarget.checked).catch(() => {});
+  });
   $('btn-modal-avatar')?.addEventListener('click', () => {
     openModal('modal-avatar');
     updateLiveTalkingUI();
@@ -6594,7 +7881,7 @@ function bindEventListeners() {
     await IdolDB.deleteAvatar('livetalking_avatar');
     updateLiveTalkingUI();
     logLiveTalkingTerminal('🗑️ Removed current media.', 'warn');
-    addLog('🗑️ Removed LiveTalking media', 'ok');
+    addLog('Removed Lipsync media.', 'ok');
   });
 
   $('btn-start-training-video')?.addEventListener('click', () => {
@@ -6605,7 +7892,7 @@ function bindEventListeners() {
     const avatarId = $('lt-existing-avatar-select')?.value;
     if (!avatarId) return;
     try {
-      await activateLiveTalkingAvatar(avatarId);
+      await switchPooledAvatar(avatarId);
     } catch (err) {
       logLiveTalkingTerminal(`❌ Could not activate avatar ${avatarId}: ${err.message}`, 'err');
     }
@@ -6895,7 +8182,7 @@ function bindEventListeners() {
     App.voice.provider = e.target.value;
     updateLiveTalkingVoiceUI();
     saveVoiceSettings({ provider: e.target.value });
-    addLog(`🎙️ Changed LiveTalking voice provider: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
+    addLog(`Voice provider: ${e.target.options[e.target.selectedIndex].text}`, 'ok');
   });
 
   $('lt-voice-speed-slider')?.addEventListener('input', (e) => {
@@ -6916,7 +8203,7 @@ function bindEventListeners() {
   // Realtime LipSync Speech Test
   $('btn-test-lipsync-speak')?.addEventListener('click', async () => {
     if (!LiveTalkingStudio.isTrainedReady || !LiveTalkingWebRTCClient.sessionId) {
-      alert('Select an avatar and wait for the LiveTalking WebRTC connection.');
+      alert('Select an avatar and wait for Lipsync to connect.');
       return;
     }
 
@@ -6925,7 +8212,7 @@ function bindEventListeners() {
     const provider = $('lt-voice-provider-select')?.value || App.voice.provider || 'qwentts';
 
     logLiveTalkingTerminal(`🎙️ Generating voice (${provider.toUpperCase()}) and Live LipSync...`, 'info');
-    addLog(`🎙️ Testing LiveTalking voice (${provider.toUpperCase()})...`, 'ok');
+    addLog(`Testing Lipsync voice (${provider.toUpperCase()})...`, 'ok');
 
     const button = $('btn-test-lipsync-speak');
     const originalLabel = button?.textContent;
@@ -6935,7 +8222,7 @@ function bindEventListeners() {
     } catch (error) {
       updateVoiceStatusUI('error', error.message);
       logLiveTalkingTerminal(`❌ ${error.message}`, 'error');
-      addLog(`❌ LiveTalking: ${error.message}`, 'err');
+      addLog(`Lipsync: ${error.message}`, 'err');
     } finally {
       if (button) { button.disabled = false; button.textContent = originalLabel || '🗣️ Test voice and LipSync'; }
     }
@@ -7011,7 +8298,7 @@ function bindEventListeners() {
     const vuText = $('lbl-vu-val');
     if (vuText) vuText.textContent = '0 dB';
     logLiveTalkingTerminal('⏹️ Stopped voice and LipSync stream.', 'warn');
-    addLog('⏹️ Stopped LiveTalking playback', 'ok');
+    addLog('Lipsync playback stopped.', 'ok');
   });
 
   // ── Full avatar reset ──────────────────────────────────────
@@ -7087,7 +8374,7 @@ function bindEventListeners() {
 
     closeModal('modal-avatar');
     updateMonitorScreen(App.currentState, App.currentClip);
-    addLog('💾 Applied the LiveTalking avatar to the live monitor.', 'ok');
+    addLog('Lipsync avatar applied to Live Monitor.', 'ok');
   });
 
   // ── Voice & Persona Modal ─────────────────────────────────
@@ -7376,7 +8663,7 @@ function bindEventListeners() {
   });
 
   // Library Card Clicks, Mode Toggles (OFF / Loop / 1) & Delete Clip
-  $('lib-body')?.addEventListener('click', (e) => {
+  $('lib-body')?.addEventListener('click', async (e) => {
     const emptyNotice = e.target.closest('.lib-empty-notice');
     if (emptyNotice) {
       e.stopPropagation();
@@ -7420,14 +8707,17 @@ function bindEventListeners() {
       const state = delBtn.dataset.delState;
       if (CLIP_LIBRARY[state]) {
         const clip = CLIP_LIBRARY[state].find(item => item.id === clipId);
-        if (clip?.blobUrl) URL.revokeObjectURL(clip.blobUrl);
-        if (clip?.storageId) {
-          UPLOADED_BLOBS.delete(clip.storageId);
-          IdolDB.deleteClip(clip.storageId).catch(() => {});
+        if (!clip) return;
+        try {
+          if (clip.storageId) await IdolDB.deleteClip(clip.storageId);
+          if (clip.blobUrl) URL.revokeObjectURL(clip.blobUrl);
+          if (clip.storageId) UPLOADED_BLOBS.delete(clip.storageId);
+          CLIP_LIBRARY[state] = CLIP_LIBRARY[state].filter(item => item.id !== clipId);
+          renderLibraryUI();
+          addLog(`Deleted clip ${clipId} from ${state}`, 'hi');
+        } catch (error) {
+          addLog(`Could not delete clip: ${error.message}`, 'err');
         }
-        CLIP_LIBRARY[state] = CLIP_LIBRARY[state].filter(c => c.id !== clipId);
-        renderLibraryUI();
-        addLog(`Deleted clip ${clipId} from ${state}`, 'hi');
       }
       return;
     }
@@ -7438,13 +8728,8 @@ function bindEventListeners() {
       e.stopPropagation();
       const avatarId = removeLiveAvatarButton.dataset.avatarId;
       if (!avatarId) return;
-      LiveAvatarSession.excludedAvatarIds = [...new Set([...LiveAvatarSession.excludedAvatarIds, avatarId])];
-      void saveActiveAvatarSession()
-        .then(() => {
-          lastLibraryRenderSignature = '';
-          renderLibraryUI();
-          addLog(`Removed ${avatarId} from this live session.`, 'ok');
-        })
+      void setAvatarPoolSelection(avatarId, false)
+        .then(() => addLog(`Deactivated ${avatarId} in the Avatar Pool.`, 'ok'))
         .catch(error => addLog(`Could not remove avatar state: ${error.message}`, 'err'));
       return;
     }
@@ -7457,7 +8742,7 @@ function bindEventListeners() {
       void (async () => {
         try {
           await ensureLiveTalkingWorkerReady();
-          await activateLiveTalkingAvatar(avatarId);
+          await switchPooledAvatar(avatarId);
           setVisualState('TALKING', 0, 'manual-avatar-select', false);
         } catch (error) {
           console.warn(`[Avatar] Could not activate ${avatarId}:`, error);
@@ -7493,13 +8778,25 @@ function bindEventListeners() {
   });
 
   // Live Chat Send Form
+  const mockChatUserInput = $('input-chat-user');
+  if (mockChatUserInput) {
+    mockChatUserInput.value = localStorage.getItem(STORAGE_KEYS.MOCK_CHAT_USER) || 'Viewer';
+    mockChatUserInput.addEventListener('change', () => {
+      const viewerName = mockChatUserInput.value.trim().slice(0, 40) || 'Viewer';
+      mockChatUserInput.value = viewerName;
+      localStorage.setItem(STORAGE_KEYS.MOCK_CHAT_USER, viewerName);
+    });
+  }
   $('form-chat-send')?.addEventListener('submit', (e) => {
     e.preventDefault();
     const input = $('input-chat-msg');
     const text = input?.value?.trim();
     if (!text) return;
+    const viewerName = mockChatUserInput?.value.trim().slice(0, 40) || 'Viewer';
+    if (mockChatUserInput) mockChatUserInput.value = viewerName;
+    localStorage.setItem(STORAGE_KEYS.MOCK_CHAT_USER, viewerName);
     input.value = '';
-    addChatMessage('Viewer_' + Math.floor(Math.random() * 900 + 100), text);
+    addChatMessage(viewerName, text);
   });
 
   // Gifts
@@ -7515,6 +8812,11 @@ function bindEventListeners() {
     if (list) list.innerHTML = '<li class="ev-empty">No messages yet</li>';
     addLog('Cleared live chat.');
   });
+
+  $('connect-youtube-chat')?.addEventListener('click', () => connectPlatformChat('youtube'));
+  $('connect-facebook-chat')?.addEventListener('click', () => connectPlatformChat('facebook'));
+  $('disconnect-youtube-chat')?.addEventListener('click', () => disconnectPlatformChat('youtube'));
+  $('disconnect-facebook-chat')?.addEventListener('click', () => disconnectPlatformChat('facebook'));
 
   // Injections
   $('inject-jackpot')?.addEventListener('click', injectJackpot);
@@ -7551,10 +8853,8 @@ function setupMonitorFirstStudio() {
   const voiceStatus = appBody.querySelector('.voice-status-panel');
   const chat = appBody.querySelector('.chat-panel');
   const library = appBody.querySelector('.library-panel');
-  const game = appBody.querySelector('.game-panel');
-  const goals = appBody.querySelector('.goals-panel');
   const states = appBody.querySelector('.state-chips-panel');
-  if (!monitor || !chat || !library || !game || !goals || !states) return;
+  if (!monitor || !chat || !library || !states) return;
 
   const stage = document.createElement('section');
   stage.className = 'monitor-first-stage';
@@ -7562,48 +8862,155 @@ function setupMonitorFirstStudio() {
 
   const center = document.createElement('section');
   center.className = 'fcp-center-workspace';
-  const chatForm = chat.querySelector('.chat-input-form');
-  if (chatForm) chat.appendChild(chatForm);
   voiceStatus.classList.add('fcp-voice-status-strip');
   states.classList.add('fcp-avatar-state-strip');
   center.append(stage, voiceStatus, states, chat);
 
-  const controls = document.createElement('section');
-  controls.className = 'monitor-first-controls';
-  controls.setAttribute('aria-label', 'Live controls');
-  controls.innerHTML = `
-    <div class="monitor-first-controls-head">
-      <span class="material-symbols-rounded" aria-hidden="true">tune</span>
-      <span class="sec-label">Live Control</span>
+  const sourcePanel = document.createElement('section');
+  sourcePanel.className = 'fcp-source-workspace';
+  sourcePanel.setAttribute('aria-label', 'Library and live chat');
+  sourcePanel.innerHTML = `
+    <div class="live-source-tabs" role="tablist" aria-label="Live sources">
+      <button type="button" class="live-source-tab active" id="live-source-library-tab" role="tab" aria-selected="true" aria-controls="live-source-library" data-live-source-tab="library"><span class="material-symbols-rounded" aria-hidden="true">video_library</span><span>Library</span></button>
+      <button type="button" class="live-source-tab" id="live-source-chat-tab" role="tab" aria-selected="false" aria-controls="live-source-chat" data-live-source-tab="chat"><span class="material-symbols-rounded" aria-hidden="true">forum</span><span>Chat</span></button>
     </div>
-    <div class="monitor-first-controls-grid"></div>`;
-  const controlsGrid = controls.querySelector('.monitor-first-controls-grid');
-  controlsGrid.append(game, goals);
+    <div class="live-source-panes"></div>`;
+  const sourcePanes = sourcePanel.querySelector('.live-source-panes');
+  library.id = 'live-source-library';
+  library.setAttribute('role', 'tabpanel');
+  library.setAttribute('aria-labelledby', 'live-source-library-tab');
+  library.dataset.liveSourcePane = 'library';
+  chat.id = 'live-source-chat';
+  chat.setAttribute('role', 'tabpanel');
+  chat.setAttribute('aria-labelledby', 'live-source-chat-tab');
+  chat.dataset.liveSourcePane = 'chat';
+  sourcePanes.append(library);
 
-  const inspector = document.createElement('aside');
-  inspector.className = 'fcp-right-inspector';
-  inspector.append(controls);
+  const mobileSourceQuery = window.matchMedia('(max-width: 900px)');
+  let activeSource = 'library';
 
-  const leftSplitter = document.createElement('div');
-  leftSplitter.className = 'studio-column-splitter studio-column-splitter-left';
-  leftSplitter.dataset.splitter = 'left';
-  leftSplitter.setAttribute('role', 'separator');
-  leftSplitter.setAttribute('aria-label', 'Resize Library and Monitor');
-  leftSplitter.setAttribute('aria-orientation', 'vertical');
-  leftSplitter.tabIndex = 0;
+  const syncSourceLayout = () => {
+    const mobile = mobileSourceQuery.matches;
+    const tabs = sourcePanel.querySelector('.live-source-tabs');
+    tabs?.setAttribute('aria-hidden', String(!mobile));
+    sourcePanel.setAttribute('aria-label', mobile ? 'Library and Unify Chat' : 'Video library');
 
-  const rightSplitter = document.createElement('div');
-  rightSplitter.className = 'studio-column-splitter studio-column-splitter-right';
-  rightSplitter.dataset.splitter = 'right';
-  rightSplitter.setAttribute('role', 'separator');
-  rightSplitter.setAttribute('aria-label', 'Resize Monitor and Live Control');
-  rightSplitter.setAttribute('aria-orientation', 'vertical');
-  rightSplitter.tabIndex = 0;
+    if (mobile) {
+      sourcePanes.append(library, chat);
+    } else {
+      sourcePanes.append(library);
+      center.append(chat);
+    }
+
+    sourcePanel.querySelectorAll('[data-live-source-tab]').forEach(tab => {
+      const active = tab.dataset.liveSourceTab === activeSource;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = mobile && active ? 0 : -1;
+    });
+
+    [library, chat].forEach(pane => {
+      const active = pane.dataset.liveSourcePane === activeSource;
+      pane.hidden = mobile && !active;
+      if (mobile) {
+        pane.setAttribute('role', 'tabpanel');
+        pane.setAttribute('aria-labelledby', `live-source-${pane.dataset.liveSourcePane}-tab`);
+        pane.removeAttribute('aria-label');
+      } else {
+        pane.setAttribute('role', 'region');
+        pane.removeAttribute('aria-labelledby');
+        pane.setAttribute('aria-label', pane.dataset.liveSourcePane === 'library' ? 'Video library' : 'Unify Chat');
+      }
+    });
+  };
+
+  const setSourceTab = (target = 'library', focus = false) => {
+    activeSource = target === 'chat' ? 'chat' : 'library';
+    syncSourceLayout();
+    if (focus && mobileSourceQuery.matches) {
+      sourcePanel.querySelector(`[data-live-source-tab="${activeSource}"]`)?.focus();
+    }
+  };
+  sourcePanel.querySelectorAll('[data-live-source-tab]').forEach(tab => {
+    tab.addEventListener('click', () => setSourceTab(tab.dataset.liveSourceTab));
+    tab.addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const target = event.key === 'ArrowRight' || event.key === 'End' ? 'chat' : 'library';
+      setSourceTab(target, true);
+    });
+  });
+  mobileSourceQuery.addEventListener('change', syncSourceLayout);
+  syncSourceLayout();
 
   library.classList.add('fcp-library-browser');
-  appBody.replaceChildren(library, center, inspector, leftSplitter, rightSplitter);
-  appBody.classList.add('monitor-first-layout', 'fcp-editor-layout', 'svg-reference-layout');
-  setupStudioColumnResize(appBody);
+  const splitter = document.createElement('div');
+  splitter.className = 'studio-column-splitter live-column-splitter';
+  splitter.dataset.splitter = 'source';
+  splitter.setAttribute('role', 'separator');
+  splitter.setAttribute('aria-label', 'Resize Library and Monitor');
+  splitter.setAttribute('aria-orientation', 'vertical');
+  splitter.setAttribute('aria-valuemin', '25');
+  splitter.setAttribute('aria-valuemax', '40');
+  splitter.tabIndex = 0;
+  appBody.replaceChildren(sourcePanel, center, splitter);
+  appBody.classList.add('monitor-first-layout', 'fcp-editor-layout', 'svg-reference-layout', 'live-two-column-layout');
+  setupLiveTwoColumnResize(appBody);
+  window.setLiveSourceTab = setSourceTab;
+}
+
+function setupLiveTwoColumnResize(layout) {
+  const splitter = layout.querySelector('.live-column-splitter');
+  if (!splitter || splitter.dataset.resizeReady === 'true') return;
+  splitter.dataset.resizeReady = 'true';
+
+  const clamp = value => Math.min(40, Math.max(25, value));
+  let sourceWidth = 35;
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEYS.STUDIO_COLUMNS) || 'null');
+    if (Number.isFinite(Number(saved?.source))) sourceWidth = clamp(Number(saved.source));
+  } catch {
+    localStorage.removeItem(STORAGE_KEYS.STUDIO_COLUMNS);
+  }
+
+  const applyWidth = (persist = false) => {
+    layout.style.setProperty('--studio-source', `${sourceWidth.toFixed(2)}%`);
+    layout.style.setProperty('--studio-monitor', `${(100 - sourceWidth).toFixed(2)}%`);
+    splitter.setAttribute('aria-valuenow', sourceWidth.toFixed(1));
+    if (persist) localStorage.setItem(STORAGE_KEYS.STUDIO_COLUMNS, JSON.stringify({ source: sourceWidth }));
+  };
+
+  const resizeAt = (clientX, persist = false) => {
+    const bounds = layout.getBoundingClientRect();
+    if (!bounds.width) return;
+    sourceWidth = clamp(((clientX - bounds.left) / bounds.width) * 100);
+    applyWidth(persist);
+  };
+
+  splitter.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    splitter.setPointerCapture(event.pointerId);
+    layout.classList.add('is-resizing-columns');
+    resizeAt(event.clientX);
+  });
+  splitter.addEventListener('pointermove', event => {
+    if (splitter.hasPointerCapture(event.pointerId)) resizeAt(event.clientX);
+  });
+  const finishResize = event => {
+    if (splitter.hasPointerCapture(event.pointerId)) splitter.releasePointerCapture(event.pointerId);
+    layout.classList.remove('is-resizing-columns');
+    applyWidth(true);
+  };
+  splitter.addEventListener('pointerup', finishResize);
+  splitter.addEventListener('pointercancel', finishResize);
+  splitter.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
+    event.preventDefault();
+    sourceWidth = event.key === 'Home' ? 35 : clamp(sourceWidth + (event.key === 'ArrowRight' ? 1 : -1));
+    applyWidth(true);
+  });
+
+  applyWidth();
 }
 
 function setupStudioColumnResize(layout) {
@@ -7693,6 +9100,7 @@ function setupStudioColumnResize(layout) {
 }
 
 function setupStudioShell() {
+  setupLiveSettingPreferences();
   const providerSlot = $('web-settings-provider-slot') || $('settings-provider-slot');
   const providerPanel = document.querySelector('.voice-config-panel');
   if (providerSlot) providerSlot.closest('.settings-bento-card')?.setAttribute('hidden', '');
@@ -7722,8 +9130,9 @@ function setupStudioShell() {
   // surface. Avatar creation remains available through the AI Profile flow.
   $('modal-avatar')?.remove();
 
+  let engineStatusTimer = null;
   const setSettingsPane = (target = 'output') => {
-    const allowed = ['output', 'storage', 'director'];
+    const allowed = ['output', 'engine', 'chat', 'storage', 'engines'];
     const selected = allowed.includes(target) ? target : 'output';
     document.querySelectorAll('.settings-section-tab').forEach(tab => {
       const active = tab.dataset.settingsTarget === selected;
@@ -7736,9 +9145,19 @@ function setupStudioShell() {
       pane.classList.toggle('active', active);
       pane.toggleAttribute('hidden', !active);
     });
-    if (selected === 'director') loadAiDirectorSettings().catch(error => {
-      if ($('ai-director-save-status')) $('ai-director-save-status').textContent = error.message;
-    });
+    clearInterval(engineStatusTimer);
+    engineStatusTimer = null;
+    if (selected === 'engines') {
+      loadAiDirectorSettings().catch(error => {
+        if ($('ai-director-save-status')) $('ai-director-save-status').textContent = error.message;
+      });
+      void refreshAiEngines();
+      engineStatusTimer = setInterval(() => void refreshAiEngines({ quiet: true }), 3000);
+    }
+    if (selected === 'chat') window.RuntimeApi.get('/api/platform-chat/status')
+      .then(payload => applyPlatformChatStatus(payload.platformChat || {}))
+      .catch(error => { if ($('platform-chat-summary')) $('platform-chat-summary').textContent = error.message; });
+    if (selected === 'engine') refreshLiveTalkingWorkerStatus({ silent: false });
   };
 
   document.querySelectorAll('.settings-section-tab').forEach(tab => {
@@ -7757,8 +9176,157 @@ function setupStudioShell() {
   });
   setSettingsPane('output');
 
-  const navigateAppView = (name = 'studio', updateHash = true, settingsPane = null) => {
-    if (!['studio', 'avatar', 'director', 'settings'].includes(name)) name = 'studio';
+  const navDrawer = $('main-navigation');
+  const navToggle = $('mobile-nav-toggle');
+  const navClose = $('mobile-nav-close');
+  const navScrim = $('mobile-nav-scrim');
+  let navReturnFocus = null;
+  const isMobileNavigation = () => window.matchMedia('(max-width: 760px)').matches;
+  const setNavigationOpen = (open, restoreFocus = false) => {
+    const shouldOpen = Boolean(open && isMobileNavigation());
+    document.body.classList.toggle('mobile-nav-open', shouldOpen);
+    navToggle?.setAttribute('aria-expanded', String(shouldOpen));
+    navDrawer?.setAttribute('aria-hidden', String(isMobileNavigation() && !shouldOpen));
+    if (shouldOpen) {
+      navReturnFocus = document.activeElement;
+      navDrawer?.querySelector('.web-nav-item.active, .web-nav-item')?.focus();
+    } else if (restoreFocus && navReturnFocus instanceof HTMLElement) {
+      navReturnFocus.focus();
+    }
+  };
+  navToggle?.addEventListener('click', () => setNavigationOpen(true));
+  navClose?.addEventListener('click', () => setNavigationOpen(false, true));
+  navScrim?.addEventListener('click', () => setNavigationOpen(false, true));
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.body.classList.contains('mobile-nav-open')) setNavigationOpen(false, true);
+  });
+  window.addEventListener('resize', () => {
+    if (!isMobileNavigation()) setNavigationOpen(false);
+    else navDrawer?.setAttribute('aria-hidden', String(!document.body.classList.contains('mobile-nav-open')));
+  });
+  setNavigationOpen(false);
+
+  const engineIcons = { 'qwen-director': 'psychology', 'chatgpt-fallback': 'cloud', 'qwen-tts': 'record_voice_over', 'live-avatar': 'face', 'obs-bridge': 'live_tv', 'media-tools': 'movie_edit' };
+  const engineActionIcons = { start: 'play_arrow', stop: 'stop', restart: 'restart_alt' };
+  const renderEngineCards = engines => {
+    const grid = $('engine-card-grid');
+    if (!grid) return;
+    grid.replaceChildren();
+    engines.forEach(engine => {
+      const card = document.createElement('article');
+      card.className = 'engine-card';
+      card.dataset.engineId = engine.id;
+      const iconBox = document.createElement('span');
+      iconBox.className = 'engine-card-icon';
+      const icon = document.createElement('span');
+      icon.className = 'material-symbols-rounded';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = engineIcons[engine.id] || 'memory';
+      iconBox.append(icon);
+      const copy = document.createElement('div');
+      copy.className = 'engine-card-copy';
+      const category = document.createElement('span');
+      category.className = 'engine-card-category';
+      category.textContent = engine.category || 'ENGINE';
+      const titleRow = document.createElement('div');
+      titleRow.className = 'engine-card-title-row';
+      const title = document.createElement('h2');
+      title.textContent = engine.title || engine.id;
+      const model = document.createElement('span');
+      model.textContent = engine.model || '';
+      titleRow.append(title, model);
+      const detail = document.createElement('p');
+      detail.className = 'engine-card-detail';
+      detail.textContent = engine.detail || '';
+      const metrics = document.createElement('div');
+      metrics.className = 'engine-card-metrics';
+      (engine.metrics || []).forEach(metric => {
+        const item = document.createElement('span');
+        item.textContent = metric;
+        metrics.append(item);
+      });
+      copy.append(category, titleRow, detail, metrics);
+      const controls = document.createElement('div');
+      controls.className = 'engine-card-actions';
+      const controlsInner = document.createElement('div');
+      const state = document.createElement('span');
+      state.className = 'engine-state';
+      state.dataset.state = engine.state || 'OFFLINE';
+      state.textContent = ({
+        READY: 'Active',
+        CONFIGURED: 'Active',
+        OFFLINE: 'Inactive',
+        SETUP: 'Setup',
+        STARTING: 'Starting',
+        STOPPING: 'Stopping',
+        ERROR: 'Error',
+      })[engine.state] || engine.state || 'Inactive';
+      controlsInner.append(state);
+      const buttonRow = document.createElement('div');
+      buttonRow.className = 'engine-action-row';
+      (engine.actions || []).forEach(action => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = action === 'start' ? 'btn-primary' : 'btn-secondary';
+        button.dataset.engineAction = action;
+        button.dataset.engineId = engine.id;
+        button.title = `${action[0].toUpperCase()}${action.slice(1)} ${engine.title}`;
+        button.setAttribute('aria-label', button.title);
+        const buttonIcon = document.createElement('span');
+        buttonIcon.className = 'material-symbols-rounded';
+        buttonIcon.setAttribute('aria-hidden', 'true');
+        buttonIcon.textContent = engineActionIcons[action] || 'settings';
+        button.append(buttonIcon);
+        buttonRow.append(button);
+      });
+      controlsInner.append(buttonRow);
+      controls.append(controlsInner);
+      card.append(iconBox, copy, controls);
+      grid.append(card);
+    });
+    grid.setAttribute('aria-busy', 'false');
+  };
+  const refreshAiEngines = async ({ quiet = false } = {}) => {
+    const grid = $('engine-card-grid');
+    const refresh = $('refresh-ai-engines');
+    if (!quiet) refresh?.setAttribute('aria-busy', 'true');
+    try {
+      const payload = await window.RuntimeApi.get('/api/engines');
+      renderEngineCards(payload.engines || []);
+      const readyCount = (payload.engines || []).filter(engine => ['READY', 'CONFIGURED'].includes(engine.state)).length;
+      if ($('engine-manager-summary')) $('engine-manager-summary').textContent = `${readyCount}/${(payload.engines || []).length} active`;
+      if ($('engine-manager-updated')) $('engine-manager-updated').textContent = new Date(payload.updatedAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (error) {
+      if ($('engine-manager-summary')) $('engine-manager-summary').textContent = `Engine status unavailable: ${error.message}`;
+      grid?.setAttribute('aria-busy', 'false');
+    } finally {
+      refresh?.removeAttribute('aria-busy');
+    }
+  };
+  $('refresh-ai-engines')?.addEventListener('click', () => void refreshAiEngines());
+  $('engine-card-grid')?.addEventListener('click', async event => {
+    const button = event.target.closest('[data-engine-action]');
+    if (!button || button.disabled) return;
+    const card = button.closest('.engine-card');
+    card?.setAttribute('data-busy', 'true');
+    button.disabled = true;
+    try {
+      if (button.dataset.engineId === 'obs-bridge' && button.dataset.engineAction === 'start') await unlockAudio(true);
+      await window.RuntimeApi.post(`/api/engines/${encodeURIComponent(button.dataset.engineId)}/action`, { action: button.dataset.engineAction });
+      await refreshAiEngines({ quiet: true });
+    } catch (error) {
+      if ($('engine-manager-summary')) $('engine-manager-summary').textContent = error.message;
+    } finally {
+      card?.removeAttribute('data-busy');
+      button.disabled = false;
+    }
+  });
+
+  const navigateAppView = (name = 'studio', updateHash = true, settingsPane = null, liveSettingPane = null) => {
+    if (name === 'avatar') { name = 'live-settings'; liveSettingPane = 'avatar'; }
+    if (name === 'director') { name = 'live-settings'; liveSettingPane = 'skill'; }
+    if (name === 'engines') { name = 'settings'; settingsPane = 'engines'; }
+    if (!['studio', 'live-settings', 'settings'].includes(name)) name = 'studio';
     document.querySelectorAll('.web-app-view').forEach(view => view.classList.toggle('active', view.dataset.view === name));
     document.querySelectorAll('.web-nav-item').forEach(item => item.classList.toggle('active', item.dataset.appView === name));
     const quickButton = $('btn-quick-settings');
@@ -7769,14 +9337,19 @@ function setupStudioShell() {
       quickButton?.setAttribute('aria-expanded', 'false');
     }
     if (updateHash && location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
-    if (name === 'avatar') refreshLiveTalkingAvatarList();
-    if (name === 'director') setupDirectorBrief();
+    if (name === 'live-settings') {
+      window.setLiveSettingPane?.(liveSettingPane || 'avatar');
+      setupDirectorBrief();
+    }
+    clearInterval(engineStatusTimer);
+    engineStatusTimer = null;
     if (name === 'settings') {
       if (settingsPane) setSettingsPane(settingsPane);
       loadProjectStorageConfig();
       loadPersistedSettings();
       loadAiDirectorSettings().catch(() => refreshLocalAiStatus());
     }
+    setNavigationOpen(false);
   };
   document.querySelectorAll('.web-nav-item').forEach(item => item.addEventListener('click', () => navigateAppView(item.dataset.appView)));
   window.addEventListener('hashchange', () => navigateAppView(location.hash.slice(1) || 'studio', false));
@@ -7799,16 +9372,19 @@ function setupStudioShell() {
 
   $('nav-overview')?.addEventListener('click', () => focusPanel('.monitor-box', 'nav-overview'));
   $('nav-avatar-studio')?.addEventListener('click', () => { setActiveNav('nav-avatar-studio'); $('btn-modal-avatar')?.click(); });
-  $('nav-asset-library')?.addEventListener('click', () => focusPanel('.library-panel', 'nav-asset-library'));
+  $('nav-asset-library')?.addEventListener('click', () => { window.setLiveSourceTab?.('library'); focusPanel('.fcp-source-workspace', 'nav-asset-library'); });
   $('nav-live-session')?.addEventListener('click', () => focusPanel('.monitor-box', 'nav-live-session'));
   $('nav-ai-director')?.addEventListener('click', () => focusPanel('.goals-panel', 'nav-ai-director'));
-  $('nav-live-chat')?.addEventListener('click', () => focusPanel('.chat-panel', 'nav-live-chat'));
+  $('nav-live-chat')?.addEventListener('click', () => {
+    window.setLiveSourceTab?.('chat');
+    focusPanel(window.matchMedia('(max-width: 900px)').matches ? '.fcp-source-workspace' : '#live-source-chat', 'nav-live-chat');
+  });
   $('nav-obs-output')?.addEventListener('click', () => openSettingsCenter('output'));
   $('nav-settings')?.addEventListener('click', () => openSettingsCenter('providers'));
   $('btn-settings-top')?.addEventListener('click', () => openSettingsCenter('providers'));
-  $('btn-open-library-hero')?.addEventListener('click', () => focusPanel('.library-panel', 'nav-asset-library'));
-  $('btn-go-live-hero')?.addEventListener('click', () => {
-    openSettingsCenter('output');
+  $('btn-open-library-hero')?.addEventListener('click', () => { window.setLiveSourceTab?.('library'); focusPanel('.fcp-source-workspace', 'nav-asset-library'); });
+  $('btn-go-live-hero')?.addEventListener('click', event => {
+    void magicConnectObs(event.currentTarget).catch(() => {});
   });
 
   const quickPanel = $('quick-settings-panel');
@@ -7864,7 +9440,7 @@ function setupStudioShell() {
     });
   }
   if (quickSessionVoiceSpeed) {
-    quickSessionVoiceSpeed.value = String(App.voice.speed || 1.05);
+    quickSessionVoiceSpeed.value = String(App.voice.speed || 1.0);
     if ($('quick-session-voice-speed-value')) $('quick-session-voice-speed-value').textContent = `${Number(quickSessionVoiceSpeed.value).toFixed(2)}x`;
     quickSessionVoiceSpeed.addEventListener('input', event => {
       const speed = Number(event.target.value);
@@ -7901,7 +9477,7 @@ function setupStudioShell() {
   });
   document.addEventListener('click', () => setLiveSessionPanelOpen(false));
 
-  $('settings-open-avatar')?.addEventListener('click', () => navigateAppView('avatar'));
+  $('settings-open-avatar')?.addEventListener('click', () => navigateAppView('live-settings', true, null, 'avatar'));
   $('save-project-storage')?.addEventListener('click', () => {
     saveProjectStorageConfig().catch(err => {
       if ($('project-storage-status')) $('project-storage-status').textContent = `Error: ${err.message}`;
@@ -7939,9 +9515,23 @@ function setupStudioShell() {
   window.openStudioSettings = openSettingsCenter;
 }
 
+function setupNativeHeaderDrag() {
+  const topbar = document.querySelector('.topbar');
+  const getCurrentWindow = window.__TAURI__?.window?.getCurrentWindow;
+  if (!topbar || typeof getCurrentWindow !== 'function' || topbar.dataset.nativeDragReady === 'true') return;
+
+  topbar.dataset.nativeDragReady = 'true';
+  topbar.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.isPrimary === false) return;
+    if (event.target.closest('button, a, input, select, textarea, label, [role="button"], [contenteditable="true"]')) return;
+    getCurrentWindow().startDragging().catch(error => console.warn('Native window drag failed:', error));
+  });
+}
+
 async function init() {
   try {
     setupStudioShell();
+    setupNativeHeaderDrag();
   } catch (e) {
     console.warn('setupStudioShell error:', e);
   }
@@ -7951,9 +9541,13 @@ async function init() {
   try {
     bindEventListeners();
     bindAiProfileControls();
+    applyLiveVideoQualityUI(App.talkingEngine.videoQuality, { persist: false, republish: false });
   } catch (e) {
     console.warn('bindEventListeners error:', e);
   }
+
+  // Establish Live Monitor ownership before any avatar offer can replace a session.
+  connectRuntimeRealtime();
 
   const persistedMedia = await Promise.allSettled([
     loadPersistedAvatar(),
@@ -7969,7 +9563,7 @@ async function init() {
     console.warn('loadPersistedSettings error:', e);
   }
 
-  loadLiveSessionSettings();
+  await loadLiveSessionSettings();
   loadReplySkills();
   loadVoiceProfiles();
 
@@ -7997,25 +9591,32 @@ async function init() {
   localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, 'livetalking');
   const startupOverlay = $('app-startup-overlay');
   const startupStatus = $('app-startup-status');
-  if (startupStatus) startupStatus.textContent = 'Preparing realtime avatar…';
-  await ensureLiveTalkingWorkerReady().catch(error => {
-    if (startupStatus) startupStatus.textContent = `Live workspace will reconnect automatically: ${error.message}`;
-  });
+  if (startupStatus) startupStatus.textContent = LiveTalkingWorker.alwaysOn ? 'Preparing realtime avatar…' : 'Opening live workspace…';
+  await refreshLiveTalkingWorkerStatus({ silent: true });
+  if (LiveTalkingWorker.alwaysOn) {
+    await ensureLiveTalkingWorkerReady().catch(error => {
+      if (startupStatus) startupStatus.textContent = `Live workspace will reconnect automatically: ${error.message}`;
+    });
+  }
   clearInterval(LiveTalkingWorker.pollTimer);
   LiveTalkingWorker.pollTimer = setInterval(() => refreshLiveTalkingWorkerStatus({ silent: true }), 3000);
   await refreshLiveTalkingAvatarList().then(async avatars => {
     if (App.talkingEngine.provider !== 'livetalking') return;
     const savedActiveAvatar = localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) || LiveTalkingStudio.avatarId;
     const selectedAvatar = LiveAvatarSession.activeAvatarId;
+    const selectedPool = LiveAvatarSession.selectedAvatarIds.filter(id => avatars.some(avatar => avatar.id === id));
     const preferredAvatar = avatars.some(avatar => avatar.id === selectedAvatar)
       ? selectedAvatar
-      : (avatars.some(avatar => avatar.id === savedActiveAvatar) ? savedActiveAvatar : avatars[0]?.id);
+      : (selectedPool[0] || (avatars.some(avatar => avatar.id === savedActiveAvatar) ? savedActiveAvatar : avatars[0]?.id));
     if (!preferredAvatar) {
       addLog('No trained avatar is available yet.', 'hi');
       return;
     }
     LiveAvatarSession.activeAvatarId = preferredAvatar;
+    if (!LiveAvatarSession.selectedAvatarIds.includes(preferredAvatar)) LiveAvatarSession.selectedAvatarIds.push(preferredAvatar);
     await saveActiveAvatarSession();
+    if (!LiveTalkingWorker.ready) return;
+    await waitForLiveMediaOwnership();
     await reconnectLiveTalkingAvatar(preferredAvatar);
   }).catch(err => addLog(`Live avatar auto-connect failed: ${err.message}`, 'hi'));
   if (startupStatus) startupStatus.textContent = 'Live workspace ready';
@@ -8028,15 +9629,13 @@ async function init() {
     console.warn('setVisualState error:', e);
   }
 
-  connectRuntimeRealtime();
-
   addLog('AI Idol Operator Dashboard started.', 'ok');
   addLog('Realtime avatar pipeline active.', 'ok');
 
   tick();
   setInterval(tick, 200);
 
-  window.addEventListener('click', unlockAudio, { once: true });
+  window.addEventListener('click', () => { void unlockAudio(false); }, { once: true });
 }
 
 if (document.readyState === 'loading') {

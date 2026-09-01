@@ -12,6 +12,7 @@ command -v ffmpeg >/dev/null || { echo "ffmpeg is required"; exit 1; }
 uv venv --python "$python_bin" .venv
 uv pip install --python .venv/bin/python torch torchvision torchaudio
 uv pip install --python .venv/bin/python -r requirements.txt gdown huggingface_hub
+.venv/bin/python scripts/dedupe_macos_ffmpeg.py
 
 mkdir -p models/musetalkV15 models/sd-vae models/whisper models/face-parse-bisent
 
@@ -43,5 +44,9 @@ download models/face-parse-bisent/79999_iter.pth \
   'https://drive.google.com/uc?export=download&id=154JgKpzCPW82qINcVieuPH3fZ2e0P812' 50000000
 download models/face-parse-bisent/resnet18-5c106cde.pth \
   https://download.pytorch.org/models/resnet18-5c106cde.pth 44000000
+
+torch_home="${TORCH_HOME:-$HOME/.cache/torch}"
+.venv/bin/python scripts/prefetch_s3fd.py \
+  --target "$torch_home/hub/checkpoints/s3fd-619a316812.pth"
 
 echo "LiveTalking dependencies and MuseTalk weights are ready."

@@ -26,7 +26,7 @@ export interface FilterResult {
 }
 
 export class SmartChatFilter {
-  private readonly _recentMessages: Array<{ text: string; sender: string; at: number }> = [];
+  private readonly _recentMessages: Array<{ text: string; sender: string; source: string; at: number }> = [];
   private readonly _bannedKeywords = [
     'scam', 'lua dao', 'hack', 'cheat', 'chui', 'dit', 'dm', 'cl', 'lon',
     'fuck', 'shit', 'bot', 'admin ngu', 'cho chet',
@@ -44,8 +44,9 @@ export class SmartChatFilter {
   /**
    * Evaluates a chat message and computes its classification, sentiment, and priority score.
    */
-  filter(msg: { text: string; viewerName: string; isSuperChat?: boolean | undefined; isSubscriber?: boolean | undefined; viewerTier?: ViewerTier | undefined }): FilterResult {
+  filter(msg: { text: string; viewerName: string; source?: ChatPlatform | string | undefined; isSuperChat?: boolean | undefined; isSubscriber?: boolean | undefined; viewerTier?: ViewerTier | undefined }): FilterResult {
     const textLower = msg.text.toLowerCase().trim();
+    const source = String(msg.source || 'default');
     const now = Date.now();
 
     // Clean up history older than 30s
@@ -55,7 +56,7 @@ export class SmartChatFilter {
 
     // 1. Spam & Duplicate Check
     const duplicate = this._recentMessages.find(
-      (m) => (m.text === textLower || m.sender === msg.viewerName) && (now - m.at) < 4000
+      (m) => m.source === source && (m.text === textLower || m.sender === msg.viewerName) && (now - m.at) < 4000
     );
     if (duplicate && !msg.isSuperChat) {
       return {
@@ -82,7 +83,7 @@ export class SmartChatFilter {
     }
 
     // Record valid message
-    this._recentMessages.push({ text: textLower, sender: msg.viewerName, at: now });
+    this._recentMessages.push({ text: textLower, sender: msg.viewerName, source, at: now });
 
     // 3. Question Detection
     const isQuestion = this._questionKeywords.some((k) => textLower.includes(k)) || textLower.includes('?');
@@ -286,7 +287,10 @@ export class ChatManager {
   ingest(rawMsg: Partial<ChatMessage> & { message: string; viewerName: string }): ChatMessage | null {
     const filterResult = this._filter.filter({
       text: rawMsg.message,
-      viewerName: rawMsg.viewerName,
+      // The same display name can exist on several platforms. Namespace the
+      // moderation key so one source cannot rate-limit another source's user.
+      viewerName: `${rawMsg.platform || 'youtube'}:${rawMsg.viewerName}`,
+      source: rawMsg.platform || 'youtube',
       isSuperChat: rawMsg.isSuperChat,
       isSubscriber: rawMsg.isSubscriber,
       viewerTier: rawMsg.viewerTier,

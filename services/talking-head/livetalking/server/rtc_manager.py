@@ -17,6 +17,28 @@ from aiortc.rtcrtpsender import RTCRtpSender
 from utils.logger import logger
 
 
+def configure_h264_bitrate():
+    """Use a stable local WebRTC bitrate for 720p30, with an FHD override."""
+    from aiortc.codecs import h264 as h264_codec
+
+    quality = os.getenv("LIVETALKING_VIDEO_QUALITY", "fhd").strip().lower()
+    default_target = "6000000" if quality == "fhd" else "4000000"
+    default_maximum = "8000000" if quality == "fhd" else "6000000"
+    try:
+        target = int(os.getenv("LIVETALKING_WEBRTC_BITRATE", default_target))
+    except ValueError:
+        target = int(default_target)
+    try:
+        maximum = int(os.getenv("LIVETALKING_WEBRTC_MAX_BITRATE", default_maximum))
+    except ValueError:
+        maximum = int(default_maximum)
+    target = max(1000000, target)
+    maximum = max(target, maximum)
+    h264_codec.DEFAULT_BITRATE = target
+    h264_codec.MAX_BITRATE = maximum
+    return target, maximum
+
+
 # def _rand_session_id(n: int = 6) -> int:
 #     """生成 N 位随机 session ID"""
 #     return random.randint(10 ** (n - 1), 10 ** n - 1)
@@ -104,6 +126,7 @@ class RTCManager:
 
     async def _create_pc_and_answer(self, avatar_session, sessionid, offer):
         """创建 PeerConnection、添加轨道、SDP 交换，返回已完成 answer 的 pc"""
+        configure_h264_bitrate()
         ice_servers = [RTCIceServer(urls=self.opt.stun)]
         turn_url = os.getenv("LIVETALKING_TURN_URL", "").strip()
         if turn_url:

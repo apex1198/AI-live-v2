@@ -41,6 +41,7 @@ const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 const index_js_1 = require("./services/runtime-server/dist/index.js");
 const persistence_js_1 = require("./services/runtime-server/dist/persistence.js");
+const platform_chat_js_1 = require("./services/runtime-server/dist/platform-chat.js");
 const index_js_2 = require("./packages/asset-engine/dist/index.js");
 const index_js_3 = require("./packages/goal-engine/dist/index.js");
 const index_js_4 = require("./services/director/dist/index.js");
@@ -89,6 +90,31 @@ function probeWebSocketUpgrade(headers) {
         request.once('error', reject);
         request.end();
     });
+}
+async function openRuntimeSocket(port) {
+    const messages = [];
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, ['idol-runtime-v2']);
+    socket.addEventListener('message', (event) => {
+        try {
+            messages.push(JSON.parse(String(event.data)));
+        }
+        catch { }
+    });
+    await new Promise((resolve, reject) => {
+        socket.addEventListener('open', () => resolve(), { once: true });
+        socket.addEventListener('error', () => reject(new Error('Runtime WebSocket connection failed')), { once: true });
+    });
+    return { socket, messages };
+}
+async function waitForSocketMessage(messages, type, timeoutMs = 1_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const match = messages.find((message) => message?.type === type);
+        if (match)
+            return match;
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return null;
 }
 async function runAudit() {
     process.env.NODE_ENV = 'test';
@@ -175,7 +201,18 @@ async function runAudit() {
         speechText: 'Khánh: Hôm nay chơi gì vậy?\nLinh: Cho mình chơi cùng nha',
         timestamp: Date.now(),
     });
-    assert(customPersonaBatch.text.includes('Bé Lộc Y Tá') && !customPersonaBatch.text.includes('Mimi'), 'Dialogue fallback and 15–20 second batch filler always use the active AI Profile name', customPersonaBatch.text);
+    assert(customPersonaBatch.text.includes('Bé Lộc Y Tá')
+        && !customPersonaBatch.text.includes('Mimi')
+        && customPersonaBatch.estimatedDurationMs >= 8_000
+        && customPersonaBatch.estimatedDurationMs <= 12_000, 'Dialogue fallback keeps the active AI Profile and the 8–12 second budget', customPersonaBatch.text);
+    const batchWordCount = customPersonaBatch.text.split(/\s+/).filter(Boolean).length;
+    assert(batchWordCount >= 28 && batchWordCount <= 40, 'Live chat reply is constrained to the real 8–12 second word budget', `${batchWordCount} words`);
+    const cleanedReply = (0, index_js_5.constrainLiveReply)('Mình thích ý tưởng đó nha. Bé Lộc Y Tá đã đọc hết các câu hỏi rồi, mọi người cứ nhắn tiếp để không bỏ sót ai.');
+    assert(cleanedReply.startsWith('Mình thích ý tưởng đó nha.')
+        && !/đã đọc hết|không bỏ sót|trả lời lần lượt/i.test(cleanedReply), 'Dialogue post-processing removes fixed meta commentary', cleanedReply);
+    const sentenceBoundaryReply = (0, index_js_5.constrainLiveReply)('Mình rất thích ý tưởng này và muốn cùng mọi người thử ngay hôm nay. Phần tiếp theo có rất nhiều chi tiết cần giải thích nên mình sẽ nói thật dài để chắc chắn rằng câu trả lời ban đầu vượt quá giới hạn thời lượng dành cho một clip talking trong phiên live hiện tại.');
+    const sentenceBoundaryWordCount = sentenceBoundaryReply.split(/\s+/).filter(Boolean).length;
+    assert(sentenceBoundaryWordCount >= 28 && sentenceBoundaryWordCount <= 40, 'Dialogue sentence-boundary trimming cannot fall below the 8-second floor', `${sentenceBoundaryWordCount} words`);
     let duckingStateObserved = false;
     const voiceService = new index_js_6.VoiceService({
         listeners: {
@@ -207,6 +244,19 @@ async function runAudit() {
     assert(mockObsClient.getState().activeMediaFile === 'jackpot_01.mp4', 'OBS Controller updates media source file');
     await obsController.applyAudioDucking(true, -12);
     assert(mockObsClient.getState().isDucked === true, 'OBS Controller applies audio ducking filter');
+    const magicObs = await obsController.magicConnect({
+        url: 'http://127.0.0.1:9876/overlay/obs-output.html',
+        sourceName: 'AI IDOL Streamer',
+        width: 1920,
+        height: 1080,
+        fps: 30,
+    });
+    assert(magicObs.connected
+        && magicObs.audioRouted
+        && magicObs.videoPreset.width === 1920
+        && magicObs.videoPreset.height === 1080
+        && magicObs.videoPreset.fps === 30
+        && mockObsClient.getState().visibleSources.has('AI IDOL Streamer'), 'OBS Magic Connect provisions one visible Full HD 1080p30 video + voice source');
     // ── Step 6 Audit: Game Telemetry & Slot Adapter ───────────
     console.log('\n▶ Auditing Phase 4: Game Telemetry & Slot Adapter...');
     const slotSim = new index_js_8.SlotSimulatorEngine({ gameName: 'Fortune Dragon', defaultBet: 10000 });
@@ -235,6 +285,119 @@ async function runAudit() {
         viewerName: 'Spammer',
     });
     assert(!bannedRes.allowed && bannedRes.classification === 'MODERATION', 'SmartChatFilter filters banned toxic keywords');
+    const youtubeChat = (0, platform_chat_js_1.normalizeYouTubeChatItem)({
+        id: 'yt-message-1',
+        snippet: { displayMessage: 'Idol xinh quá', publishedAt: new Date().toISOString(), type: 'textMessageEvent' },
+        authorDetails: { channelId: 'yt-viewer-1', displayName: 'Mai YouTube', isChatSponsor: true },
+    }, 'yt-live-1');
+    const facebookChat = (0, platform_chat_js_1.normalizeFacebookComment)({
+        id: 'fb-message-1',
+        message: 'Chào idol nha',
+        from: { id: 'fb-viewer-1', name: 'Mai Facebook' },
+        created_time: new Date().toISOString(),
+    }, 'fb-live-1');
+    assert(youtubeChat?.platform === 'youtube'
+        && youtubeChat.viewerTier === 'subscriber'
+        && facebookChat?.platform === 'facebook', 'YouTube and Facebook payloads normalize into one chat event shape');
+    const activeYouTubeBroadcast = (0, platform_chat_js_1.selectActiveYouTubeBroadcast)([
+        { id: 'scheduled', status: { lifeCycleStatus: 'ready' }, snippet: { liveChatId: 'scheduled-chat' } },
+        { id: 'live', status: { lifeCycleStatus: 'live' }, snippet: { liveChatId: 'live-chat' } },
+    ]);
+    assert(activeYouTubeBroadcast?.id === 'live', 'YouTube chat selects the owned live broadcast locally without combining incompatible API filters');
+    const unifiedManager = new index_js_9.ChatManager();
+    const unifiedSources = [];
+    unifiedManager.onProcessedMessage((message) => unifiedSources.push(message.platform));
+    unifiedManager.ingest({ platform: 'youtube', viewerName: 'Same Name', message: 'Cùng một lời chào' });
+    unifiedManager.ingest({ platform: 'facebook', viewerName: 'Same Name', message: 'Cùng một lời chào' });
+    assert(unifiedSources.join(',') === 'youtube,facebook', 'Cross-platform users are filtered independently before entering Unify Chat');
+    const openedLoginUrls = [];
+    let savedYouTubeCredentials = {};
+    const googleTokenBodies = [];
+    const loginCoordinator = new platform_chat_js_1.PlatformChatCoordinator({
+        port: 9876,
+        environment: {
+            GOOGLE_OAUTH_CLIENT_ID: 'google-client-id',
+            GOOGLE_OAUTH_CLIENT_SECRET: 'google-client-secret',
+            FACEBOOK_APP_ID: 'facebook-app-id',
+        },
+        loadCredentials: () => ({}),
+        saveCredentials: (credentials) => { savedYouTubeCredentials = credentials; },
+        onMessage: () => { },
+        onStatus: () => { },
+        openExternal: async (url) => { openedLoginUrls.push(url); },
+        fetchImpl: async (input, init) => {
+            const url = String(input);
+            if (url === 'https://oauth2.googleapis.com/token') {
+                googleTokenBodies.push(String(init?.body || ''));
+                return new Response(JSON.stringify({
+                    access_token: 'youtube-access-token',
+                    refresh_token: 'youtube-refresh-token',
+                    expires_in: 3600,
+                    scope: 'https://www.googleapis.com/auth/youtube.readonly',
+                }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+            }
+            if (url.startsWith('https://www.googleapis.com/youtube/v3/channels')) {
+                return new Response(JSON.stringify({ items: [{ id: 'channel-1', snippet: { title: 'AI IDOL Channel' } }] }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+            throw new Error(`Unexpected OAuth test request: ${url}`);
+        },
+    });
+    const youtubeLogin = await loginCoordinator.beginLogin('youtube');
+    await loginCoordinator.beginLogin('facebook');
+    assert(openedLoginUrls[0]?.startsWith('https://accounts.google.com/o/oauth2/v2/auth?')
+        && openedLoginUrls[0]?.includes('code_challenge_method=S256')
+        && openedLoginUrls[1]?.startsWith('https://www.facebook.com/v24.0/dialog/oauth?')
+        && openedLoginUrls[1]?.includes('response_type=token'), 'Simple Login opens Google PKCE and Facebook consent in the system browser');
+    const youtubeLoginState = new URL(youtubeLogin.authUrl).searchParams.get('state') || '';
+    await loginCoordinator.completeYouTubeLogin(new URLSearchParams({ state: youtubeLoginState, code: 'authorization-code' }));
+    assert(googleTokenBodies[0]?.includes('client_secret=google-client-secret')
+        && googleTokenBodies[0]?.includes('code_verifier=')
+        && !youtubeLogin.authUrl.includes('client_secret')
+        && new URL(youtubeLogin.authUrl).searchParams.get('scope') === 'https://www.googleapis.com/auth/youtube.readonly'
+        && new URL(youtubeLogin.authUrl).searchParams.get('prompt') === 'select_account consent'
+        && savedYouTubeCredentials.youtube?.accountName === 'AI IDOL Channel', 'Google login requests only YouTube access and sends the installed-app secret only to the token endpoint');
+    let missingScopeYouTubeCalls = 0;
+    const missingScopeCoordinator = new platform_chat_js_1.PlatformChatCoordinator({
+        port: 9876,
+        environment: {
+            GOOGLE_OAUTH_CLIENT_ID: 'google-client-id',
+            GOOGLE_OAUTH_CLIENT_SECRET: 'google-client-secret',
+        },
+        loadCredentials: () => ({}),
+        saveCredentials: () => { },
+        onMessage: () => { },
+        onStatus: () => { },
+        openExternal: async () => { },
+        fetchImpl: async (input) => {
+            const url = String(input);
+            if (url === 'https://oauth2.googleapis.com/token') {
+                return new Response(JSON.stringify({
+                    access_token: 'profile-only-access-token',
+                    expires_in: 3600,
+                    scope: 'openid profile',
+                }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+            }
+            if (url.startsWith('https://www.googleapis.com/youtube/'))
+                missingScopeYouTubeCalls += 1;
+            throw new Error(`Unexpected missing-scope request: ${url}`);
+        },
+    });
+    const missingScopeLogin = await missingScopeCoordinator.beginLogin('youtube');
+    const missingScopeState = new URL(missingScopeLogin.authUrl).searchParams.get('state') || '';
+    let missingScopeError = '';
+    try {
+        await missingScopeCoordinator.completeYouTubeLogin(new URLSearchParams({
+            state: missingScopeState,
+            code: 'authorization-code-without-youtube-scope',
+        }));
+    }
+    catch (error) {
+        missingScopeError = error instanceof Error ? error.message : String(error);
+    }
+    assert(missingScopeError.includes('View your YouTube account') && missingScopeYouTubeCalls === 0, 'Google token without youtube.readonly stops before any YouTube API request and explains how to grant access');
     // ── Step 8 Audit: Realtime LipSync Engine & LiveTalking Provider ──
     console.log('\n▶ Auditing Level 3: Realtime Talking Video Engine & LiveTalking Integration (lipku/LiveTalking)...');
     const phonemes = index_js_10.VietnamesePhonemeConverter.wordToVisemes('chào');
@@ -345,9 +508,13 @@ async function runAudit() {
     const smoothedFrame2 = smoother.smooth(frame2Jittery);
     assert(smoothedFrame2[0].x > frame1[0].x && smoothedFrame2[0].x < frame2Jittery[0].x, 'TemporalLandmarkSmoother eliminates inter-frame landmark jitter via EMA in SOURCE_FRAME_SPACE');
     // LiveTalking Digital Human Provider Tests (lipku/livetalking)
+    let workerHealthy = true;
     let workerSpeakingPolls = 0;
+    let workerStatusFailuresAfterSpeaking = 0;
     let workerTaskCounter = 0;
+    let workerOfferCount = 0;
     let workerSessionSequence = [];
+    const workerAvatarSwitches = [];
     const workerAudioSessions = [];
     const workerTaskRequests = [];
     const workerTasks = new Map();
@@ -359,8 +526,11 @@ async function runAudit() {
         const pathname = new URL(request.url || '/', 'http://127.0.0.1:9880').pathname;
         response.setHeader('Content-Type', 'application/json');
         if (pathname === '/health')
-            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { status: 'healthy', model: 'musetalk' } }));
+            return response.end(JSON.stringify(workerHealthy
+                ? { code: 0, msg: 'ok', data: { status: 'healthy', model: 'musetalk' } }
+                : { code: 503, msg: 'offline', data: { status: 'offline', model: 'musetalk' } }));
         if (pathname === '/offer') {
+            workerOfferCount += 1;
             let rawBody = '';
             for await (const chunk of request)
                 rawBody += String(chunk);
@@ -392,6 +562,11 @@ async function runAudit() {
             return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { sessionid: 'session_test' } }));
         }
         if (pathname === '/is_speaking') {
+            if (workerStatusFailuresAfterSpeaking > 0 && workerSpeakingPolls < 3) {
+                workerStatusFailuresAfterSpeaking -= 1;
+                request.socket.destroy();
+                return;
+            }
             const speaking = workerSpeakingPolls > 0;
             workerSpeakingPolls = Math.max(0, workerSpeakingPolls - 1);
             return response.end(JSON.stringify({ code: 0, msg: 'ok', data: speaking }));
@@ -399,6 +574,21 @@ async function runAudit() {
         if (pathname === '/interrupt') {
             workerSpeakingPolls = 0;
             return response.end(JSON.stringify({ code: 0, msg: 'ok' }));
+        }
+        if (pathname === '/api/session/session_test/avatar-state' && request.method === 'POST') {
+            let rawBody = '';
+            for await (const chunk of request)
+                rawBody += String(chunk);
+            const input = JSON.parse(rawBody || '{}');
+            workerAvatarSwitches.push(input);
+            return response.end(JSON.stringify({
+                code: 0,
+                msg: 'ok',
+                data: { sessionid: 'session_test', avatar_id: input.avatar_id, state: input.state, changed: true },
+            }));
+        }
+        if (pathname === '/api/session/session_test' && request.method === 'DELETE') {
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { sessionid: 'session_test', closed: true } }));
         }
         if (pathname === '/api/avatar/task' && request.method === 'POST') {
             let rawBody = '';
@@ -425,7 +615,10 @@ async function runAudit() {
         if (pathname === '/api/avatar/tasks')
             return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { tasks: [] } }));
         if (pathname === '/api/avatars')
-            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { avatars: [{ id: 'avatar_test', model_type: 'musetalk', thumbnail_url: '/api/avatars/avatar_test/thumbnail' }] } }));
+            return response.end(JSON.stringify({ code: 0, msg: 'ok', data: { avatars: [
+                        { id: 'avatar_test', model_type: 'musetalk', thumbnail_url: '/api/avatars/avatar_test/thumbnail', avatarState: 'normal' },
+                        { id: 'avatar_happy', model_type: 'musetalk', avatarState: 'happy' },
+                    ] } }));
         if (pathname === '/api/avatars/avatar_test/thumbnail') {
             response.setHeader('Content-Type', 'image/png');
             return response.end(thumbnailBytes);
@@ -594,9 +787,10 @@ async function runAudit() {
     assert(persistence.getActiveProject()?.projectName === 'project_test', 'SQLite persists the active project and storage root');
     persistence.upsertAvatar('avatar_test', { id: 'avatar_test', status: 'ready' });
     assert(persistence.listAvatars()[0]?.id === 'avatar_test', 'SQLite persists trained avatar records');
-    persistence.setAvatarSession('avatar_test');
+    persistence.setAvatarSession('avatar_test', ['avatar_test', 'avatar_happy']);
     const persistedSession = persistence.getAvatarSession();
-    assert(persistedSession?.activeAvatarId === 'avatar_test', 'SQLite persists one active avatar for the live session');
+    assert(persistedSession?.activeAvatarId === 'avatar_test'
+        && persistedSession.selectedAvatarIds.join(',') === 'avatar_test,avatar_happy', 'SQLite persists a multi-Avatar pool and its current live Avatar');
     persistence.close();
     // ── Step 9 Audit: Runtime Server End-to-End Integration ───
     console.log('\n▶ Auditing Phase 6: Runtime Server Full Integration...');
@@ -610,13 +804,99 @@ async function runAudit() {
         assert(json.status === 'healthy', 'HTTP REST /api/status responds with healthy state');
         assert(json.service === 'ai-idol-runtime' && typeof json.runtimeBuildId === 'string', 'Runtime status identifies the native backend build');
         assert(json.state.currentVisual !== undefined, 'REST status includes Director state');
+        const routeSessionId = 'obs_route_test';
+        const runtimeInternals = server;
+        runtimeInternals._activeObsOutputSessionId = routeSessionId;
+        runtimeInternals._obsOutputRoutes.set(routeSessionId, {
+            sessionId: routeSessionId,
+            receiver: null,
+            receiverPeerId: '',
+            publisher: null,
+            publisherPeerId: '',
+            negotiationId: '',
+        });
+        const primaryPublisher = await openRuntimeSocket(9876);
+        const standbyPublisher = await openRuntimeSocket(9876);
+        const obsReceiver = await openRuntimeSocket(9876);
+        primaryPublisher.socket.send(JSON.stringify({
+            type: 'OBS_OUTPUT_REGISTER', role: 'publisher', peerId: 'dashboard_primary', priority: 100,
+        }));
+        standbyPublisher.socket.send(JSON.stringify({
+            type: 'OBS_OUTPUT_REGISTER', role: 'publisher', peerId: 'dashboard_standby', priority: 10,
+        }));
+        obsReceiver.socket.send(JSON.stringify({
+            type: 'OBS_OUTPUT_REGISTER', role: 'receiver', peerId: 'obs_receiver_test', sessionId: routeSessionId,
+        }));
+        obsReceiver.socket.send(JSON.stringify({ type: 'OBS_OUTPUT_READY', sessionId: routeSessionId }));
+        const primaryAssignment = await waitForSocketMessage(primaryPublisher.messages, 'OBS_OUTPUT_SESSION_ASSIGNED');
+        await new Promise(resolve => setTimeout(resolve, 50));
+        const standbyAssignedEarly = standbyPublisher.messages.some(message => message?.type === 'OBS_OUTPUT_SESSION_ASSIGNED');
+        assert(primaryAssignment?.sessionId === routeSessionId && !standbyAssignedEarly, 'OBS signaling elects exactly one Dashboard publisher for each output session');
+        primaryPublisher.socket.send(JSON.stringify({
+            type: 'OBS_OUTPUT_OFFER',
+            sessionId: routeSessionId,
+            negotiationId: 'neg_primary_test',
+            description: { type: 'offer', sdp: 'v=0\r\n' },
+        }));
+        const routedOffer = await waitForSocketMessage(obsReceiver.messages, 'OBS_OUTPUT_OFFER');
+        standbyPublisher.socket.send(JSON.stringify({
+            type: 'OBS_OUTPUT_OFFER',
+            sessionId: routeSessionId,
+            negotiationId: 'neg_standby_test',
+            description: { type: 'offer', sdp: 'v=0\r\n' },
+        }));
+        await new Promise(resolve => setTimeout(resolve, 50));
+        const receivedOffers = obsReceiver.messages.filter(message => message?.type === 'OBS_OUTPUT_OFFER');
+        assert(routedOffer?.negotiationId === 'neg_primary_test' && receivedOffers.length === 1, 'OBS signaling routes offer and ICE traffic only inside the assigned publisher-receiver pair');
+        primaryPublisher.socket.close();
+        const standbyAssignment = await waitForSocketMessage(standbyPublisher.messages, 'OBS_OUTPUT_SESSION_ASSIGNED');
+        assert(standbyAssignment?.sessionId === routeSessionId, 'OBS signaling promotes one standby publisher after the active Dashboard disconnects');
+        standbyPublisher.socket.close();
+        obsReceiver.socket.close();
+        runtimeInternals._obsOutputRoutes.delete(routeSessionId);
+        runtimeInternals._activeObsOutputSessionId = null;
         const defaultSettingsRes = await fetch('http://localhost:9876/api/settings/all');
         const defaultSettings = await defaultSettingsRes.json();
         assert(defaultSettings.voice.provider === 'qwentts'
             && defaultSettings.voice.voiceId === 'qwen-default'
             && defaultSettings.voice.languageCode === 'vi', 'Runtime defaults TTS to Qwen Vietnamese 0.6B');
-        assert(defaultSettings.persona?.llmModel === 'qwen3:8b', 'AI Director defaults to the bounded Qwen 8B model');
-        assert(defaultSettings.talkingEngine === undefined && defaultSettings.realtimeStatus !== undefined, 'Public settings hide core realtime implementation details');
+        assert(defaultSettings.persona?.llmProvider === 'ollama'
+            && defaultSettings.persona?.llmModel === 'qwen3:8b', 'AI Director defaults to local Qwen 8B');
+        assert(defaultSettings.talkingEngine === undefined
+            && defaultSettings.realtimeStatus?.alwaysOn === true
+            && defaultSettings.realtimeStatus?.videoQuality === 'fhd', 'Public settings hide core realtime details and fix live output to Full HD');
+        const engineHub = await fetch('http://localhost:9876/api/engines').then((response) => response.json());
+        assert(engineHub.success === true
+            && engineHub.engines?.length === 6
+            && engineHub.engines.some((engine) => engine.id === 'qwen-director' && engine.model === 'qwen3:8b')
+            && engineHub.engines.some((engine) => engine.id === 'obs-bridge' && engine.metrics?.includes('30 FPS')), 'AI Engine hub reports the complete Qwen, voice, avatar, OBS, and media pipeline');
+        workerHealthy = false;
+        const fhdSettingsRes = await fetch('http://localhost:9876/api/settings/live-video', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ quality: 'fhd' }),
+        });
+        const fhdSettings = await fhdSettingsRes.json();
+        const persistedFhdSettings = await fetch('http://localhost:9876/api/settings/all').then((response) => response.json());
+        assert(fhdSettingsRes.status === 200
+            && fhdSettings.preset?.width === 1920
+            && fhdSettings.preset?.height === 1080
+            && fhdSettings.preset?.fps === 30
+            && persistedFhdSettings.realtimeStatus?.videoQuality === 'fhd', 'Live video API persists FHD 1080p30 as one runtime preset');
+        const hdSettingsRes = await fetch('http://localhost:9876/api/settings/live-video', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ quality: 'hd' }),
+        });
+        await hdSettingsRes.json();
+        workerHealthy = true;
+        assert(hdSettingsRes.status === 400, 'Live video API rejects the removed HD preset');
+        const platformChatStatus = await fetch('http://localhost:9876/api/platform-chat/status').then((response) => response.json());
+        assert(platformChatStatus.success === true
+            && platformChatStatus.platformChat?.unified === true
+            && platformChatStatus.platformChat?.sources?.youtube
+            && platformChatStatus.platformChat?.sources?.facebook
+            && !JSON.stringify(platformChatStatus).includes('accessToken'), 'Unified platform chat status exposes YouTube and Facebook without exposing OAuth tokens');
         const maintenanceConfigRes = await fetch('http://localhost:9876/api/settings/talking', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -643,19 +923,22 @@ async function runAudit() {
             && customPersonaSettings.settings?.name === 'Bé Lộc Y Tá'
             && !customPersonaSettings.settings?.systemPrompt?.includes('Mimi')
             && !customPersonaSettings.settings?.systemPrompt?.includes('Y Tá Y Tá'), 'AI Profile updates legacy prompt names without duplicating a new name that extends the previous name');
-        const rejectedMultiAvatarSession = await fetch('http://localhost:9876/api/avatars/session', {
+        const multiAvatarSessionRes = await fetch('http://localhost:9876/api/avatars/session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ selected: ['avatar_one', 'avatar_two'], random: true }),
+            body: JSON.stringify({ activeAvatarId: 'avatar_test', selectedAvatarIds: ['avatar_test', 'avatar_happy'] }),
         });
-        assert(rejectedMultiAvatarSession.status === 400, 'Avatar session rejects multiple active avatars');
+        const multiAvatarSession = await multiAvatarSessionRes.json();
+        assert(multiAvatarSessionRes.status === 200
+            && multiAvatarSession.session?.selectedAvatarIds?.join(',') === 'avatar_test,avatar_happy', 'Avatar session stores multiple active Avatar states in one Pool');
         const activeAvatarSessionRes = await fetch('http://localhost:9876/api/avatars/session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ activeAvatarId: 'avatar_test' }),
+            body: JSON.stringify({ activeAvatarId: 'avatar_test', selectedAvatarIds: ['avatar_test', 'avatar_happy'] }),
         });
         const activeAvatarSession = await activeAvatarSessionRes.json();
-        assert(activeAvatarSession.session?.activeAvatarId === 'avatar_test', 'Avatar session stores exactly one active avatar');
+        assert(activeAvatarSession.session?.activeAvatarId === 'avatar_test'
+            && activeAvatarSession.session?.selectedAvatarIds?.length === 2, 'Avatar session tracks one current Avatar inside a multi-Avatar Pool');
         const excludedAvatarSessionRes = await fetch('http://localhost:9876/api/avatars/session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -665,12 +948,40 @@ async function runAudit() {
         assert(excludedAvatarSessionRes.status === 200
             && excludedAvatarSession.session?.activeAvatarId === 'avatar_test'
             && excludedAvatarSession.session?.excludedAvatarIds?.[0] === 'avatar_happy', 'Live session persists active avatar and per-state exclusions independently');
+        await fetch('http://localhost:9876/api/avatars/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ activeAvatarId: 'avatar_test', selectedAvatarIds: ['avatar_test', 'avatar_happy'] }),
+        });
         const workerStatusRes = await fetch('http://localhost:9876/api/talking-head/livetalking/worker');
         const workerStatus = await workerStatusRes.json();
         assert(workerStatus.worker?.state === 'READY' && workerStatus.worker?.owned === false, 'Worker status detects an externally running LiveTalking worker without spawning one');
         const workerStartRes = await fetch('http://localhost:9876/api/talking-head/livetalking/worker/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         const workerStart = await workerStartRes.json();
         assert(workerStartRes.status === 200 && workerStart.worker?.ready === true && workerStart.worker?.owned === false, 'Worker start endpoint reuses an already healthy worker');
+        const concurrentWorkerStarts = await Promise.all(Array.from({ length: 4 }, () => fetch('http://localhost:9876/api/talking-head/livetalking/worker/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((response) => response.json())));
+        assert(concurrentWorkerStarts.every((payload) => payload.success && payload.worker?.ready), 'Concurrent worker start requests converge on the same healthy Live Talking instance');
+        const manualModeRes = await fetch('http://localhost:9876/api/settings/talking', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alwaysOn: false }),
+        });
+        const manualModeSettings = await fetch('http://localhost:9876/api/settings/all').then((response) => response.json());
+        assert(manualModeRes.status === 200 && manualModeSettings.realtimeStatus?.alwaysOn === false, 'Live Talking can switch to persistent manual startup mode without exposing engine configuration');
+        workerHealthy = false;
+        const manualStopRes = await fetch('http://localhost:9876/api/talking-head/livetalking/worker/stop', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const manualStop = await manualStopRes.json();
+        assert(manualStopRes.status === 202
+            && manualStop.worker?.state === 'OFFLINE'
+            && manualStop.worker?.alwaysOn === false, 'Manual Stop leaves Live Talking offline and disables automatic restart');
+        workerHealthy = true;
+        await fetch('http://localhost:9876/api/settings/talking', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alwaysOn: true }),
+        });
         // Test Game Spin API
         const spinRes = await fetch('http://localhost:9876/api/game/spin', {
             method: 'POST',
@@ -696,9 +1007,9 @@ async function runAudit() {
         const priorSpeechStatus = await priorSpeechStatusRes.json();
         const priorSpeechCommandId = priorSpeechStatus.speech?.commandId || '';
         const chatPayloads = [
-            { message: 'Chào idol Mimi!', viewerName: 'Quốc Bảo', viewerTier: 'vip' },
-            { message: 'Hôm nay Mimi chơi game gì vậy?', viewerName: 'Ngọc Mai', viewerTier: 'subscriber' },
-            { message: 'Cho mình tham gia cùng nha', viewerName: 'Thanh Trúc', viewerTier: 'regular' },
+            { platform: 'youtube', message: 'Chào idol Mimi!', viewerName: 'Quốc Bảo', viewerTier: 'vip' },
+            { platform: 'facebook', message: 'Hôm nay Mimi chơi game gì vậy?', viewerName: 'Ngọc Mai', viewerTier: 'subscriber' },
+            { platform: 'youtube', message: 'Cho mình tham gia cùng nha', viewerName: 'Thanh Trúc', viewerTier: 'regular' },
         ];
         const chatResults = await Promise.all(chatPayloads.map(payload => fetch('http://localhost:9876/api/chat/send', {
             method: 'POST',
@@ -706,6 +1017,7 @@ async function runAudit() {
             body: JSON.stringify(payload),
         }).then(response => response.json())));
         assert(chatResults.every(result => result.success === true), 'REST /api/chat/send ingests and scores a chat batch');
+        assert(chatResults[0]?.message?.platform === 'youtube' && chatResults[1]?.message?.platform === 'facebook', 'YouTube and Facebook chat share one runtime ingestion endpoint');
         const chatSpeechDeadline = Date.now() + 5000;
         let chatDialogueProvider = '';
         let chatSpeechDurationMs = 0;
@@ -723,25 +1035,107 @@ async function runAudit() {
             await new Promise((resolve) => setTimeout(resolve, 50));
         }
         assert(server.speechCommandCount === chatSpeechBaseline + 1, 'One chat batch creates exactly one SpeechCommand');
-        assert(chatDialogueProvider === 'mock-fallback', 'Chat SpeechCommand records the actual fallback dialogue provider', chatDialogueProvider);
-        assert(chatSpeechDurationMs >= 15_000 && chatSpeechDurationMs <= 20_000, 'Batched chat reply targets a 15–20 second avatar response', `${chatSpeechDurationMs}ms`);
-        assert(chatSpeechText.includes('Bé Lộc Y Tá') && !chatSpeechText.includes('Mimi đã đọc'), 'Runtime chat speech uses the active AI Profile instead of the legacy Mimi batch phrase', chatSpeechText);
-        // Establish the runtime-owned LiveTalking session before speech.
+        assert(chatDialogueProvider === 'qwen' || chatDialogueProvider === 'ttm-chatgpt' || chatDialogueProvider === 'safe-fallback', 'Chat SpeechCommand records a production dialogue provider without mock', chatDialogueProvider);
+        const chatSpeechWordCount = chatSpeechText.split(/\s+/).filter(Boolean).length;
+        assert(chatSpeechWordCount >= 28 && chatSpeechWordCount <= 40, 'Batched chat reply targets an 8–12 second spoken word budget', `${chatSpeechWordCount} words / ${chatSpeechDurationMs}ms fixture audio`);
+        assert(customPersonaSettings.settings?.name === 'Bé Lộc Y Tá' && !/\bMimi\b/i.test(chatSpeechText), 'Runtime chat speech uses the active AI Profile instead of the legacy Mimi batch phrase', chatSpeechText);
+        // Establish one runtime-owned Live Monitor before speech. A second
+        // Dashboard must remain standby and must never replace the worker session.
+        const mediaPrimary = await openRuntimeSocket(9876);
+        const mediaStandby = await openRuntimeSocket(9876);
+        mediaPrimary.socket.send(JSON.stringify({
+            type: 'LIVETALKING_MEDIA_REGISTER', clientId: 'monitor_primary', priority: 100,
+        }));
+        const mediaOwnerGranted = await waitForSocketMessage(mediaPrimary.messages, 'LIVETALKING_MEDIA_OWNER_GRANTED');
+        mediaStandby.socket.send(JSON.stringify({
+            type: 'LIVETALKING_MEDIA_REGISTER', clientId: 'monitor_standby', priority: 10,
+        }));
+        const mediaStandbyAssigned = await waitForSocketMessage(mediaStandby.messages, 'LIVETALKING_MEDIA_STANDBY');
+        assert(mediaOwnerGranted?.clientId === 'monitor_primary'
+            && mediaStandbyAssigned?.ownerClientId === 'monitor_primary', 'Exactly one Dashboard owns the Live Monitor while other tabs stay in standby');
+        mediaPrimary.socket.addEventListener('message', (event) => {
+            try {
+                const payload = JSON.parse(String(event.data));
+                if (payload?.type === 'SPEECH_PLAYBACK_PENDING' && payload.commandId) {
+                    void fetch(`http://localhost:9876/api/speech/${encodeURIComponent(payload.commandId)}/playback-ready`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+                    });
+                }
+            }
+            catch { }
+        });
         const offerRes = await fetch('http://localhost:9876/api/talking-head/offer', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId: 'avatar_test' }),
+            body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId: 'avatar_test', clientId: 'monitor_primary' }),
         });
         const offerJson = await offerRes.json();
         assert(offerJson.success === true && offerJson.sessionid === 'session_test', 'Runtime proxies WebRTC signaling to LiveTalking');
+        const offerCountAfterPrimary = workerOfferCount;
+        const standbyOfferRes = await fetch('http://localhost:9876/api/talking-head/offer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId: 'avatar_test', clientId: 'monitor_standby' }),
+        });
+        assert(standbyOfferRes.status === 409 && workerOfferCount === offerCountAfterPrimary, 'A standby Dashboard cannot replace the active WebRTC session');
+        mediaPrimary.socket.send(JSON.stringify({
+            type: 'LIVETALKING_MEDIA_STATE',
+            clientId: 'monitor_primary',
+            sessionId: 'session_test',
+            connectionState: 'CONNECTED',
+            audioTrack: true,
+            videoTrack: true,
+            audioPlayable: true,
+            audioPackets: 10,
+            videoFrames: 10,
+            reason: 'integration-ready',
+        }));
+        await new Promise(resolve => setTimeout(resolve, 30));
+        const readyMediaStatus = await fetch('http://localhost:9876/api/talking-head/media/status').then((response) => response.json());
+        assert(readyMediaStatus.media?.ready === true
+            && readyMediaStatus.media?.audioTrack === true
+            && readyMediaStatus.media?.videoTrack === true, 'Runtime accepts speech only after live audio and video tracks are confirmed');
+        const activateHappyRes = await fetch('http://localhost:9876/api/avatars/session/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ avatarId: 'avatar_happy' }),
+        });
+        const activateHappy = await activateHappyRes.json();
+        assert(activateHappyRes.status === 200
+            && activateHappy.session?.activeAvatarId === 'avatar_happy'
+            && workerAvatarSwitches.at(-1)?.avatar_id === 'avatar_happy', 'Manual Avatar switching reuses the current WebRTC session');
+        await fetch('http://localhost:9876/api/avatars/session/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ avatarId: 'avatar_test' }),
+        });
+        let integrationAudioPackets = 10;
+        let integrationVideoFrames = 10;
+        const mediaHeartbeat = setInterval(() => {
+            integrationAudioPackets += 5;
+            integrationVideoFrames += 5;
+            mediaPrimary.socket.send(JSON.stringify({
+                type: 'LIVETALKING_MEDIA_STATE',
+                clientId: 'monitor_primary',
+                sessionId: 'session_test',
+                connectionState: 'CONNECTED',
+                audioTrack: true,
+                videoTrack: true,
+                audioPlayable: true,
+                audioPackets: integrationAudioPackets,
+                videoFrames: integrationVideoFrames,
+                reason: 'integration-heartbeat',
+            }));
+        }, 500);
         const failedOfferRes = await fetch('http://localhost:9876/api/talking-head/offer', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId: 'missing_avatar' }),
+            body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId: 'missing_avatar', clientId: 'monitor_primary' }),
         });
         const sessionAfterFailedOffer = await fetch('http://localhost:9876/api/avatars/session').then((response) => response.json());
         assert(failedOfferRes.status === 503 && sessionAfterFailedOffer.session?.activeAvatarId === 'avatar_test', 'A failed avatar connection cannot replace the persisted active session');
         process.env.QWEN_TTS_ENDPOINT = 'http://127.0.0.1:9';
+        process.env.QWEN_TTS_AUTOSTART = 'false';
         const omniFallbackRes = await fetch('http://localhost:9876/api/talking-head/speak', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -764,8 +1158,9 @@ async function runAudit() {
         }
         assert(omniFallbackProvider === 'system-tts-fallback'
             && omniFallbackStates.has('SPEAKING')
-            && omniFallbackStates.has('IDLE'), 'Offline OmniVoice falls back to operating-system audio without breaking LiveTalking speech');
+            && omniFallbackStates.has('IDLE'), 'Offline OmniVoice falls back to operating-system audio without breaking LiveTalking speech', `${omniFallbackProvider} / ${[...omniFallbackStates].join(',')}`);
         process.env.QWEN_TTS_ENDPOINT = 'http://127.0.0.1:9881';
+        delete process.env.QWEN_TTS_AUTOSTART;
         await fetch('http://localhost:9876/api/settings/voice', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -803,6 +1198,112 @@ async function runAudit() {
             console.log(`  Runtime speech snapshots: ${observedSpeechRuntime.join(' -> ')}`);
         }
         assert(speechStates.has('GENERATING') && speechStates.has('SPEAKING') && speechStates.has('IDLE'), 'Speech follows GENERATING → SPEAKING → IDLE from worker state');
+        // A worker status request can fail after media playback has started. The runtime
+        // must preserve the active WebRTC session and still leave TALKING after audio ends.
+        workerStatusFailuresAfterSpeaking = 80;
+        const recoverySpeechRes = await fetch('http://localhost:9876/api/talking-head/speak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: 'Kiểm tra phục hồi trạng thái nói.', durationMs: 1200, emotion: 'neutral' }),
+        });
+        const recoverySpeech = await recoverySpeechRes.json();
+        const recoveryDeadline = Date.now() + 6000;
+        let recoveryReachedSpeaking = false;
+        let recoveryFinalState = '';
+        while (Date.now() < recoveryDeadline) {
+            const status = await fetch('http://localhost:9876/api/speech/status').then((response) => response.json());
+            if (status.speech?.commandId === recoverySpeech.commandId) {
+                recoveryReachedSpeaking ||= status.speech.state === 'SPEAKING';
+                recoveryFinalState = status.speech.state;
+                if (recoveryReachedSpeaking && recoveryFinalState === 'IDLE')
+                    break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        const recoveredRuntimeStatus = await fetch('http://localhost:9876/api/status').then((response) => response.json());
+        assert(recoveryReachedSpeaking
+            && recoveryFinalState === 'IDLE'
+            && recoveredRuntimeStatus.state?.currentVisual === 'GAMEPLAY_IDLE'
+            && recoveredRuntimeStatus.state?.isSpeaking === false, 'Speech status fetch failure after playback recovers to IDLE without leaving TALKING stuck', `${recoveryReachedSpeaking}:${recoveryFinalState}:${recoveredRuntimeStatus.state?.currentVisual}`);
+        workerStatusFailuresAfterSpeaking = 0;
+        clearInterval(mediaHeartbeat);
+        mediaPrimary.socket.send(JSON.stringify({
+            type: 'LIVETALKING_MEDIA_STATE',
+            clientId: 'monitor_primary',
+            sessionId: 'session_test',
+            connectionState: 'CONNECTED',
+            audioTrack: true,
+            videoTrack: true,
+            audioPlayable: false,
+            audioPackets: 20,
+            videoFrames: 20,
+            reason: 'autoplay-blocked-test',
+        }));
+        await new Promise(resolve => setTimeout(resolve, 30));
+        let blockedMediaRejected = false;
+        try {
+            await runtimeInternals._waitForReadyLiveTalkingMedia(100);
+        }
+        catch (error) {
+            blockedMediaRejected = String(error).includes('audio is blocked');
+        }
+        assert(blockedMediaRejected, 'Speech fails clearly when browser autoplay blocks the WebRTC audio track');
+        mediaPrimary.socket.send(JSON.stringify({
+            type: 'LIVETALKING_MEDIA_STATE',
+            clientId: 'monitor_primary',
+            sessionId: 'session_test',
+            connectionState: 'CONNECTED',
+            audioTrack: true,
+            videoTrack: true,
+            audioPlayable: true,
+            audioPackets: 30,
+            videoFrames: 30,
+            reason: 'integration-restored',
+        }));
+        await new Promise(resolve => setTimeout(resolve, 30));
+        runtimeInternals._invalidateLiveTalkingMediaSession('INTEGRATION_WORKER_RESTART');
+        const resetRequired = await waitForSocketMessage(mediaPrimary.messages, 'LIVETALKING_MEDIA_RESET_REQUIRED');
+        assert(resetRequired?.reason === 'INTEGRATION_WORKER_RESTART', 'Worker restart invalidates stale browser media instead of reporting a false healthy session');
+        const replacementOfferRes = await fetch('http://localhost:9876/api/talking-head/offer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId: 'avatar_test', clientId: 'monitor_primary' }),
+        });
+        assert(replacementOfferRes.status === 200, 'The owning Dashboard can establish a fresh session after worker recovery');
+        mediaPrimary.socket.send(JSON.stringify({
+            type: 'LIVETALKING_MEDIA_STATE',
+            clientId: 'monitor_primary',
+            sessionId: 'session_test',
+            connectionState: 'CONNECTED',
+            audioTrack: true,
+            videoTrack: true,
+            audioPlayable: true,
+            audioPackets: 1,
+            videoFrames: 1,
+            reason: 'replacement-ready',
+        }));
+        await new Promise(resolve => setTimeout(resolve, 30));
+        const resetMessageCount = mediaPrimary.messages.filter(message => message?.type === 'LIVETALKING_MEDIA_RESET_REQUIRED').length;
+        runtimeInternals._liveTalkingMediaOwner.lastVideoProgressAt = Date.now() - 20_000;
+        runtimeInternals._lastLiveTalkingMediaWatchdogAt = 0;
+        runtimeInternals._reconcileLiveTalkingMediaOwnership(Date.now());
+        const videoStallDeadline = Date.now() + 1_000;
+        while (Date.now() < videoStallDeadline
+            && mediaPrimary.messages.filter(message => message?.type === 'LIVETALKING_MEDIA_RESET_REQUIRED').length <= resetMessageCount) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        const videoStallReset = mediaPrimary.messages
+            .filter(message => message?.type === 'LIVETALKING_MEDIA_RESET_REQUIRED')
+            .slice(resetMessageCount)
+            .find(message => message.reason === 'VIDEO_FRAME_STALLED');
+        assert(Boolean(videoStallReset), 'A connected WebRTC track with no newly decoded frames is reset instead of staying frozen');
+        runtimeInternals._liveTalkingMediaOwner.lastHeartbeatAt = Date.now() - 20_000;
+        runtimeInternals._lastLiveTalkingMediaWatchdogAt = 0;
+        runtimeInternals._reconcileLiveTalkingMediaOwnership(Date.now());
+        const promotedMediaOwner = await waitForSocketMessage(mediaStandby.messages, 'LIVETALKING_MEDIA_OWNER_GRANTED');
+        assert(promotedMediaOwner?.clientId === 'monitor_standby', 'A standby Dashboard replaces an unresponsive owner after its heartbeat expires');
+        mediaPrimary.socket.close();
+        mediaStandby.socket.close();
         // Test LiveTalking Status API
         const liveTalkingStatusRes = await fetch('http://localhost:9876/api/talking-head/livetalking/status');
         const liveTalkingStatusJson = await liveTalkingStatusRes.json();
@@ -827,11 +1328,13 @@ async function runAudit() {
         const ttmConfig = await ttmConfigRes.json();
         const ttmStatus = await fetch('http://localhost:9876/api/ai/director/status').then((response) => response.json());
         assert(ttmConfigRes.status === 200
-            && ttmConfig.settings?.llmProvider === 'ttm-chatgpt'
+            && ttmConfig.settings?.llmProvider === 'ollama'
+            && ttmConfig.settings?.llmModel === 'qwen3:8b'
             && ttmConfig.settings?.llmApiKey === undefined
             && ttmStatus.apiKeyConfigured === true
-            && ttmStatus.baseUrl === 'https://ttmapi.site/v1'
-            && JSON.stringify(ttmStatus).includes('ttm_test_secret') === false, 'ChatGPT TTM provider is configurable through ttmapi.site without exposing its API key');
+            && ttmStatus.fallbackProvider === 'ttm-chatgpt'
+            && ttmStatus.fallbackBaseUrl === 'https://ttmapi.site/v1'
+            && JSON.stringify(ttmStatus).includes('ttm_test_secret') === false, 'ChatGPT TTM fallback is configurable without replacing Qwen or exposing its API key');
         await fetch('http://localhost:9876/api/ai/director/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -844,36 +1347,180 @@ async function runAudit() {
         const dashboardHtml = fs.readFileSync('./operator-dashboard/index.html', 'utf8');
         const dashboardScript = fs.readFileSync('./operator-dashboard/dashboard.js', 'utf8');
         const dashboardStyles = fs.readFileSync('./operator-dashboard/design-system.css', 'utf8');
+        const dashboardLegacyStyles = fs.readFileSync('./operator-dashboard/style.css', 'utf8');
         const webRtcReceiverScript = fs.readFileSync('./operator-dashboard/webrtc/receiver.js', 'utf8');
+        const obsOutputHtml = fs.readFileSync('./operator-dashboard/overlay/obs-output.html', 'utf8');
         const nativeShellSource = fs.readFileSync('./src-tauri/src/lib.rs', 'utf8');
+        const desktopPrepareSource = fs.readFileSync('./scripts/prepare-desktop-runtime.mjs', 'utf8');
+        const nativeCapabilitySource = fs.readFileSync('./src-tauri/capabilities/default.json', 'utf8');
         const qwenServerSource = fs.readFileSync('./services/qwen-tts/server.py', 'utf8');
+        const runtimeServerSource = fs.readFileSync('./services/runtime-server/src/index.ts', 'utf8');
+        const obsControllerSource = fs.readFileSync('./services/obs-controller/src/index.ts', 'utf8');
+        const liveTalkingLauncherSource = fs.readFileSync('./services/talking-head/livetalking/run_worker.sh', 'utf8');
+        const platformChatSource = fs.readFileSync('./services/runtime-server/src/platform-chat.ts', 'utf8');
+        const avatarTaskManagerSource = fs.readFileSync('./services/talking-head/livetalking/server/task_manager.py', 'utf8');
+        const faceDetectorSetupSource = fs.readFileSync('./services/talking-head/livetalking/scripts/prefetch_s3fd.py', 'utf8');
+        assert(runtimeServerSource.includes("llmProvider: 'ollama'")
+            && runtimeServerSource.includes("model: 'qwen3:8b'")
+            && runtimeServerSource.includes('new SafeDialogueProvider()')
+            && !runtimeServerSource.includes('new MockDialogueProvider()')
+            && dashboardHtml.indexOf('value="ollama"') < dashboardHtml.indexOf('value="ttm-chatgpt"')
+            && dashboardHtml.includes('Qwen 8B - Primary'), 'Production defaults AI Director to Qwen 8B with ChatGPT and safe fallbacks');
+        assert(runtimeServerSource.includes("!/^mimi$/i.test(this._settings.persona.name)")
+            && runtimeServerSource.includes(".replace(/\\bMimi\\b/gi, this._settings.persona.name)"), 'Runtime startup migrates a legacy Mimi system prompt to the active AI Profile name');
+        assert(nativeShellSource.includes('"Preparing face detector"')
+            && nativeShellSource.includes('s3fd-619a316812.pth')
+            && faceDetectorSetupSource.includes('S3FD_SHA256')
+            && avatarTaskManagerSource.includes('task.stage_message = "Preparing face detector"')
+            && dashboardScript.includes("activeItem?.stageMessage || AvatarCreateFlow.stageMessage")
+            && runtimeServerSource.includes("this._liveTalkingMaintenanceBlocker = 'TRAINING'")
+            && runtimeServerSource.includes('Cannot stop the Live Avatar worker while avatar training is active'), 'Magic Setup preloads S3FD, training exposes its preparation stage, and worker recycling waits for active training');
+        assert(runtimeServerSource.includes('_liveTalkingWorkerStartPromise')
+            && runtimeServerSource.includes('AI IDOL is already running at')
+            && liveTalkingLauncherSource.includes('acquire_worker_lock')
+            && dashboardHtml.includes('id="cfg-livetalking-always-on"')
+            && dashboardHtml.includes('id="start-livetalking-engine"')
+            && dashboardHtml.includes('id="stop-livetalking-engine"'), 'Runtime, launcher, and Settings enforce one worker with Manual Start/Stop and Always On status controls');
         assert(dashboardHtml.includes('id="preview-selected-voice"')
             && dashboardHtml.includes('id="save-selected-voice"')
             && dashboardScript.includes('VoiceProfileState.previewedKey !== voiceProfileKey(profile)'), 'AI Profile requires voice preview before Save & use');
         assert(dashboardHtml.indexOf('id="avatar-library-grid"') < dashboardHtml.indexOf('<h2>Idol Profile</h2>'), 'AI Profile keeps Avatar Library above Idol Profile');
-        assert(dashboardHtml.indexOf('data-app-view="avatar"') < dashboardHtml.indexOf('data-app-view="studio"')
+        assert(dashboardHtml.indexOf('data-app-view="live-settings"') < dashboardHtml.indexOf('data-app-view="studio"')
+            && dashboardHtml.includes('id="view-live-settings"')
             && dashboardHtml.includes('id="reply-skill-file-input"')
             && dashboardHtml.includes('id="reply-skill-list"')
+            && dashboardScript.includes("{ id: 'avatar', label: 'Avatar'")
+            && dashboardScript.includes("{ id: 'profile', label: 'Idol Profile'")
+            && dashboardScript.includes("{ id: 'voice', label: 'Voice Setting'")
+            && dashboardScript.includes("{ id: 'skill', label: 'Live Reply Skill'")
             && dashboardScript.includes("window.RuntimeApi.post('/api/settings/reply-skills/select'")
-            && dashboardScript.includes("window.RuntimeApi.delete(`/api/settings/reply-skills/${encodeURIComponent(skill.id)}`)"), 'Sidebar starts with AI Profile and exposes the persistent Markdown reply-skill workflow');
+            && dashboardScript.includes("window.RuntimeApi.delete(`/api/settings/reply-skills/${encodeURIComponent(skill.id)}`)"), 'Sidebar exposes one Live Setting workspace with Avatar, Idol Profile, Voice, and persistent Markdown reply-skill tabs');
         assert(dashboardStyles.includes('.avatar-library-grid { display: flex; flex: 0 0 304px;') && dashboardStyles.includes('overflow-x: auto'), 'Avatar Library is horizontally scrollable without collapsing inside AI Profile');
         assert(dashboardStyles.includes('--ui-command-h: var(--ui-control-h);')
-            && dashboardStyles.includes('.chat-input-form > :where(input, button)')
-            && dashboardStyles.includes('border-radius: var(--ui-radius) !important;'), 'Live chat input and Send button share one height and corner-radius token');
+            && dashboardStyles.includes('.chat-input-form > :where(input, button, .chat-user-field)')
+            && dashboardStyles.includes('border-radius: var(--ui-radius) !important;'), 'Live chat user, message, and Send controls share one height and corner-radius token');
         assert(dashboardHtml.includes('data-settings-target="output"')
+            && dashboardHtml.includes('data-settings-target="chat"')
             && dashboardHtml.includes('data-settings-target="storage"')
-            && dashboardHtml.includes('data-settings-target="director"')
+            && dashboardHtml.includes('data-settings-target="engines"')
             && dashboardScript.includes("const openSettingsCenter = (pane = 'output')")
             && dashboardStyles.includes('grid-template-columns: repeat(4, minmax(0, 1fr));'), 'Settings uses left-side tabs with one content pane and Live Library uses quarter-width desktop previews');
+        assert(dashboardHtml.includes('Continue with Google')
+            && dashboardHtml.includes('Continue with Facebook')
+            && dashboardHtml.includes('Unify Chat')
+            && dashboardScript.includes("if (platform === 'youtube') return '[YT]';")
+            && dashboardScript.includes("if (platform === 'facebook') return '[FB]';")
+            && dashboardScript.includes("payload.type === 'CHAT_MESSAGE'")
+            && platformChatSource.includes('code_challenge_method: \'S256\'')
+            && platformChatSource.includes("pages_read_engagement")
+            && platformChatSource.includes("normalized.timestamp >= this._youtubeJoinedAt")
+            && runtimeServerSource.includes("this._chatManager.ingest(message)")
+            && runtimeServerSource.includes("message.platform === 'facebook' ? '[FB]'")
+            && runtimeServerSource.includes("this._platformChat.publicState()")
+            && (platformChatSource.match(/client_secret:/g)?.length || 0) >= 2
+            && nativeShellSource.includes('"GOOGLE_OAUTH_CLIENT_SECRET"')
+            && nativeShellSource.includes('BUILT_IN_GOOGLE_OAUTH_CLIENT_ID')
+            && nativeShellSource.includes('592506943214-3i76k7r31250u3gphtott19g15pe54tg.apps.googleusercontent.com'), 'Simple OAuth feeds YouTube and Facebook into one labeled, filtered AI-to-TTS chat pipeline');
+        assert(dashboardHtml.indexOf('id="monitor-screen"') < dashboardHtml.indexOf('id="queued-transition-banner"')
+            && dashboardHtml.indexOf('id="queued-transition-banner"') < dashboardHtml.indexOf('id="timeline-track"')
+            && dashboardScript.includes("function setQueuedTransitionStatus(targetState = '')")
+            && dashboardScript.includes("clearQueuedTransition();\n  setVisualState('TALKING'")
+            && dashboardStyles.includes('grid-template-rows: 38px minmax(0, 1fr) 32px 26px;'), 'Playback wait status keeps a reserved row below Monitor without shifting the video');
+        assert(dashboardHtml.includes('id="cfg-playback-overlap-frames"')
+            && dashboardHtml.includes('<option value="2" selected>Overlap 2 frames</option>')
+            && dashboardScript.includes('const overlapSeconds = overlapFrames / 25;')
+            && dashboardScript.includes('requestVideoFrameCallback(watchFrame)')
+            && dashboardScript.includes('updateMonitorScreen(App.currentState, App.currentClip, true)'), 'Monitor Library overlaps two decoded frames by default across seamless OBS loop boundaries');
+        assert(dashboardLegacyStyles.includes('.monitor-w2l-canvas')
+            && dashboardLegacyStyles.includes('transition: none;')
+            && dashboardScript.includes('setMonitorVideoLayer(standbyEl, true);')
+            && dashboardScript.includes('setMonitorCanvasVisible(false);'), 'Talking canvas swaps atomically to decoded Library media without a double-face opacity fade');
+        const avatarStateControls = dashboardHtml.match(/<div class="state-chips" id="state-chips">([\s\S]*?)<\/div>/)?.[1] || '';
+        assert(!avatarStateControls.includes('data-state="BIG_WIN"')
+            && !avatarStateControls.includes('data-state="JACKPOT"')
+            && dashboardStyles.includes('grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));')
+            && dashboardStyles.includes('grid-template-rows: minmax(0, 47.76fr) 36px 128px minmax(0, 40.94fr);')
+            && dashboardStyles.includes('fcp-avatar-state-strip .state-chips')
+            && dashboardStyles.includes('overflow: hidden;'), 'Avatar States shows every implemented control in a wrapped grid without horizontal scrolling');
+        assert(dashboardHtml.includes('<header class="topbar" data-tauri-drag-region>')
+            && dashboardScript.includes('function setupNativeHeaderDrag()')
+            && dashboardScript.includes('getCurrentWindow().startDragging()')
+            && nativeCapabilitySource.includes('core:window:allow-start-dragging')
+            && nativeCapabilitySource.includes('http://127.0.0.1:18765/*')
+            && dashboardStyles.includes('--svg-toolbar: 72px;')
+            && dashboardStyles.includes('padding: 24px 12px 8px;'), 'Native header provides a safe drag region with reserved bottom padding');
+        assert(dashboardScript.includes('class="btn-delete-clip"')
+            && dashboardScript.includes('aria-label="Delete clip"')
+            && dashboardStyles.includes('display: inline-flex !important;')
+            && !dashboardScript.includes("title: 'Delete video?'")
+            && dashboardScript.includes('if (clip.storageId) await IdolDB.deleteClip(clip.storageId);'), 'Every Library video deletes immediately while awaiting storage deletion');
         assert(dashboardHtml.includes('id="btn-go-live-hero"')
-            && dashboardHtml.includes('OBS output')
-            && !dashboardHtml.includes('Continue with Google')
-            && !dashboardHtml.includes('Continue with Facebook')
-            && dashboardScript.includes("openSettingsCenter('output');"), 'Live output is OBS-only with no direct platform authentication controls');
+            && dashboardHtml.includes('id="btn-magic-connect"')
+            && dashboardHtml.includes('Magic Connect')
+            && dashboardHtml.includes('Monitor and voice to OBS.')
+            && dashboardScript.includes("window.RuntimeApi.post('/api/obs/magic-connect'")
+            && runtimeServerSource.includes("pathname === '/api/obs/magic-connect'")
+            && runtimeServerSource.includes('obs-output.html?session=${encodeURIComponent(sessionId)}&instance=${Date.now()}')
+            && runtimeServerSource.includes('this._handleObsOutputSignal(parsed.data, _ws)')
+            && runtimeServerSource.includes('this._bestObsPublisher()')
+            && webRtcReceiverScript.includes('onOutputStreamChanged(this.outputStream)')
+            && dashboardScript.includes('ensureMonitorStream()')
+            && dashboardScript.includes('ensureSilentAudioTrack()')
+            && dashboardScript.includes("type: 'OBS_OUTPUT_REGISTER'")
+            && dashboardScript.includes('this.audioSender.replaceTrack(audioTrack)')
+            && dashboardScript.includes('Math.max(target.width / sourceWidth, target.height / sourceHeight)')
+            && !dashboardScript.includes("if (!stream.getVideoTracks().length || !stream.getAudioTracks().length) return;")
+            && obsOutputHtml.includes("type: 'OBS_OUTPUT_ANSWER'")
+            && obsOutputHtml.includes("role: 'receiver'")
+            && obsOutputHtml.includes('payload.negotiationId !== negotiationId')
+            && obsOutputHtml.includes('id="output-audio"')
+            && obsOutputHtml.includes("event.track.kind === 'video'")
+            && obsControllerSource.includes("boundsType: 'OBS_BOUNDS_STRETCH'"), 'Magic Connect provisions an OBS-only Browser Source and forwards the existing Monitor video + voice stream');
+        assert(dashboardHtml.includes('id="live-video-quality"')
+            && dashboardHtml.includes('data-video-quality="fhd"')
+            && !dashboardHtml.includes('data-video-quality="hd"')
+            && dashboardHtml.includes('id="monitor-w2l-canvas" width="1920" height="1080"')
+            && dashboardScript.includes("parameters.degradationPreference = 'maintain-framerate'")
+            && dashboardScript.includes('maxBitrate: 8_000_000')
+            && !runtimeServerSource.includes("hd: { width: 1280, height: 720, fps: 30 }")
+            && runtimeServerSource.includes("fhd: { width: 1920, height: 1080, fps: 30 }")
+            && dashboardStyles.includes('.live-video-quality-option.active'), 'Live output stays on one Full HD 1080p30 preset across Monitor, WebRTC, and OBS');
+        assert(dashboardHtml.includes('data-settings-target="engines"')
+            && dashboardHtml.includes('data-settings-pane="engines"')
+            && !dashboardHtml.includes('data-app-view="engines"')
+            && dashboardHtml.includes('id="engine-card-grid"')
+            && dashboardScript.includes("window.RuntimeApi.get('/api/engines')")
+            && runtimeServerSource.includes("pathname === '/api/engines'")
+            && dashboardStyles.includes('.engine-card-grid'), 'Settings includes the runtime AI Engines hub and a responsive two-column card layout');
+        assert(dashboardScript.includes('await unlockAudio(true);')
+            && runtimeServerSource.includes('await this._waitForReadyLiveTalkingMedia();')
+            && runtimeServerSource.includes("LIVETALKING_FPS: '25'")
+            && liveTalkingLauncherSource.includes('LIVETALKING_FPS:-25')
+            && dashboardHtml.includes('FHD · 30'), 'OBS preflight unlocks audio, waits for ready media, and publishes FHD30 from a 25 FPS model clock');
+        assert(fs.readFileSync('./services/talking-head/livetalking/requirements.txt', 'utf8').includes('av==15.1.0')
+            && fs.readFileSync('./services/talking-head/livetalking/avatars/musetalk/models/vae.py', 'utf8').includes('use_safetensors=False'), 'LiveTalking pins compatible PyAV and loads the available VAE binary without safetensor probing');
+        assert(obsControllerSource.includes('private _reconnectDelayMs = 2_000;')
+            && obsControllerSource.includes('Math.min(30_000, this._reconnectDelayMs * 2)')
+            && obsControllerSource.includes('now - this._lastConnectionErrorLogAt >= 30_000')
+            && obsControllerSource.includes('reconnectDisabled && this._reconnectTimer'), 'OBS reconnect uses bounded exponential backoff and cannot flood logs while OBS is closed');
+        assert(JSON.parse(fs.readFileSync('./package.json', 'utf8')).scripts.test.includes('@idol/obs-controller build'), 'The release test gate rebuilds OBS Controller before the runtime uses its compiled package');
         assert(qwenServerSource.includes('"model_loaded": engine.model is not None')
             && !qwenServerSource.includes('engine.load()\n    uvicorn.run')
             && nativeShellSource.includes('response.contains("\\\"model_loaded\\\"")')
             && nativeShellSource.includes('terminate_qwen_port_owner()?;'), 'Native startup replaces legacy Qwen port owners and keeps the TTS model lazy-loaded');
+        assert(runtimeServerSource.includes('await this._ensureQwenTtsReady();')
+            && runtimeServerSource.includes("QWEN_TTS_AUTOSTART")
+            && runtimeServerSource.includes("services', 'qwen-tts', launcherName"), 'Runtime starts Qwen TTS on demand and reuses a healthy existing service');
+        assert(webRtcReceiverScript.includes("type: 'LIVETALKING_MEDIA_STATE'")
+            && webRtcReceiverScript.includes('await pc.getStats()')
+            && webRtcReceiverScript.includes("throw new Error('LiveTalking connected without both audio and video tracks')")
+            && webRtcReceiverScript.indexOf('this.audioEl.remove();') < webRtcReceiverScript.indexOf('await global.LiveTalkingApi.closeSession(sessionId);')
+            && dashboardScript.includes("payload.type === 'LIVETALKING_MEDIA_OWNER_GRANTED'")
+            && dashboardScript.includes("payload.type === 'LIVETALKING_MEDIA_STANDBY'")
+            && dashboardScript.includes('await waitForLiveMediaOwnership();'), 'Dashboard verifies media packets, cleans stale tracks, and enforces one Live Monitor owner');
+        assert(desktopPrepareSource.includes("createHash('sha256')")
+            && desktopPrepareSource.includes("runtime-build-id.txt")
+            && nativeShellSource.includes('runtime-build-id.txt'), 'Native updates fingerprint the complete backend instead of reusing a stale runtime process');
         assert(webRtcReceiverScript.includes('needsServerProbe()')
             && dashboardScript.includes('LiveTalkingWebRTCClient.needsServerProbe?.()')
             && dashboardScript.includes('sessionStatus.sessionId === LiveTalkingWebRTCClient.sessionId'), 'A transient WebRTC disconnect is verified against the worker session before reconnecting');
@@ -909,7 +1556,11 @@ async function runAudit() {
         assert(avatarThumbnailRes.headers.get('content-type') === 'image/png' && avatarThumbnailBytes.equals(thumbnailBytes), 'Runtime securely proxies avatar thumbnail image bytes');
         const avatarDeleteRes = await fetch('http://localhost:9876/api/avatars/library/avatar_test', { method: 'DELETE' });
         const sessionAfterAvatarDelete = await fetch('http://localhost:9876/api/avatars/session').then((response) => response.json());
-        assert(avatarDeleteRes.status === 200 && sessionAfterAvatarDelete.session?.activeAvatarId === null, 'Deleting the active avatar clears its persisted live session');
+        assert(avatarDeleteRes.status === 200
+            && sessionAfterAvatarDelete.session?.activeAvatarId === 'avatar_happy'
+            && sessionAfterAvatarDelete.session?.selectedAvatarIds?.join(',') === 'avatar_happy'
+            && workerAvatarSwitches.some((entry) => entry.avatar_id === 'avatar_happy'), 'Deleting the current Avatar switches the same WebRTC session to an active Pool replacement first');
+        await fetch('http://localhost:9876/api/talking-head/session/session_test', { method: 'DELETE' });
         // Avatar deletion must also cover legacy project-only artifacts and be
         // safe to repeat after the worker has already lost its copy.
         const deleteTestRoot = `/tmp/ai-idol-avatar-delete-${process.pid}`;
@@ -1013,10 +1664,13 @@ async function runAudit() {
         const qwenVoiceSetRes = await fetch('http://localhost:9876/api/settings/voice', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ provider: 'qwentts', voiceId: 'qwen-default', speed: 1.05 }),
+            body: JSON.stringify({ provider: 'qwentts', voiceId: 'qwen-default', speed: 1.0, pitch: 1.0 }),
         });
         const qwenVoiceSetJson = await qwenVoiceSetRes.json();
-        assert(qwenVoiceSetJson.success === true && qwenVoiceSetJson.settings.provider === 'qwentts', 'REST /api/settings/voice configures Qwen TTS as the active provider');
+        assert(qwenVoiceSetJson.success === true
+            && qwenVoiceSetJson.settings.provider === 'qwentts'
+            && qwenVoiceSetJson.settings.speed === 1.0
+            && qwenVoiceSetJson.settings.pitch === 1.0, 'REST /api/settings/voice configures Qwen TTS with neutral speed and pitch');
         const voiceSetRes = await fetch('http://localhost:9876/api/settings/voice', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

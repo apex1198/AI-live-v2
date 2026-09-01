@@ -113,8 +113,12 @@ export class RuntimeDatabase {
     try {
       this.db.prepare('DELETE FROM avatars WHERE id = ?').run(id);
       const session = this.getAvatarSession();
-      if (session?.activeAvatarId === id) {
-        this.setAvatarSession(null);
+      if (session) {
+        const selectedAvatarIds = session.selectedAvatarIds.filter((avatarId) => avatarId !== id);
+        const activeAvatarId = session.activeAvatarId === id
+          ? selectedAvatarIds[0] || null
+          : session.activeAvatarId;
+        this.setAvatarSession(activeAvatarId, selectedAvatarIds, session.excludedAvatarIds);
       }
       this.db.exec('COMMIT');
     } catch (error) {
@@ -123,20 +127,42 @@ export class RuntimeDatabase {
     }
   }
 
-  getAvatarSession(): { activeAvatarId: string | null; excludedAvatarIds: string[] } | null {
+  getAvatarSession(): { activeAvatarId: string | null; selectedAvatarIds: string[]; excludedAvatarIds: string[] } | null {
     const row = this.db.prepare('SELECT selected_json, random FROM avatar_sessions WHERE id = 1').get() as { selected_json?: string; random?: number } | undefined;
     if (!row?.selected_json) return null;
     try {
       const selected = JSON.parse(row.selected_json);
-      const values = Array.isArray(selected) ? selected.map(String).filter(Boolean) : [];
-      return { activeAvatarId: values[0] || null, excludedAvatarIds: values.slice(1) };
+      if (Array.isArray(selected)) {
+        const values = selected.map(String).filter(Boolean);
+        // Legacy rows stored [activeAvatarId, ...excludedAvatarIds]. Only the
+        // first value is promoted into the new active pool during migration.
+        return {
+          activeAvatarId: values[0] || null,
+          selectedAvatarIds: values[0] ? [values[0]] : [],
+          excludedAvatarIds: values.slice(1),
+        };
+      }
+      const activeAvatarId = selected && typeof selected === 'object'
+        ? String(selected.activeAvatarId || '') || null
+        : null;
+      const selectedAvatarIds: string[] = selected && typeof selected === 'object' && Array.isArray(selected.selectedAvatarIds)
+        ? [...new Set<string>(selected.selectedAvatarIds.map((value: unknown) => String(value)).filter(Boolean))]
+        : (activeAvatarId ? [activeAvatarId] : []);
+      const excludedAvatarIds: string[] = selected && typeof selected === 'object' && Array.isArray(selected.excludedAvatarIds)
+        ? [...new Set<string>(selected.excludedAvatarIds.map((value: unknown) => String(value)).filter(Boolean))]
+        : [];
+      return { activeAvatarId, selectedAvatarIds, excludedAvatarIds };
     } catch { return null; }
   }
 
-  setAvatarSession(activeAvatarId: string | null, excludedAvatarIds: string[] = []): void {
-    const selected = activeAvatarId
-      ? [activeAvatarId, ...excludedAvatarIds.filter((id) => id && id !== activeAvatarId)]
-      : [];
+  setAvatarSession(activeAvatarId: string | null, selectedAvatarIds: string[] = [], excludedAvatarIds: string[] = []): void {
+    const pool = [...new Set(selectedAvatarIds.filter(Boolean))];
+    const selected = {
+      version: 2,
+      activeAvatarId,
+      selectedAvatarIds: pool,
+      excludedAvatarIds: [...new Set(excludedAvatarIds.filter((id) => id && !pool.includes(id)))],
+    };
     this.db.prepare(`
       INSERT INTO avatar_sessions(id, selected_json, random, updated_at) VALUES (1, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET selected_json = excluded.selected_json, random = excluded.random, updated_at = excluded.updated_at

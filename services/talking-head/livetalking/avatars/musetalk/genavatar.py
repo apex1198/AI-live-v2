@@ -21,6 +21,7 @@ from avatars.musetalk.model_resources import (
     throttle_training,
     vae_lock,
 )
+from avatars.musetalk.myutil import build_landmark_lower_face_mask
 
 try:
     from utils.face_parsing import FaceParsing
@@ -28,27 +29,55 @@ except ModuleNotFoundError:
     from avatars.musetalk.utils.face_parsing import FaceParsing
 
 
-def video2imgs(vid_path, save_path, ext='.png', cut_frame=10000000):
+TRAINING_FPS = 30.0
+
+
+def _write_training_frame(frame, save_path, index):
+    height, width = frame.shape[:2]
+    target_width, target_height = bounded_preprocess_size(width, height)
+    if (target_width, target_height) != (width, height):
+        frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    cv2.imwrite(f"{save_path}/{index:08d}.png", frame)
+
+
+def video2imgs(vid_path, save_path, ext='.png', cut_frame=10000000, target_fps=TRAINING_FPS):
+    """Decode once and resample source frames onto a stable training clock."""
     cap = cv2.VideoCapture(vid_path)
-    count = 0
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open avatar video: {vid_path}")
+
+    source_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    if source_fps <= 0:
+        source_fps = target_fps
+    ret, previous = cap.read()
+    if not ret or previous is None:
+        cap.release()
+        raise RuntimeError(f"Avatar video contains no readable frames: {vid_path}")
+
+    source_index = 0
+    target_index = 0
     while True:
-        if count > cut_frame:
+        ret, current = cap.read()
+        if not ret or current is None:
+            source_duration = (source_index + 1) / source_fps
+            while target_index < cut_frame and target_index / target_fps < source_duration:
+                _write_training_frame(previous, save_path, target_index)
+                target_index += 1
             break
-        ret, frame = cap.read()
-        if ret:
-            height, width = frame.shape[:2]
-            target_width, target_height = bounded_preprocess_size(width, height)
-            if (target_width, target_height) != (width, height):
-                frame = cv2.resize(
-                    frame,
-                    (target_width, target_height),
-                    interpolation=cv2.INTER_AREA,
-                )
-            cv2.putText(frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
-            cv2.imwrite(f"{save_path}/{count:08d}.png", frame)
-            count += 1
-        else:
+
+        current_time = (source_index + 1) / source_fps
+        midpoint = (source_index + 0.5) / source_fps
+        while target_index < cut_frame and target_index / target_fps < current_time:
+            selected = previous if target_index / target_fps < midpoint else current
+            _write_training_frame(selected, save_path, target_index)
+            target_index += 1
+        if target_index >= cut_frame:
             break
+        previous = current
+        source_index += 1
+
+    cap.release()
+    return target_index, source_fps
 
 
 def is_video_file(file_path):
@@ -89,25 +118,34 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
 
     if progress_callback: progress_callback(5)
 
-    source_fps = 25.0
+    for stale_path in glob.glob(os.path.join(save_full_path, '*.[jpJP][pnPN]*[gG]')):
+        os.remove(stale_path)
+    for stale_path in glob.glob(os.path.join(mask_out_path, '*.[jpJP][pnPN]*[gG]')):
+        os.remove(stale_path)
+
+    source_fps = TRAINING_FPS
+    original_source_fps = TRAINING_FPS
     if os.path.isfile(video_path) and is_video_file(video_path):
         capture = cv2.VideoCapture(video_path)
         detected_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0)
         capture.release()
         if detected_fps > 0:
-            source_fps = detected_fps
+            original_source_fps = detected_fps
 
     with open(os.path.join(avatar_save_path, 'avator_info.json'), "w") as f:
         json.dump({
             "avatar_id": avatar_id,
             "video_path": video_path,
             "bbox_shift": bbox_shift,
-            "source_fps": source_fps
+            "source_fps": source_fps,
+            "original_source_fps": original_source_fps,
+            "training_fps": TRAINING_FPS,
+            "loop_mode": "ping_pong",
         }, f)
 
     if os.path.isfile(video_path):
         if is_video_file(video_path):
-            video2imgs(video_path, save_full_path, ext='png')
+            video2imgs(video_path, save_full_path, ext='png', target_fps=TRAINING_FPS)
         else:
             # Keep image avatars in the same numeric frame convention used by
             # load_avatar; arbitrary source filenames otherwise break sorting.
@@ -128,7 +166,11 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
     avatar_info.update({
         "frame_count": len(input_img_list),
         "duration_ms": round(len(input_img_list) / max(1.0, source_fps) * 1000),
-        "max_preprocess_resolution": "720p",
+        "max_preprocess_resolution": (
+            "1080p"
+            if os.getenv("LIVETALKING_PREPROCESS_QUALITY", "hd").strip().lower() == "fhd"
+            else "720p"
+        ),
     })
     with open(info_path, "w", encoding="utf-8") as info_file:
         json.dump(avatar_info, info_file)
@@ -137,10 +179,11 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
         if progress_callback and total:
             progress_callback(20 + int(processed / total * 30))
 
-    coord_list, frame_list = get_landmark_and_bbox(
+    coord_list, frame_list, landmark_list = get_landmark_and_bbox(
         input_img_list,
         bbox_shift,
         progress_callback=report_face_progress,
+        return_landmarks=True,
     )
 
     if progress_callback: progress_callback(50)
@@ -196,6 +239,12 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
         x1, y1, x2, y2 = coord_list[i]
         mode = parsing_mode if version == "v15" else "raw"
         mask, crop_box = get_image_prepare_material(frame, [x1, y1, x2, y2], fp=fp_local, mode=mode)
+        mask = build_landmark_lower_face_mask(
+            mask,
+            [x1, y1, x2, y2],
+            crop_box,
+            landmark_list[i] if i < len(landmark_list) else None,
+        )
         cv2.imwrite(f"{mask_out_path}/{str(i).zfill(8)}.png", mask)
 
         mask_coords_list_cycle += [crop_box]

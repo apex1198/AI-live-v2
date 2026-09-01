@@ -160,6 +160,42 @@ export function normalizeVietnameseSpokenText(input: string): string {
     .trim();
 }
 
+const LIVE_REPLY_MAX_WORDS = 40;
+const LIVE_REPLY_MIN_WORDS = 28;
+const LIVE_REPLY_META_SENTENCE = /[^.!?]*(?:đã đọc hết\s+(?:các\s+)?(?:câu hỏi|bình luận)|sẽ lần lượt trả lời|không bỏ sót ai)[^.!?]*[.!?]?/giu;
+const LIVE_REPLY_FOLLOW_UPS = [
+  'Mọi người nghĩ sao thì kể mình nghe thêm nha, mình muốn nghe ý kiến của cả nhà lắm đó.',
+  'Cả nhà chia sẻ thêm với mình nha, nói chuyện cùng mọi người như vậy vui lắm luôn.',
+];
+
+function trimToWordBudget(input: string, maxWords = LIVE_REPLY_MAX_WORDS, minWords = 0): string {
+  const words = input.split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return input.trim();
+
+  const sentences = input.match(/[^.!?]+[.!?]?/g)?.map(sentence => sentence.trim()).filter(Boolean) || [];
+  const kept: string[] = [];
+  let usedWords = 0;
+  for (const sentence of sentences) {
+    const sentenceWords = sentence.split(/\s+/).filter(Boolean).length;
+    if (usedWords + sentenceWords > maxWords) break;
+    kept.push(sentence);
+    usedWords += sentenceWords;
+  }
+  if (kept.length && usedWords >= minWords) return kept.join(' ');
+  return `${words.slice(0, maxWords).join(' ').replace(/[,.!?;:]+$/, '')}.`;
+}
+
+/** Keeps live replies conversational and within the 8–12 second speaking budget. */
+export function constrainLiveReply(input: string): string {
+  const withoutMeta = input.replace(LIVE_REPLY_META_SENTENCE, ' ').replace(/\s+/g, ' ').trim();
+  let expanded = withoutMeta || LIVE_REPLY_FOLLOW_UPS[0]!;
+  for (const followUp of LIVE_REPLY_FOLLOW_UPS) {
+    if (expanded.split(/\s+/).filter(Boolean).length >= LIVE_REPLY_MIN_WORDS) break;
+    expanded = `${expanded.replace(/[.!?]+$/, '')}. ${followUp}`.trim();
+  }
+  return trimToWordBudget(expanded, LIVE_REPLY_MAX_WORDS, LIVE_REPLY_MIN_WORDS);
+}
+
 // ─────────────────────────────────────────────────────────
 // Mock / Offline Provider
 // ─────────────────────────────────────────────────────────
@@ -184,6 +220,25 @@ export class MockDialogueProvider implements DialogueProvider {
     const lines = CURATED_LINES[key] ?? CURATED_LINES['default']!;
     const randomIndex = Math.floor(Math.random() * lines.length);
     return personalizePersonaName(lines[randomIndex] ?? lines[0]!, persona);
+  }
+}
+
+/** Last-resort production dialogue that never reads raw chat metadata aloud. */
+export class SafeDialogueProvider implements DialogueProvider {
+  readonly name = 'safe-fallback';
+
+  async generate(intent: DirectorIntent, persona: CharacterPersona): Promise<string> {
+    if (intent.intent === 'reply_to_chat_batch') {
+      const lines = [
+        'Đúng rồi đó, nói chuyện với mọi người vui ghê luôn nha!',
+        'Câu này thú vị nè, cả nhà mình cùng trò chuyện tiếp nha!',
+        'Ừ ha, mình cũng đang nghĩ giống vậy đó, dễ thương ghê!',
+      ];
+      return personalizePersonaName(lines[Math.floor(Math.random() * lines.length)]!, persona);
+    }
+    const key = intent.intent ?? 'default';
+    const lines = CURATED_LINES[key] ?? CURATED_LINES['default']!;
+    return personalizePersonaName(lines[Math.floor(Math.random() * lines.length)] ?? lines[0]!, persona);
   }
 }
 
@@ -230,14 +285,14 @@ export class OpenAIDialogueProvider implements DialogueProvider {
           messages: [
             {
               role: 'system',
-              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. Tính cách: ${persona.personality}. ${intent.intent === 'reply_to_chat_batch' ? 'Hãy trả lời lần lượt nhiều bình luận trong cùng một đoạn nói tự nhiên, đủ nội dung cho khoảng 15 đến 20 giây.' : 'Bắt buộc trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1 đến 2 câu.'} Có biểu cảm phù hợp. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
+              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. Tính cách: ${persona.personality}. ${intent.intent === 'reply_to_chat_batch' ? 'Trả lời trực tiếp tối đa hai bình luận trong một đoạn nói tự nhiên từ 28 đến 40 từ, tương đương 8 đến 12 giây. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Bắt buộc trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Có biểu cảm phù hợp. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
             },
             {
               role: 'user',
               content: `Tình huống: [${intent.action}]. Ý định: ${intent.intent}. Cảm xúc: ${intent.emotion || 'happy'}. Nội dung cần phản hồi: ${intent.speechText || 'Tự sinh lời thoại phù hợp bằng tiếng Việt'}.`,
             },
           ],
-          max_tokens: intent.intent === 'reply_to_chat_batch' ? 280 : 120,
+          max_tokens: intent.intent === 'reply_to_chat_batch' ? 88 : 72,
           temperature: this._config.temperature || 0.7,
         }),
       });
@@ -246,7 +301,8 @@ export class OpenAIDialogueProvider implements DialogueProvider {
 
       const json = await res.json() as any;
       const text = json.choices?.[0]?.message?.content?.trim();
-      return text || new MockDialogueProvider().generate(intent, persona);
+      if (!text) throw new Error(`${this.name} returned an empty response`);
+      return text;
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error));
     }
@@ -286,14 +342,14 @@ export class OllamaDialogueProvider implements DialogueProvider {
           messages: [
             {
               role: 'system',
-              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. ${intent.intent === 'reply_to_chat_batch' ? 'Hãy trả lời lần lượt nhiều bình luận trong cùng một đoạn nói tự nhiên, đủ nội dung cho khoảng 15 đến 20 giây.' : 'Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1 đến 2 câu.'} Không giải thích suy luận. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
+              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. ${intent.intent === 'reply_to_chat_batch' ? 'Trả lời trực tiếp tối đa hai bình luận trong một đoạn nói tự nhiên từ 28 đến 40 từ, tương đương 8 đến 12 giây. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Không giải thích suy luận. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
             },
             {
               role: 'user',
               content: `Sự kiện: ${intent.action}. Ý định: ${intent.intent || 'reply_to_chat'}. Cảm xúc: ${intent.emotion || 'happy'}. Tin nhắn: ${intent.speechText || 'Hãy phản hồi phù hợp với livestream.'}`,
             },
           ],
-          options: { temperature: 0.7, num_predict: intent.intent === 'reply_to_chat_batch' ? 280 : 120 },
+          options: { temperature: 0.7, num_predict: intent.intent === 'reply_to_chat_batch' ? 88 : 72 },
         }),
       });
       if (!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
@@ -321,7 +377,7 @@ export class DialogueAgent {
     providers?: DialogueProvider[];
   } = {}) {
     this._persona = { ...DEFAULT_IDOL_PERSONA, ...(options.persona || {}) };
-    this._providers = options.providers ?? [new MockDialogueProvider()];
+    this._providers = options.providers ?? [new SafeDialogueProvider()];
   }
 
   get persona(): CharacterPersona {
@@ -338,17 +394,16 @@ export class DialogueAgent {
 
   async generateDialogue(intent: DirectorIntent): Promise<DialogueGenerationResult> {
     let text = '';
-    let providerName = 'mock-fallback';
+    let providerName = 'safe-fallback';
 
     for (let i = 0; i < this._providers.length; i++) {
       const provider = this._providers[(this._activeProviderIndex + i) % this._providers.length]!;
       try {
         text = await provider.generate(intent, this._persona);
         if (this._persona.language.toLowerCase() === 'vietnamese' && !isLikelyVietnamese(text)) {
-          const { speechText: _ignoredSpeechText, ...fallbackIntent } = intent;
-          text = await new MockDialogueProvider().generate(fallbackIntent, this._persona);
-          providerName = 'mock-fallback';
-          break;
+          console.warn(`[DialogueAgent] Provider ${provider.name} returned non-Vietnamese dialogue, falling back...`);
+          text = '';
+          continue;
         }
         providerName = provider.name;
         break;
@@ -367,15 +422,13 @@ export class DialogueAgent {
     // Estimate speaking duration: Vietnamese speaking rate is ~4.5 syllables/sec (~3.5 words/sec)
     text = normalizeVietnameseSpokenText(personalizePersonaName(text, this._persona));
     if (intent.intent === 'reply_to_chat_batch') {
-      const batchWords = text.split(/\s+/).filter(Boolean);
-      if (batchWords.length < 48) {
-        text = `${text} ${this._persona.name} đã đọc hết các câu hỏi rồi nha, mọi người cứ nhắn tiếp, ${this._persona.name} sẽ lần lượt trả lời để không bỏ sót ai.`;
-      }
-      const boundedWords = text.split(/\s+/).filter(Boolean);
-      if (boundedWords.length > 70) text = `${boundedWords.slice(0, 70).join(' ').replace(/[,.!?;:]+$/, '')}.`;
+      text = constrainLiveReply(text);
+      if (!text) text = personalizePersonaName(CURATED_LINES['reply_to_chat']![0]!, this._persona);
+    } else {
+      text = trimToWordBudget(text);
     }
     const wordCount = text.split(/\s+/).filter(Boolean).length;
-    const estimatedDurationMs = Math.max(2000, Math.min(20_000, Math.round((wordCount / 3.5) * 1000)));
+    const estimatedDurationMs = Math.max(2000, Math.min(12_000, Math.round((wordCount / 3.5) * 1000)));
 
     return {
       text,

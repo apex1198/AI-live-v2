@@ -91,7 +91,7 @@ def read_imgs(img_list):
 #     return text_range
     
 
-def get_landmark_and_bbox(img_list, upperbondrange=0, progress_callback=None):
+def get_landmark_and_bbox(img_list, upperbondrange=0, progress_callback=None, return_landmarks=False):
     frames = read_imgs(img_list)
     batch_size_fa = 1
     batches = [frames[i:i + batch_size_fa] for i in range(0, len(frames), batch_size_fa)]
@@ -127,6 +127,7 @@ def get_landmark_and_bbox(img_list, upperbondrange=0, progress_callback=None):
             ).astype(np.int32)
         else:
             face_land_mark = np.zeros((68, 2), dtype=np.int32)
+        landmarks.append(face_land_mark.copy())
         
         # get bounding boxes by face detetion
         bbox = fa.get_detections_for_batch(np.asarray(fb))
@@ -165,6 +166,8 @@ def get_landmark_and_bbox(img_list, upperbondrange=0, progress_callback=None):
     print("********************************************bbox_shift parameter adjustment**********************************************************")
     print(f"Total frame:「{len(frames)}」 Manually adjust range : [ -{int(sum(average_range_minus) / len(average_range_minus))}~{int(sum(average_range_plus) / len(average_range_plus))} ] , the current value: {upperbondrange}")
     print("*************************************************************************************************************************************")
+    if return_landmarks:
+        return coords_list, frames, landmarks
     return coords_list,frames
     
 

@@ -16,8 +16,10 @@
 ###############################################################################
 
 import asyncio
+import math
 import json
 import logging
+import os
 import threading
 import time
 from typing import Tuple, Dict, Optional, Set, Union
@@ -26,11 +28,12 @@ from av.frame import Frame
 from av.packet import Packet
 from av import AudioFrame
 import fractions
+import cv2
 import numpy as np
 
 AUDIO_PTIME = 0.020  # fallback for workers that do not expose frame duration
 VIDEO_CLOCK_RATE = 90000
-VIDEO_PTIME = 0.040  # legacy 25 FPS fallback
+VIDEO_PTIME = 1.0 / 30.0  # 30 FPS fallback
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 SAMPLE_RATE = 16000
 AUDIO_TIME_BASE = fractions.Fraction(1, SAMPLE_RATE)
@@ -114,6 +117,9 @@ class PlayerStreamTrack(MediaStreamTrack):
     async def recv(self) -> Union[Frame, Packet]:
         # frame = self.frames[self.counter % 30]            
         self._player._start(self)
+        wait_for_prebuffer = getattr(self._player, 'wait_for_prebuffer', None)
+        if callable(wait_for_prebuffer):
+            await wait_for_prebuffer()
         # if self.kind == 'video':
         #     frame = await self._queue.get()
         # else: #audio
@@ -198,11 +204,19 @@ class HumanPlayer:
 
         self.__container = avatar_session
         model_fps = max(1.0, float(getattr(avatar_session.opt, 'fps', 25.0)))
-        output_fps = max(1.0, float(getattr(avatar_session.opt, 'output_fps', 25.0)))
+        output_fps = max(1.0, float(getattr(avatar_session.opt, 'output_fps', model_fps)))
         self.video_ptime = 1.0 / output_fps
         self.audio_ptime = AUDIO_PTIME
-        self.video_repetitions = max(1, int(round(output_fps / model_fps)))
-        self.audio_packets_per_video = max(1, int(round(self.video_ptime / self.audio_ptime)))
+        self.video_repetition_ratio = max(1.0, output_fps / model_fps)
+        self.video_repetitions = max(1, int(math.ceil(self.video_repetition_ratio)))
+        self._video_repetition_accumulator = 0.0
+        quality = os.getenv("LIVETALKING_VIDEO_QUALITY", "fhd").strip().lower()
+        default_width, default_height = ((1920, 1080) if quality == "fhd" else (1280, 720))
+        self.output_max_width = self._positive_env_int("LIVETALKING_MAX_WIDTH", default_width)
+        self.output_max_height = self._positive_env_int("LIVETALKING_MAX_HEIGHT", default_height)
+        self._reported_output_resize = False
+        self.audio_packets_per_video = max(1.0, self.video_ptime / self.audio_ptime)
+        self._audio_drop_accumulator = 0.0
         batch_size = int(getattr(avatar_session, 'batch_size', 4))
         self.__max_video_buffer = max(int(round(output_fps)), batch_size * self.video_repetitions)
         self.__max_audio_buffer = max(
@@ -211,13 +225,87 @@ class HumanPlayer:
         )
         self.__audio = PlayerStreamTrack(self, kind="audio", max_queue_size=self.__max_audio_buffer)
         self.__video = PlayerStreamTrack(self, kind="video", max_queue_size=self.__max_video_buffer)
+        self.prebuffer_ms = max(0, min(1_500, int(getattr(avatar_session.opt, 'prebuffer_ms', 480))))
+        self.prebuffer_video_frames = min(
+            self.__max_video_buffer,
+            max(self.video_repetitions, int(round(self.prebuffer_ms / 1000.0 / self.video_ptime))),
+        )
+        self.prebuffer_audio_frames = min(
+            self.__max_audio_buffer,
+            max(1, int(round(self.prebuffer_ms / 1000.0 / self.audio_ptime))),
+        )
+        self._prebuffer_ready = self.prebuffer_ms == 0
         if hasattr(self.__container, 'output'):
             self.__container.output._player = self
 
+    async def wait_for_prebuffer(self) -> None:
+        if self._prebuffer_ready:
+            return
+        deadline = time.monotonic() + max(1.5, self.prebuffer_ms / 1000.0 * 3.0)
+        while not self._prebuffer_ready:
+            video_ready = self.__video._queue.qsize() >= self.prebuffer_video_frames
+            audio_ready = self.__audio._queue.qsize() >= self.prebuffer_audio_frames
+            if (video_ready and audio_ready) or time.monotonic() >= deadline:
+                self._prebuffer_ready = True
+                return
+            await asyncio.sleep(0.005)
+
+    def _apply_output_backpressure(self) -> None:
+        if self.prebuffer_ms <= 0 or not self._prebuffer_ready:
+            return
+        target_frames = max(self.video_repetitions, self.prebuffer_video_frames)
+        deadline = time.monotonic() + max(0.5, self.prebuffer_ms / 1000.0 * 3.0)
+        while self.__video._queue.qsize() >= target_frames and time.monotonic() < deadline:
+            time.sleep(0.004)
+
+    @staticmethod
+    def _positive_env_int(name: str, fallback: int) -> int:
+        try:
+            return max(2, int(os.getenv(name, str(fallback))))
+        except (TypeError, ValueError):
+            return fallback
+
+    def _prepare_output_frame(self, frame):
+        if not isinstance(frame, np.ndarray) or frame.ndim < 2:
+            return frame
+        height, width = frame.shape[:2]
+        scale = min(
+            1.0,
+            self.output_max_width / max(1, width),
+            self.output_max_height / max(1, height),
+        )
+        if scale >= 1.0:
+            return frame
+
+        target_width = max(2, int(round(width * scale)))
+        target_height = max(2, int(round(height * scale)))
+        target_width -= target_width % 2
+        target_height -= target_height % 2
+        resized = cv2.resize(
+            frame,
+            (target_width, target_height),
+            interpolation=cv2.INTER_AREA,
+        )
+        if not self._reported_output_resize:
+            mylogger.info(
+                "WebRTC output capped from %dx%d to %dx%d",
+                width,
+                height,
+                target_width,
+                target_height,
+            )
+            self._reported_output_resize = True
+        return resized
+
     def push_video(self, frame, preserve=False):
         from av import VideoFrame
-        for _ in range(self.video_repetitions):
-            new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
+        self._apply_output_backpressure()
+        output_frame = self._prepare_output_frame(frame)
+        self._video_repetition_accumulator += self.video_repetition_ratio
+        repetitions = max(1, int(math.floor(self._video_repetition_accumulator + 1e-9)))
+        self._video_repetition_accumulator -= repetitions
+        for _ in range(repetitions):
+            new_frame = VideoFrame.from_ndarray(output_frame, format="bgr24")
             if preserve:
                 self.__video._queue.put((new_frame, None))
                 continue
@@ -226,7 +314,10 @@ class HumanPlayer:
                     self.__video._queue.get_nowait()
                     # Keep the independently queued audio clock aligned with
                     # the stale output frame being discarded.
-                    for _ in range(self.audio_packets_per_video):
+                    self._audio_drop_accumulator += self.audio_packets_per_video
+                    audio_packets_to_drop = int(self._audio_drop_accumulator)
+                    self._audio_drop_accumulator -= audio_packets_to_drop
+                    for _ in range(audio_packets_to_drop):
                         try:
                             self.__audio._queue.get_nowait()
                         except queue.Empty:
@@ -269,6 +360,7 @@ class HumanPlayer:
                 except queue.Empty:
                     break
         self.__video._last_video_frame = None
+        self._prebuffer_ready = self.prebuffer_ms == 0
 
     def record_output_fps(self, fps: float) -> None:
         if self.__container is not None:

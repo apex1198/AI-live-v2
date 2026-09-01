@@ -401,12 +401,21 @@ class BaseAvatar:
             return len(self.frame_list_cycle)
         return 1
 
+    def get_idle_frame(self, idx):
+        length = max(1, self.get_avatar_length())
+        return self.frame_list_cycle[self.map_frame_index(length, idx)]
+
+    def paste_back_frame_for_epoch(self, pred_frame, idx, batch_epoch):
+        if batch_epoch != self._flush_epoch:
+            return None
+        return self.paste_back_frame(pred_frame, idx)
+
     def map_frame_index(self, length, index):
         return mirror_index(length, index)
         
     def inference(self, quit_event):
-        length = self.get_avatar_length()
         index = 0
+        last_epoch = self._flush_epoch
         count = 0
         counttime = 0
         last_speaking = False
@@ -423,6 +432,10 @@ class BaseAvatar:
                 audiofeat_batch = self.asr.feat_queue.get(block=True, timeout=1)
             except queue.Empty:
                 continue
+            if batch_epoch != last_epoch:
+                index = 0
+                last_epoch = batch_epoch
+            length = max(1, self.get_avatar_length())
                 
             is_all_silence = True
             audio_frames: list[AudioFrameData] = []
@@ -515,7 +528,7 @@ class BaseAvatar:
                     target_frame = self.custom_img_cycle[audiotype][mirindex]
                     self.custom_index[audiotype] += 1
                 else:
-                    target_frame = self.frame_list_cycle[idx]
+                    target_frame = self.get_idle_frame(idx)
                 
                 if enable_transition:
                     # 说话→静音过渡
@@ -531,7 +544,9 @@ class BaseAvatar:
             else:
                 self.speaking = True
                 try:
-                    current_frame = self.paste_back_frame(res_frame,idx)
+                    current_frame = self.paste_back_frame_for_epoch(res_frame, idx, batch_epoch)
+                    if current_frame is None:
+                        continue
                 except Exception as e:
                     logger.warning(f"paste_back_frame error: {e}")
                     continue

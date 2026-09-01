@@ -18,6 +18,10 @@ const RUNTIME_ADDRESS: &str = "127.0.0.1:18765";
 const QWEN_TTS_ADDRESS: &str = "127.0.0.1:18002";
 const STUDIO_URL: &str = "http://127.0.0.1:18765/#studio";
 const UI_SCALE: f64 = 0.8;
+// Desktop OAuth client IDs are public identifiers. The client secret is supplied
+// from the ignored .env file at build time and embedded only in the app binary.
+const BUILT_IN_GOOGLE_OAUTH_CLIENT_ID: &str =
+    "592506943214-3i76k7r31250u3gphtott19g15pe54tg.apps.googleusercontent.com";
 
 #[derive(Clone)]
 struct SandboxPaths {
@@ -117,6 +121,18 @@ fn runtime_service_probe() -> (bool, Option<String>, bool) {
 }
 
 fn runtime_build_id(backend: &Path) -> Result<String, String> {
+    let manifest = backend
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("runtime-build-id.txt"));
+    if let Some(manifest) = manifest {
+        if let Ok(value) = fs::read_to_string(manifest) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Ok(value.to_owned());
+            }
+        }
+    }
     let bytes = fs::read(backend).map_err(|error| error.to_string())?;
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -386,6 +402,24 @@ fn run_setup_script(script: &Path, environment: &[(&str, &Path)]) -> Result<(), 
     Ok(())
 }
 
+fn run_python_script(python: &Path, script: &Path, arguments: &[&Path]) -> Result<(), String> {
+    if !python.is_file() {
+        return Err(format!("Python runtime is missing: {}", python.display()));
+    }
+    if !script.is_file() {
+        return Err(format!("Setup helper is missing: {}", script.display()));
+    }
+    let status = Command::new(python)
+        .arg(script)
+        .args(arguments)
+        .status()
+        .map_err(|error| error.to_string())?;
+    if !status.success() {
+        return Err(format!("Setup helper exited with {status}"));
+    }
+    Ok(())
+}
+
 fn platform_setup_script(root: &Path) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -460,6 +494,7 @@ fn perform_magic_setup(app: &AppHandle, state: &MagicSetupState) -> Result<Sandb
 
     let live_root = paths.engine.join("services/talking-head/livetalking");
     let live_seed = workspace.join("services/talking-head/livetalking");
+    let torch_home = paths.cache.join("torch");
     update_setup(
         state,
         "python",
@@ -519,8 +554,37 @@ fn perform_magic_setup(app: &AppHandle, state: &MagicSetupState) -> Result<Sandb
             "This one-time download may take several minutes.",
             68,
         );
-        run_setup_script(&platform_setup_script(&live_root), &[])?;
+        run_setup_script(
+            &platform_setup_script(&live_root),
+            &[("TORCH_HOME", torch_home.as_path())],
+        )?;
     }
+
+    let live_python = first_existing_file([
+        live_root.join(".venv/bin/python"),
+        live_root.join(".venv/Scripts/python.exe"),
+    ])
+    .ok_or("Live Avatar Python environment is missing")?;
+    let face_detector = torch_home.join("hub/checkpoints/s3fd-619a316812.pth");
+    let face_detector_ready = face_detector
+        .metadata()
+        .map(|metadata| metadata.len() == 89_843_225)
+        .unwrap_or(false);
+    if !face_detector_ready {
+        update_setup(
+            state,
+            "models",
+            "Preparing face detector",
+            "Downloading the face detector before avatar training.",
+            72,
+        );
+    }
+    let target_flag = Path::new("--target");
+    run_python_script(
+        &live_python,
+        &live_root.join("scripts/prefetch_s3fd.py"),
+        &[target_flag, face_detector.as_path()],
+    )?;
     let qwen_python_ready = paths.qwen_runtime.join(".venv/bin/python").is_file()
         || paths
             .qwen_runtime
@@ -552,6 +616,7 @@ fn perform_magic_setup(app: &AppHandle, state: &MagicSetupState) -> Result<Sandb
         paths.runtime.join("backend/dist/index.js"),
         paths.runtime.join("operator-dashboard/index.html"),
         live_root.join("models/musetalkV15/unet.pth"),
+        face_detector,
         qwen_model.join("config.json"),
     ] {
         if !required.exists() {
@@ -651,6 +716,27 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
         .env("AI_IDOL_DASHBOARD_DIR", dashboard)
         .env("RUNTIME_DB_PATH", paths.data.join("runtime.sqlite"))
         .env("PORT", "18765")
+        .env(
+            "GOOGLE_OAUTH_CLIENT_ID",
+            std::env::var("GOOGLE_OAUTH_CLIENT_ID")
+                .ok()
+                .or_else(|| option_env!("GOOGLE_OAUTH_CLIENT_ID").map(str::to_owned))
+                .unwrap_or_else(|| BUILT_IN_GOOGLE_OAUTH_CLIENT_ID.to_owned()),
+        )
+        .env(
+            "GOOGLE_OAUTH_CLIENT_SECRET",
+            std::env::var("GOOGLE_OAUTH_CLIENT_SECRET")
+                .ok()
+                .or_else(|| option_env!("GOOGLE_OAUTH_CLIENT_SECRET").map(str::to_owned))
+                .unwrap_or_default(),
+        )
+        .env(
+            "FACEBOOK_APP_ID",
+            std::env::var("FACEBOOK_APP_ID")
+                .ok()
+                .or_else(|| option_env!("FACEBOOK_APP_ID").map(str::to_owned))
+                .unwrap_or_default(),
+        )
         .env(
             "CORS_ALLOWED_ORIGINS",
             "http://127.0.0.1:18765,http://localhost:18765",

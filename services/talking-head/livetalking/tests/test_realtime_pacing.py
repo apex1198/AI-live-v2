@@ -54,10 +54,59 @@ class HangingPeerConnection(FakePeerConnection):
 
 
 class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
-    async def test_musetalk_uses_forward_loop_for_seamless_idle_boundary(self):
+    async def test_musetalk_uses_ping_pong_loop_without_last_to_first_cut(self):
         avatar = SimpleNamespace(source_fps=24, opt=SimpleNamespace(fps=24))
-        indices = [MuseReal.map_frame_index(avatar, 5, index) for index in range(7)]
-        self.assertEqual(indices, [0, 1, 2, 3, 4, 0, 1])
+        indices = [MuseReal.map_frame_index(avatar, 5, index) for index in range(10)]
+        self.assertEqual(indices, [0, 1, 2, 3, 4, 3, 2, 1, 0, 1])
+        self.assertTrue(all(abs(current - previous) <= 1 for previous, current in zip(indices, indices[1:])))
+
+    async def test_avatar_switch_flushes_old_frames_before_atomic_dataset_swap(self):
+        avatar = object.__new__(MuseReal)
+        avatar._avatar_data_lock = threading.RLock()
+        avatar.frame_list_cycle = ['old-frame']
+        avatar.mask_list_cycle = ['old-mask']
+        avatar.coord_list_cycle = ['old-coord']
+        avatar.mask_coords_list_cycle = ['old-mask-coord']
+        avatar.input_latent_list_cycle = ['old-latent']
+        avatar.source_fps = 25
+        avatar.opt = SimpleNamespace(avatar_id='old-avatar', fps=25)
+        avatar.current_frame_index = 12
+        avatar._lip_color_state = {'ema': 1}
+        events = []
+        avatar.flush_talk = lambda: events.append('flushed')
+
+        dataset = (
+            ['new-frame'],
+            ['new-mask'],
+            ['new-coord'],
+            ['new-mask-coord'],
+            ['new-latent'],
+            30,
+        )
+        MuseReal.switch_avatar(avatar, 'new-avatar', dataset)
+
+        self.assertEqual(events, ['flushed'])
+        self.assertEqual(avatar.opt.avatar_id, 'new-avatar')
+        self.assertEqual(avatar.frame_list_cycle, ['new-frame'])
+        self.assertEqual(avatar.input_latent_list_cycle, ['new-latent'])
+        self.assertEqual(avatar.source_fps, 30)
+        self.assertEqual(avatar.current_frame_index, 0)
+        self.assertEqual(avatar._lip_color_state, {})
+
+    async def test_avatar_switch_rejects_stale_inference_epoch(self):
+        avatar = object.__new__(MuseReal)
+        avatar._avatar_data_lock = threading.RLock()
+        avatar._flush_epoch = 4
+        calls = []
+        avatar.paste_back_frame = lambda pred_frame, idx: calls.append((pred_frame, idx)) or 'new-frame'
+
+        self.assertIsNone(MuseReal.paste_back_frame_for_epoch(avatar, 'old-prediction', 7, 3))
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            MuseReal.paste_back_frame_for_epoch(avatar, 'current-prediction', 0, 4),
+            'new-frame',
+        )
+        self.assertEqual(calls, [('current-prediction', 0)])
 
     async def test_pipeline_status_reports_buffer_adjusted_display_frame(self):
         avatar = SimpleNamespace(
@@ -106,9 +155,11 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
         elapsed = time.perf_counter() - started
 
         self.assertEqual(player.repeated_frames, 1)
-        self.assertGreater(repeated.pts, first_pts)
+        self.assertEqual(repeated.pts - first_pts, int(player.video_ptime * 90000))
         self.assertGreater(elapsed, 0.025)
-        self.assertLess(elapsed, 0.08)
+        # CI and a concurrently running MPS worker can delay task scheduling;
+        # RTP timestamp cadence above is the deterministic sync contract.
+        self.assertLess(elapsed, 0.15)
 
     async def test_50_fps_video_and_10ms_audio_use_matching_timestamps(self):
         player = FakePlayer(fps=50)
@@ -153,6 +204,71 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(player.video_repetitions, 2)
         self.assertEqual(player.video._queue.qsize(), 2)
         self.assertEqual(player.audio_packets_per_video, 2)
+
+    async def test_12_5_model_clock_fractionally_paces_30_fps_without_drift(self):
+        avatar = SimpleNamespace(
+            opt=SimpleNamespace(fps=12.5, output_fps=30),
+            batch_size=8,
+            dropped_video_frames=0,
+            repeated_video_frames=0,
+        )
+        player = HumanPlayer(avatar)
+        frame = np.zeros((16, 16, 3), dtype=np.uint8)
+        output_counts = []
+        for _ in range(5):
+            before = player.video._queue.qsize()
+            player.push_video(frame)
+            output_counts.append(player.video._queue.qsize() - before)
+
+        self.assertEqual(output_counts, [2, 2, 3, 2, 3])
+        self.assertEqual(player.video._queue.qsize(), 12)
+        self.assertAlmostEqual(5 / 12.5, 12 / 30)
+
+    async def test_player_opens_audio_video_gate_after_shared_prebuffer(self):
+        avatar = SimpleNamespace(
+            opt=SimpleNamespace(fps=12.5, output_fps=25, prebuffer_ms=480),
+            batch_size=4,
+            dropped_video_frames=0,
+            repeated_video_frames=0,
+        )
+        player = HumanPlayer(avatar)
+        audio = np.zeros(320, dtype=np.int16)
+        for _ in range(6):
+            player.push_video(np.zeros((4, 4, 3), dtype=np.uint8))
+        for _ in range(24):
+            player.push_audio(audio)
+
+        await player.wait_for_prebuffer()
+
+        self.assertTrue(player._prebuffer_ready)
+        self.assertEqual(player.prebuffer_video_frames, 12)
+        self.assertEqual(player.prebuffer_audio_frames, 24)
+
+    async def test_prebuffered_output_applies_backpressure_before_queue_saturation(self):
+        avatar = SimpleNamespace(
+            opt=SimpleNamespace(fps=12.5, output_fps=25, prebuffer_ms=480),
+            batch_size=4,
+            dropped_video_frames=0,
+            repeated_video_frames=0,
+        )
+        player = HumanPlayer(avatar)
+        for _ in range(6):
+            player.push_video(np.zeros((4, 4, 3), dtype=np.uint8))
+        player._prebuffer_ready = True
+
+        def drain_one_frame():
+            time.sleep(0.025)
+            player.video._queue.get_nowait()
+
+        drain = threading.Thread(target=drain_one_frame)
+        drain.start()
+        started = time.perf_counter()
+        player.push_video(np.ones((4, 4, 3), dtype=np.uint8))
+        elapsed = time.perf_counter() - started
+        drain.join()
+
+        self.assertGreaterEqual(elapsed, 0.02)
+        self.assertEqual(avatar.dropped_video_frames, 0)
 
     async def test_video_queue_drops_stale_frames_when_saturated(self):
         avatar = SimpleNamespace(
@@ -234,6 +350,7 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(player.get_buffer_size(), 0)
         self.assertEqual(player.get_audio_buffer_size(), 0)
         self.assertIsNone(player.video._last_video_frame)
+        self.assertFalse(player._prebuffer_ready)
 
     async def test_whisper_uses_upstream_two_frame_timing_offset(self):
         source = inspect.getsource(WhisperASR.run_step)

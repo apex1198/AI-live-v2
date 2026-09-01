@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI IDOL Streamer Output</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #000; }
+    video { width: 100%; height: 100%; display: block; object-fit: contain; background: #000; }
+    audio { display: none; }
+    .status {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: #aeb4b0;
+      background: #090a0a;
+      font: 500 22px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    .status[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <video id="output" autoplay playsinline muted></video>
+  <audio id="output-audio" autoplay></audio>
+  <div class="status" id="status" role="status">Waiting for AI IDOL Streamer...</div>
+
+  <script>
+    'use strict';
+
+    const video = document.getElementById('output');
+    const audio = document.getElementById('output-audio');
+    const status = document.getElementById('status');
+    const outputStream = new MediaStream();
+    const sessionId = new URLSearchParams(location.search).get('session') || '';
+    const receiverPeerId = `receiver_${crypto.randomUUID().replace(/-/g, '')}`;
+    let socket = null;
+    let peer = null;
+    let negotiationId = '';
+    let pendingCandidates = [];
+    let reconnectTimer = null;
+
+    function authProtocols() {
+      const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
+      const protocols = ['idol-runtime-v2'];
+      if (!token) return protocols;
+      const bytes = new TextEncoder().encode(token);
+      let binary = '';
+      bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+      protocols.push(`auth.${btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`);
+      return protocols;
+    }
+
+    function send(payload) {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+    }
+
+    function closePeer() {
+      if (peer) peer.close();
+      peer = null;
+      negotiationId = '';
+      pendingCandidates = [];
+      for (const track of outputStream.getTracks()) outputStream.removeTrack(track);
+      video.srcObject = null;
+      audio.srcObject = null;
+      status.hidden = false;
+    }
+
+    async function acceptOffer(description, nextNegotiationId) {
+      closePeer();
+      negotiationId = nextNegotiationId;
+      const activePeer = new RTCPeerConnection({ sdpSemantics: 'unified-plan' });
+      peer = activePeer;
+      activePeer.addEventListener('track', event => {
+        if (event.track.kind === 'video') {
+          for (const track of outputStream.getVideoTracks()) outputStream.removeTrack(track);
+          outputStream.addTrack(event.track);
+          video.srcObject = new MediaStream([event.track]);
+          video.play().then(() => {
+            status.hidden = true;
+            send({ type: 'OBS_OUTPUT_MEDIA_CONNECTED', sessionId, negotiationId: nextNegotiationId });
+          }).catch(() => {
+            status.textContent = 'OBS is waiting for video playback permission.';
+          });
+          return;
+        }
+        for (const track of outputStream.getAudioTracks()) outputStream.removeTrack(track);
+        outputStream.addTrack(event.track);
+        audio.srcObject = new MediaStream([event.track]);
+        audio.muted = false;
+        audio.volume = 1;
+        audio.play().catch(() => {});
+      });
+      activePeer.addEventListener('icecandidate', event => {
+        if (event.candidate && peer === activePeer) {
+          send({
+            type: 'OBS_OUTPUT_ICE',
+            sessionId,
+            negotiationId: nextNegotiationId,
+            candidate: event.candidate.toJSON(),
+          });
+        }
+      });
+      activePeer.addEventListener('connectionstatechange', () => {
+        if (peer !== activePeer) return;
+        if (['failed', 'closed'].includes(activePeer.connectionState)) {
+          closePeer();
+          send({ type: 'OBS_OUTPUT_READY', sessionId });
+        }
+      });
+      await activePeer.setRemoteDescription(description);
+      for (const candidate of pendingCandidates.splice(0)) {
+        await activePeer.addIceCandidate(candidate).catch(() => {});
+      }
+      const answer = await activePeer.createAnswer();
+      await activePeer.setLocalDescription(answer);
+      send({
+        type: 'OBS_OUTPUT_ANSWER',
+        sessionId,
+        negotiationId: nextNegotiationId,
+        description: { type: 'answer', sdp: activePeer.localDescription.sdp },
+      });
+    }
+
+    function connect() {
+      clearTimeout(reconnectTimer);
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      socket = new WebSocket(`${protocol}//${location.host}/`, authProtocols());
+      socket.addEventListener('open', () => {
+        if (!sessionId) {
+          status.textContent = 'Invalid OBS output session. Press Magic Connect again.';
+          return;
+        }
+        status.textContent = 'Waiting for Live Monitor...';
+        send({ type: 'OBS_OUTPUT_REGISTER', role: 'receiver', peerId: receiverPeerId, sessionId });
+        send({ type: 'OBS_OUTPUT_READY', sessionId });
+      });
+      socket.addEventListener('message', event => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.sessionId && payload.sessionId !== sessionId) return;
+          if (payload.type === 'OBS_OUTPUT_RESET') {
+            closePeer();
+            status.textContent = 'Waiting for Live Monitor...';
+            send({ type: 'OBS_OUTPUT_READY', sessionId });
+          } else if (payload.type === 'OBS_OUTPUT_SESSION_REVOKED') {
+            closePeer();
+            status.textContent = 'OBS output session replaced. Press Magic Connect again.';
+          } else if (payload.type === 'OBS_OUTPUT_OFFER') {
+            void acceptOffer(payload.description, payload.negotiationId).catch(error => {
+              status.hidden = false;
+              status.textContent = `Output link failed: ${error.message}`;
+            });
+          } else if (payload.type === 'OBS_OUTPUT_ICE') {
+            if (payload.negotiationId !== negotiationId) return;
+            if (peer?.remoteDescription) void peer.addIceCandidate(payload.candidate).catch(() => {});
+            else pendingCandidates.push(payload.candidate);
+          }
+        } catch {}
+      });
+      socket.addEventListener('close', () => {
+        closePeer();
+        status.textContent = 'Reconnecting to AI IDOL Streamer...';
+        reconnectTimer = setTimeout(connect, 2000);
+      });
+    }
+
+    window.addEventListener('pagehide', () => {
+      if (sessionId) send({ type: 'OBS_OUTPUT_RECEIVER_CLOSED', sessionId });
+      clearTimeout(reconnectTimer);
+      closePeer();
+      socket?.close();
+    });
+
+    connect();
+  </script>
+</body>
+</html>

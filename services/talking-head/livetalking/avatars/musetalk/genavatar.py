@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
+from PIL import Image
 
 from avatars.musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs
 from avatars.musetalk.utils.blending import get_image_prepare_material
@@ -21,7 +22,17 @@ from avatars.musetalk.model_resources import (
     throttle_training,
     vae_lock,
 )
-from avatars.musetalk.myutil import build_landmark_lower_face_mask
+from avatars.musetalk.myutil import (
+    build_landmark_lower_face_mask,
+    build_mediapipe_mouth_mask,
+    build_parsed_lower_face_mask,
+)
+from avatars.musetalk.utils.face_geometry import (
+    ALIGNMENT_FORMAT,
+    ALIGNMENT_SIZE,
+    track_face_geometry,
+    warp_to_aligned,
+)
 
 try:
     from utils.face_parsing import FaceParsing
@@ -30,6 +41,7 @@ except ModuleNotFoundError:
 
 
 TRAINING_FPS = 30.0
+MODEL_FPS = 15.0
 
 
 def _write_training_frame(frame, save_path, index):
@@ -91,7 +103,7 @@ def create_dir(dir_path):
         os.makedirs(dir_path)
 
 
-def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shift=0, extra_margin=10, parsing_mode='jaw', version='v15', progress_callback=None):
+def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shift=0, extra_margin=10, parsing_mode='lower_face', version='v15', progress_callback=None):
     """
     生成avatar的核心逻辑
 
@@ -114,6 +126,7 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
 
     mask_coords_path = os.path.join(avatar_save_path, 'mask_coords.pkl')
     coords_path = os.path.join(avatar_save_path, 'coords.pkl')
+    alignment_path = os.path.join(avatar_save_path, 'alignment.pkl')
     latents_out_path = os.path.join(avatar_save_path, 'latents.pt')
 
     if progress_callback: progress_callback(5)
@@ -140,7 +153,16 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
             "source_fps": source_fps,
             "original_source_fps": original_source_fps,
             "training_fps": TRAINING_FPS,
+            "model_fps": MODEL_FPS,
             "loop_mode": "ping_pong",
+            "mask_format": "mediapipe_478_lower_face_mouth_inset20pct_feather5_v10",
+            "mask_parsing_mode": parsing_mode,
+            "mask_feather_px": 5,
+            "mask_edge_padding_ratio": 0.05,
+            "mask_outer_inset_ratio": 0.20,
+            "alignment_format": ALIGNMENT_FORMAT,
+            "alignment_size": ALIGNMENT_SIZE,
+            "geometry_tracking": "mediapipe_478",
         }, f)
 
     if os.path.isfile(video_path):
@@ -186,6 +208,43 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
         return_landmarks=True,
     )
 
+    alignment_list_cycle = None
+    geometry_enabled = False
+    try:
+        alignment_list_cycle = track_face_geometry(frame_list)
+        geometry_enabled = alignment_list_cycle is not None
+        for index, alignment in enumerate(alignment_list_cycle):
+            if alignment is None:
+                continue
+            x1, y1, x2, y2 = alignment["face_box"]
+            coord_list[index] = [
+                max(0, int(np.floor(x1))),
+                max(0, int(np.floor(y1))),
+                min(frame_list[index].shape[1], int(np.ceil(x2))),
+                min(frame_list[index].shape[0], int(np.ceil(y2))),
+            ]
+        print(f"MediaPipe 478 geometry tracking enabled for {len(alignment_list_cycle)} frames")
+    except FileNotFoundError as exc:
+        # Keep avatar generation usable on machines that have not installed
+        # the optional landmark model yet; the generated metadata records the
+        # legacy path by removing alignment.pkl below.
+        print(f"MediaPipe geometry tracking unavailable, using legacy crop: {exc}")
+
+    with open(info_path, "r", encoding="utf-8") as info_file:
+        avatar_info = json.load(info_file)
+    if geometry_enabled:
+        avatar_info.update({
+            "alignment_format": ALIGNMENT_FORMAT,
+            "alignment_size": ALIGNMENT_SIZE,
+            "geometry_tracking": "mediapipe_478",
+        })
+    else:
+        avatar_info.pop("alignment_format", None)
+        avatar_info.pop("alignment_size", None)
+        avatar_info.pop("geometry_tracking", None)
+    with open(info_path, "w", encoding="utf-8") as info_file:
+        json.dump(avatar_info, info_file)
+
     if progress_callback: progress_callback(50)
 
     input_latent_list = []
@@ -219,8 +278,11 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
             y2 = y2 + extra_margin
             y2 = min(y2, frame.shape[0])
             coord_list[idx] = [x1, y1, x2, y2]
-        crop_frame = frame[y1:y2, x1:x2]
-        resized_crop_frame = cv2.resize(crop_frame, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        if alignment_list_cycle is not None:
+            resized_crop_frame = warp_to_aligned(frame, alignment_list_cycle[idx])
+        else:
+            crop_frame = frame[y1:y2, x1:x2]
+            resized_crop_frame = cv2.resize(crop_frame, (256, 256), interpolation=cv2.INTER_LANCZOS4)
         work_started = time.perf_counter()
         with vae_lock():
             latents = vae_local.get_latents_for_unet(resized_crop_frame)
@@ -236,15 +298,34 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
     for i, frame in enumerate(frame_list):
         cv2.imwrite(f"{save_full_path}/{str(i).zfill(8)}.png", frame)
 
-        x1, y1, x2, y2 = coord_list[i]
-        mode = parsing_mode if version == "v15" else "raw"
-        mask, crop_box = get_image_prepare_material(frame, [x1, y1, x2, y2], fp=fp_local, mode=mode)
-        mask = build_landmark_lower_face_mask(
-            mask,
-            [x1, y1, x2, y2],
-            crop_box,
-            landmark_list[i] if i < len(landmark_list) else None,
-        )
+        if alignment_list_cycle is not None:
+            alignment = alignment_list_cycle[i]
+            aligned_frame = warp_to_aligned(frame, alignment)
+            mode = parsing_mode if version == "v15" else "raw"
+            if parsing_mode == 'lower_face':
+                mask = build_mediapipe_mouth_mask(alignment, ALIGNMENT_SIZE, ALIGNMENT_SIZE)
+            else:
+                parsed = np.asarray(fp_local(
+                    Image.fromarray(cv2.cvtColor(aligned_frame, cv2.COLOR_BGR2RGB)),
+                    size=(512, 512),
+                    mode=mode,
+                ))
+                parsed = cv2.resize(parsed, (ALIGNMENT_SIZE, ALIGNMENT_SIZE), interpolation=cv2.INTER_NEAREST)
+                mask = parsed
+            crop_box = [0, 0, ALIGNMENT_SIZE, ALIGNMENT_SIZE]
+        else:
+            x1, y1, x2, y2 = coord_list[i]
+            mode = parsing_mode if version == "v15" else "raw"
+            mask, crop_box = get_image_prepare_material(frame, [x1, y1, x2, y2], fp=fp_local, mode=mode)
+            if parsing_mode == 'lower_face':
+                mask = build_parsed_lower_face_mask(mask)
+            else:
+                mask = build_landmark_lower_face_mask(
+                    mask,
+                    [x1, y1, x2, y2],
+                    crop_box,
+                    landmark_list[i] if i < len(landmark_list) else None,
+                )
         cv2.imwrite(f"{mask_out_path}/{str(i).zfill(8)}.png", mask)
 
         mask_coords_list_cycle += [crop_box]
@@ -259,6 +340,11 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
 
     with open(coords_path, 'wb') as f:
         pickle.dump(coord_list, f)
+    if alignment_list_cycle is not None:
+        with open(alignment_path, 'wb') as f:
+            pickle.dump(alignment_list_cycle, f)
+    elif os.path.isfile(alignment_path):
+        os.remove(alignment_path)
     torch.save(input_latent_list, os.path.join(latents_out_path))
 
     if progress_callback: progress_callback(100)
@@ -278,7 +364,7 @@ if __name__ == '__main__':
     parser.add_argument("--right_cheek_width", type=int, default=90, help="Width of right cheek region")
     parser.add_argument("--bbox_shift", type=int, default=0, help="Bounding box shift value")
     parser.add_argument("--extra_margin", type=int, default=10, help="Extra margin for face cropping")
-    parser.add_argument("--parsing_mode", default='jaw', help="Face blending parsing mode")
+    parser.add_argument("--parsing_mode", default='lower_face', choices=['lower_face', 'mouth', 'jaw', 'raw'], help="Face blending parsing mode")
     args = parser.parse_args()
 
     generate_avatar(

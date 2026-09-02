@@ -317,10 +317,10 @@
               <span class="sec-label">Live monitor · 16:9</span>
               <div class="monitor-state-tag" id="monitor-state-tag">GAMEPLAY_IDLE</div>
               <span class="monitor-clip-name" id="monitor-clip-name">gameplay_idle.mp4</span>
-              <div class="live-video-quality" id="live-video-quality" aria-label="Full HD output preset">
-                <span class="live-video-quality-option active" data-video-quality="fhd" title="Full HD 1920 x 1080 at 30 FPS">FHD · 30</span>
+              <div class="live-video-quality" id="live-video-quality" aria-label="HD output preset">
+                <span class="live-video-quality-option active" data-video-quality="hd" title="HD 1280 x 720 at 30 FPS">HD · 30</span>
               </div>
-              <span class="sr-only" id="live-video-quality-status" role="status" aria-live="polite">Full HD 1920 by 1080 at 30 FPS</span>
+              <span class="sr-only" id="live-video-quality-status" role="status" aria-live="polite">HD 1280 by 720 at 30 FPS</span>
               <div class="talking-live-badge" id="talking-live-badge" title="Live Video Stream Sync">
                 <span class="tl-pulse"></span>
                 <span>Sync</span>
@@ -337,7 +337,7 @@
             <div class="monitor-screen-wrap" id="monitor-screen">
               <video class="monitor-video monitor-video-a standby-layer" id="monitor-video-a" playsinline muted autoplay preload="auto"></video>
               <video class="monitor-video monitor-video-b standby-layer" id="monitor-video-b" playsinline muted autoplay preload="auto"></video>
-              <canvas class="monitor-w2l-canvas" id="monitor-w2l-canvas" width="1920" height="1080"></canvas>
+              <canvas class="monitor-w2l-canvas" id="monitor-w2l-canvas" width="1280" height="720"></canvas>
               <audio id="live-voice-audio" playsinline preload="auto" style="display:none;"></audio>
               
               <div class="monitor-bg" id="monitor-bg">
@@ -908,6 +908,37 @@
           </label>
         </div>
 
+        <div class="form-row">
+          <div class="form-group">
+            <label for="cfg-obs-output-resolution">Output resolution</label>
+            <select class="form-input" id="cfg-obs-output-resolution">
+              <option value="auto" selected>Use current OBS resolution</option>
+              <option value="720">HD · 720p</option>
+              <option value="1080">Full HD · 1080p</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="cfg-obs-output-ratio">Output ratio</label>
+            <select class="form-input" id="cfg-obs-output-ratio">
+              <option value="auto" selected>Use current OBS ratio</option>
+              <option value="16:9">Landscape · 16:9</option>
+              <option value="16:9" selected>Landscape · 16:9</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row obs-custom-output" id="obs-custom-output" hidden>
+          <div class="form-group">
+            <label for="cfg-obs-custom-width">Custom width</label>
+            <input type="number" class="form-input" id="cfg-obs-custom-width" min="320" max="7680" step="2" value="1280" inputmode="numeric" />
+          </div>
+          <div class="form-group">
+            <label for="cfg-obs-custom-height">Custom height</label>
+            <input type="number" class="form-input" id="cfg-obs-custom-height" min="180" max="4320" step="2" value="720" inputmode="numeric" />
+          </div>
+        </div>
+        <div class="settings-note">OBS output is locked to the Monitor's native landscape 16:9 stream. The source is passed through without crop or portrait conversion.</div>
+
         <div class="form-group">
           <label for="cfg-playback-overlap-frames">Monitor Library playback</label>
           <select class="form-input" id="cfg-playback-overlap-frames">
@@ -923,7 +954,8 @@
         <div class="form-group obs-video-preset" id="obs-video-preset" data-state="checking">
           <label>Stream video preset</label>
           <div class="obs-preset-grid">
-            <span><b>Canvas</b> <span id="obs-video-canvas-size">1920 x 1080</span></span>
+            <span><b>Canvas</b> <span id="obs-video-canvas-size">1280 x 720</span></span>
+            <span><b>Ratio</b> <span id="obs-video-canvas-ratio">16:9</span></span>
             <span><b>Frame rate</b> 30 FPS</span>
             <span><b>Source</b> Browser + audio</span>
             <span><b>Loop handoff</b> 2 frames</span>

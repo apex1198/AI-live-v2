@@ -13,7 +13,7 @@ fi
 
 model="${LIVETALKING_MODEL:-musetalk}"
 avatar_id="${LIVETALKING_AVATAR_ID:-}"
-port="${LIVETALKING_PORT:-8011}"
+port="${LIVETALKING_PORT:-2222}"
 max_session="${LIVETALKING_MAX_SESSION:-1}"
 stun_url="${LIVETALKING_STUN_URL:-stun:stun.l.google.com:19302}"
 if [[ ! "$port" =~ ^[0-9]{1,5}$ ]] || (( port < 1 || port > 65535 )); then
@@ -65,11 +65,11 @@ acquire_worker_lock
 trap release_worker_lock EXIT INT TERM
 if [[ "$(uname -s)" == "Darwin" ]]; then
   batch_size="${LIVETALKING_BATCH_SIZE:-4}"
-  fps="${LIVETALKING_FPS:-25}"
+  fps="${LIVETALKING_FPS:-15}"
   output_fps="${LIVETALKING_OUTPUT_FPS:-30}"
 else
   batch_size="${LIVETALKING_BATCH_SIZE:-4}"
-  fps="${LIVETALKING_FPS:-25}"
+  fps="${LIVETALKING_FPS:-15}"
   output_fps="${LIVETALKING_OUTPUT_FPS:-30}"
 fi
 prebuffer_ms="${LIVETALKING_PREBUFFER_MS:-480}"

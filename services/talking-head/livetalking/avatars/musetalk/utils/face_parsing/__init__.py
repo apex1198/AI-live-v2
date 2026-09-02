@@ -93,6 +93,30 @@ class FaceParsing():
             if mode == "neck":
                 parsing[np.isin(parsing, [1, 11, 12, 13, 14])] = 255
                 parsing[np.where(parsing!=255)] = 0
+            elif mode == "mouth":
+                # CelebAMask-HQ labels: 11 upper lip, 12 lower lip, 13 mouth.
+                # This remains aligned on profile faces where a bbox-centered
+                # ellipse drifts onto the cheek.
+                parsing[np.isin(parsing, [11, 12, 13])] = 255
+                parsing[np.where(parsing!=255)] = 0
+            elif mode == "lower_face":
+                # Keep the parsed face surface below the bottom of the nose.
+                # This covers the lower cheeks, mouth, jaw and chin while the
+                # generated patch remains isolated from the eyes and forehead.
+                face_classes = np.isin(parsing, [1, 11, 12, 13])
+                nose_rows = np.flatnonzero(np.any(parsing == 10, axis=1))
+                if nose_rows.size:
+                    lower_face_top = int(nose_rows[-1])
+                else:
+                    face_rows = np.flatnonzero(np.any(face_classes, axis=1))
+                    if face_rows.size:
+                        lower_face_top = int(round(
+                            face_rows[0] + (face_rows[-1] - face_rows[0]) * 0.48
+                        ))
+                    else:
+                        lower_face_top = parsing.shape[0]
+                face_classes[:lower_face_top, :] = False
+                parsing = face_classes.astype(np.uint8) * 255
             elif mode == "jaw":
                 face_region = np.isin(parsing, [1])*255
                 face_region = face_region.astype(np.uint8)

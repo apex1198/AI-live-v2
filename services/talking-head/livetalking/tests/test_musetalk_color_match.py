@@ -3,7 +3,20 @@ import unittest
 import cv2
 import numpy as np
 
-from avatars.musetalk.myutil import build_landmark_lower_face_mask, limit_blend_mask_to_lower_face, match_generated_face_color
+from avatars.musetalk.myutil import (
+    LOWER_FACE_FEATHER_MIN_PX,
+    LOWER_FACE_FEATHER_PX,
+    MOUTH_MASK_EXPAND_PX,
+    MOUTH_MASK_REGION_SCALE,
+    scale_mask_region,
+    build_landmark_lower_face_mask,
+    enhance_lip_detail,
+    build_parsed_lower_face_mask,
+    expand_mask_region,
+    limit_blend_mask_to_lower_face,
+    match_generated_face_color,
+    resolve_lower_face_feather_px,
+)
 
 
 def lab_chroma(image):
@@ -12,6 +25,114 @@ def lab_chroma(image):
 
 
 class MuseTalkColorMatchTestCase(unittest.TestCase):
+    def test_mask_support_can_be_reduced_twenty_percent_without_shifting_center(self):
+        source = np.zeros((100, 120), dtype=np.uint8)
+        source[20:80, 30:90] = 255
+        reduced = scale_mask_region(source, 0.80)
+        ys, xs = np.where(reduced > 0)
+        self.assertEqual(int(xs.max() - xs.min() + 1), 48)
+        self.assertEqual(int(ys.max() - ys.min() + 1), 48)
+        self.assertAlmostEqual(float(xs.mean()), 59.5, delta=0.6)
+        self.assertAlmostEqual(float(ys.mean()), 49.5, delta=0.6)
+
+    def test_lip_detail_enhancement_preserves_pixels_outside_lips(self):
+        face = np.full((64, 64, 3), 150, dtype=np.uint8)
+        face[30:34, 20:44] = 190
+        mask = np.zeros((64, 64), dtype=np.float32)
+        cv2.ellipse(mask, (32, 32), (15, 6), 0, 0, 360, 1.0, -1)
+
+        enhanced = enhance_lip_detail(face, mask)
+        self.assertLessEqual(int(np.abs(enhanced.astype(np.int16) - face.astype(np.int16))[:15].max()), 1)
+        self.assertGreater(int(np.abs(enhanced.astype(np.int16) - face.astype(np.int16))[mask > 0.9].max()), 0)
+
+    def test_parsed_lower_face_mask_keeps_full_under_nose_region(self):
+        parsed = np.zeros((120, 140), dtype=np.uint8)
+        parsed[45:110, 25:115] = 255
+
+        mask = build_parsed_lower_face_mask(parsed).astype(np.float32) / 255.0
+
+        self.assertLess(float(mask[:45].max()), 0.01)
+        self.assertGreater(float(mask[55:100, 35:105].mean()), 0.95)
+        self.assertGreater(np.count_nonzero(mask), 4500)
+        self.assertLess(float(mask[:, :10].max()), 0.01)
+        self.assertLess(float(mask[:, 130:].max()), 0.01)
+
+    def test_face_parsing_lower_face_starts_at_bottom_of_nose(self):
+        import torch
+        from PIL import Image
+
+        from avatars.musetalk.utils.face_parsing import FaceParsing
+
+        labels = np.array([
+            [1, 1, 1, 1],
+            [1, 10, 10, 1],
+            [1, 10, 1, 11],
+            [1, 12, 13, 1],
+        ], dtype=np.int64)
+        logits = torch.full((1, 19, 4, 4), -1.0)
+        for row in range(labels.shape[0]):
+            for column in range(labels.shape[1]):
+                logits[0, labels[row, column], row, column] = 1.0
+
+        parser = FaceParsing.__new__(FaceParsing)
+        parser.preprocess = lambda image: torch.zeros((3, 4, 4), dtype=torch.float32)
+        parser.net = lambda image: (logits,)
+
+        mask = np.asarray(parser(Image.new('RGB', (4, 4)), size=(4, 4), mode='lower_face'))
+
+        np.testing.assert_array_equal(
+            mask,
+            np.array([
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [255, 0, 255, 255],
+                [255, 255, 255, 255],
+            ], dtype=np.uint8),
+        )
+
+    def test_mouth_mask_region_keeps_its_original_size(self):
+        source = np.zeros((100, 120), dtype=np.uint8)
+        source[40:60, 45:75] = 255
+
+        expanded = expand_mask_region(source)
+        y_points, x_points = np.where(expanded > 0)
+
+        self.assertEqual(MOUTH_MASK_REGION_SCALE, 1.0)
+        self.assertEqual(MOUTH_MASK_EXPAND_PX, 0)
+        self.assertEqual(int(x_points.max() - x_points.min() + 1), 30)
+        self.assertEqual(int(y_points.max() - y_points.min() + 1), 20)
+        self.assertAlmostEqual(float(x_points.mean()), 59.5, delta=0.6)
+        self.assertAlmostEqual(float(y_points.mean()), 49.5, delta=0.6)
+
+    def test_face_parsing_mouth_mode_keeps_only_lip_and_mouth_classes(self):
+        import torch
+        from PIL import Image
+
+        from avatars.musetalk.utils.face_parsing import FaceParsing
+
+        labels = np.array([
+            [1, 10, 11],
+            [12, 13, 14],
+        ], dtype=np.int64)
+        logits = torch.full((1, 19, 2, 3), -1.0)
+        for row in range(labels.shape[0]):
+            for column in range(labels.shape[1]):
+                logits[0, labels[row, column], row, column] = 1.0
+
+        parser = FaceParsing.__new__(FaceParsing)
+        parser.preprocess = lambda image: torch.zeros((3, 2, 3), dtype=torch.float32)
+        parser.net = lambda image: (logits,)
+
+        mask = np.asarray(parser(Image.new('RGB', (3, 2)), size=(3, 2), mode='mouth'))
+
+        np.testing.assert_array_equal(
+            mask,
+            np.array([
+                [0, 0, 255],
+                [255, 255, 0],
+            ], dtype=np.uint8),
+        )
+
     def test_reduces_generated_lip_chroma_toward_source(self):
         source = np.full((96, 96, 3), (142, 166, 194), dtype=np.uint8)
         generated = source.copy()
@@ -72,7 +193,7 @@ class MuseTalkColorMatchTestCase(unittest.TestCase):
             float(np.linalg.norm(fresh_second_state['generated_center'] - first_generated_center)),
         )
 
-    def test_blend_mask_is_limited_to_the_mouth_without_landmarks(self):
+    def test_fallback_mask_stays_below_nose_and_around_mouth(self):
         mask = np.ones((120, 120), dtype=np.float32)
         limited = limit_blend_mask_to_lower_face(
             mask,
@@ -80,12 +201,14 @@ class MuseTalkColorMatchTestCase(unittest.TestCase):
             crop_box=[0, 0, 120, 120],
         )
 
-        self.assertLess(float(limited[20:45].max()), 0.05)
-        self.assertGreater(float(limited[72:86, 40:80].mean()), 0.85)
-        self.assertLess(float(limited[95:112, 30:90].mean()), 0.12)
-        self.assertLess(float(limited[55:95, 15:28].mean()), 0.12)
+        self.assertLess(float(limited[20:66].max()), 0.01)
+        self.assertGreater(float(limited[75:89, 42:78].mean()), 0.35)
+        self.assertGreater(float(limited[76:86, 48:72].mean()), 0.65)
+        self.assertLess(float(limited[:, :15].max()), 0.01)
+        self.assertLess(float(limited[:, 106:].max()), 0.01)
+        self.assertLess(float(limited[111:].max()), 0.01)
 
-    def test_landmarks_shape_mask_around_mouth_only(self):
+    def test_landmarks_keep_mask_below_nose_and_follow_mouth(self):
         mask = np.ones((140, 140), dtype=np.float32)
         landmarks = np.zeros((72, 2), dtype=np.float32)
         landmarks[:17] = np.array([
@@ -102,11 +225,68 @@ class MuseTalkColorMatchTestCase(unittest.TestCase):
             landmarks=landmarks,
         )
 
-        self.assertLess(float(limited[20:48].max()), 0.05)
-        self.assertGreater(float(limited[73:86, 48:92].mean()), 0.55)
-        self.assertLess(float(limited[98:120, 38:102].mean()), 0.10)
-        self.assertLess(float(limited[48:62, 35:105].mean()), 0.05)
-        self.assertLess(float(limited[110:130, 5:25].mean()), 0.05)
+        self.assertLess(float(limited[20:66].max()), 0.01)
+        self.assertGreater(float(limited[71:86, 50:90].mean()), 0.80)
+        self.assertGreater(float(limited[82:90, 55:85].mean()), 0.50)
+        self.assertLess(float(limited[:60].max()), 0.01)
+        self.assertLess(float(limited[:, :10].max()), 0.01)
+        self.assertLess(float(limited[:, 130:].max()), 0.01)
+        self.assertLess(float(limited[125:].max()), 0.01)
+
+    def test_lower_face_uses_fixed_five_pixel_inward_feather(self):
+        self.assertEqual(LOWER_FACE_FEATHER_MIN_PX, 5.0)
+        self.assertEqual(LOWER_FACE_FEATHER_PX, 5.0)
+        self.assertEqual(resolve_lower_face_feather_px(40, 40), 5.0)
+        self.assertEqual(resolve_lower_face_feather_px(160, 200), 5.0)
+        self.assertEqual(resolve_lower_face_feather_px(400, 500), 5.0)
+        limited = limit_blend_mask_to_lower_face(
+            np.ones((240, 240), dtype=np.float32),
+            face_box=[40, 20, 200, 220],
+            crop_box=[0, 0, 240, 240],
+        )
+        center_x = 120
+        nonzero_rows = np.flatnonzero(limited[:, center_x] > 0)
+        self.assertGreater(nonzero_rows.size, 30)
+        first = int(nonzero_rows[0])
+        self.assertLess(float(limited[first, center_x]), 0.30)
+        self.assertGreater(float(limited[first + 2, center_x]), 0.50)
+        self.assertGreater(float(limited[first + 4, center_x]), 0.95)
+
+    def test_existing_lip_only_mask_expands_without_reaching_nose_or_face_edges(self):
+        stale_lip_mask = np.zeros((160, 160), dtype=np.float32)
+        cv2.ellipse(stale_lip_mask, (80, 103), (20, 8), 0, 0, 360, 1.0, -1)
+        limited = limit_blend_mask_to_lower_face(
+            stale_lip_mask,
+            face_box=[30, 10, 130, 150],
+            crop_box=[0, 0, 160, 160],
+        )
+        self.assertGreater(float(limited.max()), 0.30)
+        self.assertLess(float(limited[20:88].max()), 0.01)
+        self.assertGreater(float(limited[stale_lip_mask == 0].max(initial=0.0)), 0.30)
+        self.assertLess(float(limited[:, :30].max()), 0.01)
+        self.assertLess(float(limited[:, 130:].max()), 0.01)
+
+    def test_reapplying_the_compatibility_mask_would_mutate_new_masks(self):
+        landmarks = np.zeros((72, 2), dtype=np.float32)
+        mouth_angles = np.linspace(0, 2 * np.pi, 24, endpoint=False)
+        landmarks[-24:, 0] = 120 + np.cos(mouth_angles) * 32
+        landmarks[-24:, 1] = 150 + np.sin(mouth_angles) * 12
+        initial = build_landmark_lower_face_mask(
+            np.ones((240, 240), dtype=np.float32),
+            face_box=[40, 20, 200, 220],
+            crop_box=[0, 0, 240, 240],
+            landmarks=landmarks,
+        )
+        repeated = limit_blend_mask_to_lower_face(
+            initial,
+            face_box=[40, 20, 200, 220],
+            crop_box=[0, 0, 240, 240],
+        )
+
+        self.assertGreater(
+            abs(float(repeated.sum()) - float(initial.sum())),
+            float(initial.sum()) * 0.10,
+        )
 
     def test_matches_lower_face_luminance_and_local_texture(self):
         yy, xx = np.indices((96, 96))

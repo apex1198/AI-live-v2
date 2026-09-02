@@ -22,6 +22,8 @@ export interface OBSBrowserSourceConfig {
   width?: number;
   height?: number;
   fps?: number;
+  /** Explicitly update OBS Video Settings before placing the Browser Source. */
+  applyVideoSettings?: boolean;
 }
 
 export interface OBSMagicConnectResult {
@@ -68,7 +70,7 @@ export interface OBSControllerListeners {
   onLog?: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
 
-const DEFAULT_VIDEO_PRESET = Object.freeze({ width: 1920, height: 1080, fps: 30 });
+const DEFAULT_VIDEO_PRESET = Object.freeze({ width: 1280, height: 720, fps: 30 });
 
 type ClientListeners = {
   onStatusChange: (connected: boolean) => void;
@@ -394,11 +396,37 @@ export class OBSWebSocketClient implements OBSClient {
     await this.connect();
     const sceneName = config.sceneName || await this._currentScene();
     const sourceName = config.sourceName || 'AI IDOL Streamer';
+    // OBS owns the output ratio unless the operator explicitly selected a
+    // resolution and ratio in AI IDOL's OBS settings. Use the base canvas (the scene coordinate
+    // space that is later sent to output) so the browser source fills it at
+    // native resolution. Do not overwrite OBS Video Settings during connect.
+    let videoSettings = await this._obs.call('GetVideoSettings');
+    const streamStatus = await this._obs.call('GetStreamStatus').catch(() => ({ outputActive: false }));
+    const requestedWidth = Math.max(1, Number(config.width || DEFAULT_VIDEO_PRESET.width));
+    const requestedHeight = Math.max(1, Number(config.height || DEFAULT_VIDEO_PRESET.height));
+    const requestedFps = Math.max(1, Number(config.fps || DEFAULT_VIDEO_PRESET.fps));
+    const canApplyVideoSettings = Boolean(config.applyVideoSettings && !streamStatus.outputActive);
+    if (canApplyVideoSettings) {
+      await this._obs.call('SetVideoSettings', {
+        baseWidth: requestedWidth,
+        baseHeight: requestedHeight,
+        outputWidth: requestedWidth,
+        outputHeight: requestedHeight,
+        fpsNumerator: Math.round(requestedFps),
+        fpsDenominator: 1,
+      });
+      videoSettings = await this._obs.call('GetVideoSettings');
+    }
+    const targetWidth = Math.max(1, Number(videoSettings.baseWidth || videoSettings.outputWidth || config.width || DEFAULT_VIDEO_PRESET.width));
+    const targetHeight = Math.max(1, Number(videoSettings.baseHeight || videoSettings.outputHeight || config.height || DEFAULT_VIDEO_PRESET.height));
+    const targetFps = Math.max(1, Number(videoSettings.fpsNumerator) / Math.max(1, Number(videoSettings.fpsDenominator)) || config.fps || DEFAULT_VIDEO_PRESET.fps);
+    const videoSettingsMatch = !config.applyVideoSettings
+      || (targetWidth === requestedWidth && targetHeight === requestedHeight && Math.round(targetFps) === Math.round(requestedFps));
     const sourceSettings = {
       url: config.url,
-      width: config.width || DEFAULT_VIDEO_PRESET.width,
-      height: config.height || DEFAULT_VIDEO_PRESET.height,
-      fps: config.fps || DEFAULT_VIDEO_PRESET.fps,
+      width: targetWidth,
+      height: targetHeight,
+      fps: targetFps,
       reroute_audio: true,
       restart_when_active: true,
       shutdown: false,
@@ -437,29 +465,6 @@ export class OBSWebSocketClient implements OBSClient {
         sceneItemId = item.sceneItemId;
       }
     }
-    const targetWidth = config.width || DEFAULT_VIDEO_PRESET.width;
-    const targetHeight = config.height || DEFAULT_VIDEO_PRESET.height;
-    const targetFps = config.fps || DEFAULT_VIDEO_PRESET.fps;
-    let videoSettings = await this._obs.call('GetVideoSettings');
-    const streamStatus = await this._obs.call('GetStreamStatus').catch(() => ({ outputActive: false }));
-    const matchesPreset = () => Number(videoSettings.baseWidth) === targetWidth
-      && Number(videoSettings.baseHeight) === targetHeight
-      && Number(videoSettings.outputWidth) === targetWidth
-      && Number(videoSettings.outputHeight) === targetHeight
-      && Number(videoSettings.fpsNumerator) / Math.max(1, Number(videoSettings.fpsDenominator)) === targetFps;
-    let presetApplied = false;
-    if (!matchesPreset() && !streamStatus.outputActive) {
-      await this._obs.call('SetVideoSettings', {
-        baseWidth: targetWidth,
-        baseHeight: targetHeight,
-        outputWidth: targetWidth,
-        outputHeight: targetHeight,
-        fpsNumerator: targetFps,
-        fpsDenominator: 1,
-      });
-      videoSettings = await this._obs.call('GetVideoSettings');
-      presetApplied = true;
-    }
     await this._obs.call('SetSceneItemTransform', {
       sceneName,
       sceneItemId,
@@ -467,10 +472,16 @@ export class OBSWebSocketClient implements OBSClient {
         positionX: 0,
         positionY: 0,
         alignment: 5,
-        boundsType: 'OBS_BOUNDS_STRETCH',
+        scaleX: 1,
+        scaleY: 1,
+        // Pass the Monitor frame through unchanged. Do not apply OBS bounds:
+        // bounds transforms can re-fit/crop the Browser Source a second time.
+        cropLeft: 0,
+        cropRight: 0,
+        cropTop: 0,
+        cropBottom: 0,
+        boundsType: 'OBS_BOUNDS_NONE',
         boundsAlignment: 5,
-        boundsWidth: Number(videoSettings.baseWidth || DEFAULT_VIDEO_PRESET.width),
-        boundsHeight: Number(videoSettings.baseHeight || DEFAULT_VIDEO_PRESET.height),
       },
     });
     await this._obs.call('SetInputMute', { inputName: sourceName, inputMuted: false }).catch(() => {});
@@ -490,8 +501,8 @@ export class OBSWebSocketClient implements OBSClient {
         width: targetWidth,
         height: targetHeight,
         fps: targetFps,
-        applied: presetApplied,
-        matches: matchesPreset(),
+        applied: canApplyVideoSettings,
+        matches: videoSettingsMatch,
         streamActive: Boolean(streamStatus.outputActive),
       },
     };

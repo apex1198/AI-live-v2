@@ -21,7 +21,7 @@ def configure_h264_bitrate():
     """Use a stable local WebRTC bitrate for 720p30, with an FHD override."""
     from aiortc.codecs import h264 as h264_codec
 
-    quality = os.getenv("LIVETALKING_VIDEO_QUALITY", "fhd").strip().lower()
+    quality = os.getenv("LIVETALKING_VIDEO_QUALITY", "hd").strip().lower()
     default_target = "6000000" if quality == "fhd" else "4000000"
     default_maximum = "8000000" if quality == "fhd" else "6000000"
     try:

@@ -219,7 +219,7 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8002)
+    parser.add_argument("--port", type=int, default=3333)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
     uvicorn.run(create_app(Engine(args.model, args.data_dir)), host=args.host, port=args.port, log_level="info")

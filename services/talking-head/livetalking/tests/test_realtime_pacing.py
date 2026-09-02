@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import queue
 import threading
 import time
 import unittest
@@ -10,7 +11,7 @@ import numpy as np
 from av import AudioFrame, VideoFrame
 
 from avatars.audio_features.whisper import WhisperASR
-from avatars.base_avatar import BaseAvatar
+from avatars.base_avatar import AudioFrameData, BaseAvatar
 from avatars.musetalk_avatar import MuseReal
 from server.rtc_manager import RTCManager, session_manager
 from server.session_manager import SessionReplacedError
@@ -59,6 +60,65 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
         indices = [MuseReal.map_frame_index(avatar, 5, index) for index in range(10)]
         self.assertEqual(indices, [0, 1, 2, 3, 4, 3, 2, 1, 0, 1])
         self.assertTrue(all(abs(current - previous) <= 1 for previous, current in zip(indices, indices[1:])))
+
+    async def test_musetalk_resolved_index_is_not_resampled_during_paste_back(self):
+        for source_fps in (24, 30):
+            avatar = object.__new__(MuseReal)
+            avatar._avatar_data_lock = threading.RLock()
+            avatar.source_fps = source_fps
+            avatar.opt = SimpleNamespace(fps=15)
+            avatar.frame_list_cycle = [np.full((2, 2, 3), idx, dtype=np.uint8) for idx in range(64)]
+            avatar.coord_list_cycle = [[idx, 0, idx + 1, 1] for idx in range(64)]
+            avatar.mask_list_cycle = [np.full((1, 1), idx, dtype=np.float32) for idx in range(64)]
+            avatar.mask_coords_list_cycle = [[idx, 0, idx + 1, 1] for idx in range(64)]
+            avatar._lip_color_state = {}
+
+            resolved_idx = MuseReal.map_frame_index(avatar, 64, 5)
+            selected = {}
+
+            def capture_blend(image, face, face_box, mask, crop_box, color_state):
+                selected.update(
+                    frame=int(image[0, 0, 0]),
+                    bbox=face_box[0],
+                    mask=int(mask[0, 0]),
+                    crop=crop_box[0],
+                )
+                return image
+
+            with patch('avatars.musetalk_avatar.get_image_blending', side_effect=capture_blend):
+                MuseReal.paste_back_frame(avatar, np.zeros((1, 1, 3), dtype=np.uint8), resolved_idx)
+
+            self.assertEqual(set(selected.values()), {resolved_idx})
+
+    async def test_inference_resolves_batch_indices_once_before_model_execution(self):
+        avatar = object.__new__(BaseAvatar)
+        avatar._flush_epoch = 0
+        avatar.batch_size = 3
+        avatar.audio_frames_per_video = 2
+        avatar.res_frame_queue = queue.Queue()
+        avatar.custom_index = {}
+        avatar.inference_fps = 0.0
+        avatar.asr = SimpleNamespace(feat_queue=queue.Queue(), output_queue=queue.Queue())
+        audio_batch = [np.zeros((50, 384), dtype=np.float32) for _ in range(3)]
+        avatar.asr.feat_queue.put((audio_batch, [2, 2, 2]))
+        for _ in range(6):
+            avatar.asr.output_queue.put(AudioFrameData(np.zeros(320, dtype=np.float32), 0, {}))
+        avatar.get_avatar_length = lambda: 100
+        avatar.map_frame_index = lambda length, index: index * 2
+        captured = {}
+        quit_event = threading.Event()
+
+        def infer_once(index, features, frame_indices):
+            captured['indices'] = list(frame_indices)
+            quit_event.set()
+            return [np.zeros((1, 1, 3), dtype=np.uint8) for _ in frame_indices]
+
+        avatar.inference_batch_for_indices = infer_once
+        BaseAvatar.inference(avatar, quit_event)
+
+        queued_indices = [avatar.res_frame_queue.get_nowait()[2] for _ in range(3)]
+        self.assertEqual(captured['indices'], [0, 2, 4])
+        self.assertEqual(queued_indices, captured['indices'])
 
     async def test_avatar_switch_flushes_old_frames_before_atomic_dataset_swap(self):
         avatar = object.__new__(MuseReal)
@@ -205,9 +265,9 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(player.video._queue.qsize(), 2)
         self.assertEqual(player.audio_packets_per_video, 2)
 
-    async def test_12_5_model_clock_fractionally_paces_30_fps_without_drift(self):
+    async def test_15_fps_model_clock_repeats_each_frame_at_30_fps(self):
         avatar = SimpleNamespace(
-            opt=SimpleNamespace(fps=12.5, output_fps=30),
+            opt=SimpleNamespace(fps=15, output_fps=30),
             batch_size=8,
             dropped_video_frames=0,
             repeated_video_frames=0,
@@ -220,9 +280,9 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
             player.push_video(frame)
             output_counts.append(player.video._queue.qsize() - before)
 
-        self.assertEqual(output_counts, [2, 2, 3, 2, 3])
-        self.assertEqual(player.video._queue.qsize(), 12)
-        self.assertAlmostEqual(5 / 12.5, 12 / 30)
+        self.assertEqual(output_counts, [2, 2, 2, 2, 2])
+        self.assertEqual(player.video._queue.qsize(), 10)
+        self.assertAlmostEqual(5 / 15, 10 / 30)
 
     async def test_player_opens_audio_video_gate_after_shared_prebuffer(self):
         avatar = SimpleNamespace(
@@ -356,23 +416,35 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
         source = inspect.getsource(WhisperASR.run_step)
         self.assertIn("audio_feat_win = [2,3]", source)
 
-    async def test_whisper_12_5_fps_emits_audio_for_every_model_frame(self):
-        # The inference worker consumes batch_size * audio_frames_per_video
-        # packets. This catches the deadlock introduced when model FPS drops
-        # below 25 while ASR still emits the old two-packet batch.
+    async def test_whisper_15_fps_uses_fractional_audio_packet_cadence(self):
         asr = object.__new__(WhisperASR)
         WhisperASR.__init__(
             asr,
-            SimpleNamespace(fps=12.5, batch_size=8, l=0, r=0),
+            SimpleNamespace(fps=15, batch_size=8, l=0, r=0),
             None,
             None,
         )
 
         WhisperASR.run_step(asr)
+        chunks, packet_counts = asr.feat_queue.get_nowait()
 
-        self.assertEqual(asr.audio_frames_per_video, 4)
-        self.assertEqual(asr.output_queue.qsize(), 32)
-        self.assertEqual(len(asr.feat_queue.get_nowait()), 8)
+        self.assertEqual(packet_counts, [3, 3, 4, 3, 3, 4, 3, 3])
+        self.assertEqual(asr.output_queue.qsize(), 26)
+        self.assertEqual(len(chunks), 8)
+
+    async def test_15_fps_audio_packet_cadence_has_no_long_run_drift(self):
+        asr = object.__new__(WhisperASR)
+        WhisperASR.__init__(
+            asr,
+            SimpleNamespace(fps=15, batch_size=8, l=0, r=0),
+            None,
+            None,
+        )
+
+        packet_counts = asr.next_audio_packet_counts(45)
+
+        self.assertEqual(sum(packet_counts), 150)
+        self.assertEqual(set(packet_counts), {3, 4})
 
     async def test_musetalk_realtime_inference_disables_gradients(self):
         self.assertTrue(hasattr(MuseReal.inference_batch, "__wrapped__"))

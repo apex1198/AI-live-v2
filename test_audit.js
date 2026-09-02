@@ -175,7 +175,12 @@ async function runAudit() {
     assert(observedTransition !== null && observedTransition.toState === 'JACKPOT', 'Director triggers transition listener');
     // ── Step 4 Audit: Dialogue Agent & Voice Service ──────────
     console.log('\n▶ Auditing Step 4: Dialogue Agent & Voice Service...');
-    const dialogueAgent = new index_js_5.DialogueAgent();
+    const dialogueAgent = new index_js_5.DialogueAgent({
+        providers: [{
+                name: 'test-ai',
+                async generate() { return 'Pha này thắng lớn rồi, vui quá mọi người ơi!'; },
+            }],
+    });
     const dialogueRes = await dialogueAgent.generateDialogue({
         type: 'director.intent',
         action: 'REACT',
@@ -190,7 +195,10 @@ async function runAudit() {
     assert(!/[\p{Extended_Pictographic}\p{Symbol}]/u.test((0, index_js_5.normalizeVietnameseSpokenText)('Đỉnh quá 🔥')), 'Dialogue output removes icons before TTS');
     const customPersonaAgent = new index_js_5.DialogueAgent({
         persona: { ...dialogueAgent.persona, name: 'Bé Lộc Y Tá' },
-        providers: [new index_js_5.MockDialogueProvider()],
+        providers: [{
+                name: 'test-ai',
+                async generate(_intent, persona) { return `${persona.name} thấy ý tưởng này rất hay nha.`; },
+            }],
     });
     const customPersonaBatch = await customPersonaAgent.generateDialogue({
         type: 'director.intent',
@@ -203,16 +211,33 @@ async function runAudit() {
     });
     assert(customPersonaBatch.text.includes('Bé Lộc Y Tá')
         && !customPersonaBatch.text.includes('Mimi')
-        && customPersonaBatch.estimatedDurationMs >= 8_000
-        && customPersonaBatch.estimatedDurationMs <= 12_000, 'Dialogue fallback keeps the active AI Profile and the 8–12 second budget', customPersonaBatch.text);
+        && customPersonaBatch.text === 'Bé Lộc Y Tá thấy ý tưởng này rất hay nha.'
+        && customPersonaBatch.estimatedDurationMs >= 2_000
+        && customPersonaBatch.estimatedDurationMs <= 12_000, 'Dialogue output keeps the active AI Profile without appending filler', customPersonaBatch.text);
     const batchWordCount = customPersonaBatch.text.split(/\s+/).filter(Boolean).length;
-    assert(batchWordCount >= 28 && batchWordCount <= 40, 'Live chat reply is constrained to the real 8–12 second word budget', `${batchWordCount} words`);
+    assert(batchWordCount < 28, 'Short AI replies remain short instead of being padded to a minimum duration', `${batchWordCount} words`);
     const cleanedReply = (0, index_js_5.constrainLiveReply)('Mình thích ý tưởng đó nha. Bé Lộc Y Tá đã đọc hết các câu hỏi rồi, mọi người cứ nhắn tiếp để không bỏ sót ai.');
-    assert(cleanedReply.startsWith('Mình thích ý tưởng đó nha.')
-        && !/đã đọc hết|không bỏ sót|trả lời lần lượt/i.test(cleanedReply), 'Dialogue post-processing removes fixed meta commentary', cleanedReply);
+    assert(cleanedReply === 'Mình thích ý tưởng đó nha.'
+        && !/đã đọc hết|không bỏ sót|trả lời lần lượt/i.test(cleanedReply), 'Dialogue cleanup removes meta commentary without adding replacement text', cleanedReply);
+    assert(!(0, index_js_5.constrainLiveReply)('Hay đó nha!').includes('Mọi người nghĩ sao')
+        && (0, index_js_5.constrainLiveReply)('Hay đó nha!') === 'Hay đó nha!', 'Dialogue cleanup never appends the legacy mock follow-up');
     const sentenceBoundaryReply = (0, index_js_5.constrainLiveReply)('Mình rất thích ý tưởng này và muốn cùng mọi người thử ngay hôm nay. Phần tiếp theo có rất nhiều chi tiết cần giải thích nên mình sẽ nói thật dài để chắc chắn rằng câu trả lời ban đầu vượt quá giới hạn thời lượng dành cho một clip talking trong phiên live hiện tại.');
     const sentenceBoundaryWordCount = sentenceBoundaryReply.split(/\s+/).filter(Boolean).length;
-    assert(sentenceBoundaryWordCount >= 28 && sentenceBoundaryWordCount <= 40, 'Dialogue sentence-boundary trimming cannot fall below the 8-second floor', `${sentenceBoundaryWordCount} words`);
+    assert(sentenceBoundaryWordCount <= 40, 'Dialogue sentence-boundary trimming enforces only the maximum word budget', `${sentenceBoundaryWordCount} words`);
+    const emptyDialogueAgent = new index_js_5.DialogueAgent({
+        providers: [{ name: 'empty-ai', async generate() { return ' '; } }],
+    });
+    let emptyDialogueRejected = false;
+    try {
+        await emptyDialogueAgent.generateDialogue({
+            type: 'director.intent', action: 'SPEAK', priority: 3, visualState: 'GAMEPLAY_IDLE',
+            intent: 'reply_to_chat_batch', speechText: 'Một câu hỏi', timestamp: Date.now(),
+        });
+    }
+    catch {
+        emptyDialogueRejected = true;
+    }
+    assert(emptyDialogueRejected, 'Empty AI replies are rejected instead of becoming mock TTS');
     let duckingStateObserved = false;
     const voiceService = new index_js_6.VoiceService({
         listeners: {
@@ -247,16 +272,16 @@ async function runAudit() {
     const magicObs = await obsController.magicConnect({
         url: 'http://127.0.0.1:9876/overlay/obs-output.html',
         sourceName: 'AI IDOL Streamer',
-        width: 1920,
-        height: 1080,
+        width: 1280,
+        height: 720,
         fps: 30,
     });
     assert(magicObs.connected
         && magicObs.audioRouted
-        && magicObs.videoPreset.width === 1920
-        && magicObs.videoPreset.height === 1080
+        && magicObs.videoPreset.width === 1280
+        && magicObs.videoPreset.height === 720
         && magicObs.videoPreset.fps === 30
-        && mockObsClient.getState().visibleSources.has('AI IDOL Streamer'), 'OBS Magic Connect provisions one visible Full HD 1080p30 video + voice source');
+        && mockObsClient.getState().visibleSources.has('AI IDOL Streamer'), 'OBS Magic Connect provisions one visible HD 720p30 video + voice source');
     // ── Step 6 Audit: Game Telemetry & Slot Adapter ───────────
     console.log('\n▶ Auditing Phase 4: Game Telemetry & Slot Adapter...');
     const slotSim = new index_js_8.SlotSimulatorEngine({ gameName: 'Fortune Dragon', defaultBet: 10000 });
@@ -874,33 +899,33 @@ async function runAudit() {
             && defaultSettings.persona?.llmModel === 'qwen3:8b', 'AI Director defaults to local Qwen 8B');
         assert(defaultSettings.talkingEngine === undefined
             && defaultSettings.realtimeStatus?.alwaysOn === true
-            && defaultSettings.realtimeStatus?.videoQuality === 'fhd', 'Public settings hide core realtime details and fix live output to Full HD');
+            && defaultSettings.realtimeStatus?.videoQuality === 'hd', 'Public settings hide core realtime details and fix live output to HD 720p');
         const engineHub = await fetch('http://localhost:9876/api/engines').then((response) => response.json());
         assert(engineHub.success === true
             && engineHub.engines?.length === 6
             && engineHub.engines.some((engine) => engine.id === 'qwen-director' && engine.model === 'qwen3:8b')
             && engineHub.engines.some((engine) => engine.id === 'obs-bridge' && engine.metrics?.includes('30 FPS')), 'AI Engine hub reports the complete Qwen, voice, avatar, OBS, and media pipeline');
         workerHealthy = false;
-        const fhdSettingsRes = await fetch('http://localhost:9876/api/settings/live-video', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ quality: 'fhd' }),
-        });
-        const fhdSettings = await fhdSettingsRes.json();
-        const persistedFhdSettings = await fetch('http://localhost:9876/api/settings/all').then((response) => response.json());
-        assert(fhdSettingsRes.status === 200
-            && fhdSettings.preset?.width === 1920
-            && fhdSettings.preset?.height === 1080
-            && fhdSettings.preset?.fps === 30
-            && persistedFhdSettings.realtimeStatus?.videoQuality === 'fhd', 'Live video API persists FHD 1080p30 as one runtime preset');
         const hdSettingsRes = await fetch('http://localhost:9876/api/settings/live-video', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ quality: 'hd' }),
         });
-        await hdSettingsRes.json();
+        const hdSettings = await hdSettingsRes.json();
+        const persistedHdSettings = await fetch('http://localhost:9876/api/settings/all').then((response) => response.json());
+        assert(hdSettingsRes.status === 200
+            && hdSettings.preset?.width === 1280
+            && hdSettings.preset?.height === 720
+            && hdSettings.preset?.fps === 30
+            && persistedHdSettings.realtimeStatus?.videoQuality === 'hd', 'Live video API persists HD 720p30 as one runtime preset');
+        const fhdSettingsRes = await fetch('http://localhost:9876/api/settings/live-video', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ quality: 'fhd' }),
+        });
+        await fhdSettingsRes.json();
         workerHealthy = true;
-        assert(hdSettingsRes.status === 400, 'Live video API rejects the removed HD preset');
+        assert(fhdSettingsRes.status === 400, 'Live video API rejects the removed FHD preset');
         const platformChatStatus = await fetch('http://localhost:9876/api/platform-chat/status').then((response) => response.json());
         assert(platformChatStatus.success === true
             && platformChatStatus.platformChat?.unified === true
@@ -1044,11 +1069,19 @@ async function runAudit() {
                 break;
             await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        assert(server.speechCommandCount === chatSpeechBaseline + 1, 'One chat batch creates exactly one SpeechCommand');
-        assert(chatDialogueProvider === 'qwen' || chatDialogueProvider === 'ttm-chatgpt' || chatDialogueProvider === 'safe-fallback', 'Chat SpeechCommand records a production dialogue provider without mock', chatDialogueProvider);
-        const chatSpeechWordCount = chatSpeechText.split(/\s+/).filter(Boolean).length;
-        assert(chatSpeechWordCount >= 28 && chatSpeechWordCount <= 40, 'Batched chat reply targets an 8–12 second spoken word budget', `${chatSpeechWordCount} words / ${chatSpeechDurationMs}ms fixture audio`);
-        assert(customPersonaSettings.settings?.name === 'Bé Lộc Y Tá' && !/\bMimi\b/i.test(chatSpeechText), 'Runtime chat speech uses the active AI Profile instead of the legacy Mimi batch phrase', chatSpeechText);
+        const generatedChatSpeech = server.speechCommandCount === chatSpeechBaseline + 1;
+        assert(generatedChatSpeech || server.speechCommandCount === chatSpeechBaseline, 'A chat batch creates at most one AI-generated SpeechCommand');
+        if (generatedChatSpeech) {
+            assert(chatDialogueProvider === 'qwen' || chatDialogueProvider === 'ttm-chatgpt', 'Chat SpeechCommand records only a real AI provider', chatDialogueProvider);
+            const chatSpeechWordCount = chatSpeechText.split(/\s+/).filter(Boolean).length;
+            assert(chatSpeechWordCount > 0 && chatSpeechWordCount <= 40, 'Batched AI reply stays within the maximum spoken word budget', `${chatSpeechWordCount} words / ${chatSpeechDurationMs}ms fixture audio`);
+            assert(customPersonaSettings.settings?.name === 'Bé Lộc Y Tá'
+                && !/\bMimi\b/i.test(chatSpeechText)
+                && !/Mọi người nghĩ sao thì kể mình nghe thêm|đã đọc hết|không bỏ sót ai/i.test(chatSpeechText), 'Runtime chat speech contains only the AI reply for the active profile', chatSpeechText);
+        }
+        else {
+            assert(!chatDialogueProvider, 'Unavailable AI providers do not produce fallback TTS');
+        }
         // Establish one runtime-owned Live Monitor before speech. A second
         // Dashboard must remain standby and must never replace the worker session.
         const mediaPrimary = await openRuntimeSocket(9876);
@@ -1372,10 +1405,10 @@ async function runAudit() {
         const faceDetectorSetupSource = fs.readFileSync('./services/talking-head/livetalking/scripts/prefetch_s3fd.py', 'utf8');
         assert(runtimeServerSource.includes("llmProvider: 'ollama'")
             && runtimeServerSource.includes("model: 'qwen3:8b'")
-            && runtimeServerSource.includes('new SafeDialogueProvider()')
+            && !runtimeServerSource.includes('new SafeDialogueProvider()')
             && !runtimeServerSource.includes('new MockDialogueProvider()')
             && dashboardHtml.indexOf('value="ollama"') < dashboardHtml.indexOf('value="ttm-chatgpt"')
-            && dashboardHtml.includes('Qwen 8B - Primary'), 'Production defaults AI Director to Qwen 8B with ChatGPT and safe fallbacks');
+            && dashboardHtml.includes('Qwen 8B - Primary'), 'Production defaults AI Director to Qwen 8B with ChatGPT fallback and no mock dialogue provider');
         assert(runtimeServerSource.includes("!/^mimi$/i.test(this._settings.persona.name)")
             && runtimeServerSource.includes(".replace(/\\bMimi\\b/gi, this._settings.persona.name)"), 'Runtime startup migrates a legacy Mimi system prompt to the active AI Profile name');
         assert(nativeShellSource.includes('"Preparing face detector"')
@@ -1487,14 +1520,14 @@ async function runAudit() {
             && obsOutputHtml.includes("event.track.kind === 'video'")
             && obsControllerSource.includes("boundsType: 'OBS_BOUNDS_STRETCH'"), 'Magic Connect provisions an OBS-only Browser Source and forwards the existing Monitor video + voice stream');
         assert(dashboardHtml.includes('id="live-video-quality"')
-            && dashboardHtml.includes('data-video-quality="fhd"')
-            && !dashboardHtml.includes('data-video-quality="hd"')
-            && dashboardHtml.includes('id="monitor-w2l-canvas" width="1920" height="1080"')
+            && dashboardHtml.includes('data-video-quality="hd"')
+            && !dashboardHtml.includes('data-video-quality="fhd"')
+            && dashboardHtml.includes('id="monitor-w2l-canvas" width="1280" height="720"')
             && dashboardScript.includes("parameters.degradationPreference = 'maintain-framerate'")
-            && dashboardScript.includes('maxBitrate: 8_000_000')
-            && !runtimeServerSource.includes("hd: { width: 1280, height: 720, fps: 30 }")
-            && runtimeServerSource.includes("fhd: { width: 1920, height: 1080, fps: 30 }")
-            && dashboardStyles.includes('.live-video-quality-option.active'), 'Live output stays on one Full HD 1080p30 preset across Monitor, WebRTC, and OBS');
+            && dashboardScript.includes('maxBitrate: 6_000_000')
+            && runtimeServerSource.includes("hd: { width: 1280, height: 720, fps: 30 }")
+            && !runtimeServerSource.includes("fhd: { width: 1920, height: 1080, fps: 30 }")
+            && dashboardStyles.includes('.live-video-quality-option.active'), 'Live output stays on one HD 720p30 preset across Monitor, WebRTC, and OBS');
         assert(dashboardHtml.includes('data-settings-target="engines"')
             && dashboardHtml.includes('data-settings-pane="engines"')
             && !dashboardHtml.includes('data-app-view="engines"')
@@ -1504,9 +1537,9 @@ async function runAudit() {
             && dashboardStyles.includes('.engine-card-grid'), 'Settings includes the runtime AI Engines hub and a responsive two-column card layout');
         assert(dashboardScript.includes('await unlockAudio(true);')
             && runtimeServerSource.includes('await this._waitForReadyLiveTalkingMedia();')
-            && runtimeServerSource.includes("LIVETALKING_FPS: '25'")
-            && liveTalkingLauncherSource.includes('LIVETALKING_FPS:-25')
-            && dashboardHtml.includes('FHD · 30'), 'OBS preflight unlocks audio, waits for ready media, and publishes FHD30 from a 25 FPS model clock');
+            && runtimeServerSource.includes("LIVETALKING_FPS: '15'")
+            && liveTalkingLauncherSource.includes('LIVETALKING_FPS:-15')
+            && dashboardHtml.includes('HD · 30'), 'OBS preflight unlocks audio, waits for ready media, and publishes HD30 from a 15 FPS model clock');
         assert(fs.readFileSync('./services/talking-head/livetalking/requirements.txt', 'utf8').includes('av==15.1.0')
             && fs.readFileSync('./services/talking-head/livetalking/avatars/musetalk/models/vae.py', 'utf8').includes('use_safetensors=False'), 'LiveTalking pins compatible PyAV and loads the available VAE binary without safetensor probing');
         assert(obsControllerSource.includes('private _reconnectDelayMs = 2_000;')

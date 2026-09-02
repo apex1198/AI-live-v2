@@ -143,7 +143,7 @@
       async _connect(endpoint, avatarId) {
         await this._disconnect();
         this.connectionStartedAt = Date.now();
-        this.endpoint = String(endpoint || 'http://localhost:8011').replace(/\/$/, '');
+        this.endpoint = String(endpoint || 'http://localhost:2222').replace(/\/$/, '');
         if (global.location.protocol === 'file:') throw new Error('Open the dashboard through the runtime server');
         const health = await global.LiveTalkingApi.health();
         if (!health.health?.healthy) throw new Error(health.error || 'LiveTalking worker is not ready');

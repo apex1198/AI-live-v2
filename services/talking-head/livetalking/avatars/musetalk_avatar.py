@@ -38,9 +38,15 @@ from threading import Thread, Event
 import torch.multiprocessing as mp
 
 from avatars.musetalk.utils.utils import get_file_type,get_video_fps,datagen
-from avatars.musetalk.myutil import get_image_blending, limit_blend_mask_to_lower_face
+from avatars.musetalk.myutil import (
+    build_mediapipe_mouth_mask,
+    get_image_blending,
+    get_image_blending_perspective,
+    limit_blend_mask_to_lower_face,
+)
 from avatars.musetalk.utils.utils import load_all_model
 from avatars.musetalk.model_resources import bounded_preprocess_size, scale_box, set_shared_vae, vae_lock
+from avatars.musetalk.utils.face_geometry import ALIGNMENT_FORMAT, scale_alignment_for_frame
 from avatars.musetalk.whisper.audio2feature import Audio2Feature
 
 from avatars.audio_features.whisper import WhisperASR
@@ -89,8 +95,28 @@ def load_avatar(avatar_id):
     video_out_path = f"{avatar_path}/vid_output/"
     mask_out_path =f"{avatar_path}/mask"
     mask_coords_path =f"{avatar_path}/mask_coords.pkl"
+    alignment_path = f"{avatar_path}/alignment.pkl"
     avatar_info_path = f"{avatar_path}/avator_info.json"
 
+    avatar_info = {}
+    try:
+        with open(avatar_info_path, 'r', encoding='utf-8') as info_file:
+            avatar_info = json.load(info_file)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    has_compact_landmark_masks = avatar_info.get('mask_format') in {
+        'mouth_landmarks_inward15_v1',
+        'mouth_landmarks_adaptive_inward_v2',
+        'mouth_landmarks_adaptive_inward_expanded130_v3',
+        'mouth_landmarks_expanded130_plus10_feather5_v4',
+        'parsed_lower_face_under_nose_feather5_v5',
+        'parsed_lower_face_under_nose_expand10_feather5_v6',
+        'mediapipe_478_mouth_pad10x8_feather5_v7',
+        'mediapipe_478_lower_face_inset5pct_feather5_v8',
+        'mediapipe_478_lower_face_inset5pct_scale80_feather5_v9',
+        'mediapipe_478_lower_face_mouth_inset20pct_feather5_v10',
+    }
+    uses_current_geometry_mask = avatar_info.get('mask_format') == 'mediapipe_478_lower_face_mouth_inset20pct_feather5_v10'
     input_latent_list_cycle = torch.load(latents_out_path, map_location=device)
     with open(coords_path, 'rb') as f:
         coord_list_cycle = pickle.load(f)
@@ -101,6 +127,34 @@ def load_avatar(avatar_id):
         mask_coords_list_cycle = pickle.load(f)
     input_mask_list = glob.glob(os.path.join(mask_out_path, '*.[jpJP][pnPN]*[gG]'))
     input_mask_list = sorted(input_mask_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
+
+    declared_alignment_format = avatar_info.get("alignment_format")
+    if declared_alignment_format and declared_alignment_format != ALIGNMENT_FORMAT:
+        raise RuntimeError(
+            f"Avatar {avatar_id} declares unsupported alignment format "
+            f"{declared_alignment_format!r}; regenerate it with {ALIGNMENT_FORMAT!r}"
+        )
+
+    alignment_list_cycle = None
+    if declared_alignment_format == ALIGNMENT_FORMAT:
+        if not os.path.isfile(alignment_path):
+            raise RuntimeError(
+                f"Avatar {avatar_id} declares {ALIGNMENT_FORMAT} but alignment.pkl is missing"
+            )
+        try:
+            with open(alignment_path, 'rb') as f:
+                loaded_alignment = pickle.load(f)
+        except (OSError, EOFError, ValueError, pickle.PickleError) as exc:
+            raise RuntimeError(f"Could not read {alignment_path}: {exc}") from exc
+        if not isinstance(loaded_alignment, list) or len(loaded_alignment) != len(input_img_list):
+            raise RuntimeError(
+                f"Avatar {avatar_id} alignment/frame count mismatch: "
+                f"{len(loaded_alignment) if isinstance(loaded_alignment, list) else 'invalid'} "
+                f"vs {len(input_img_list)}"
+            )
+        if any(item is None for item in loaded_alignment):
+            raise RuntimeError(f"Avatar {avatar_id} contains a missing per-frame alignment")
+        alignment_list_cycle = loaded_alignment
 
     first_frame = cv2.imread(input_img_list[0]) if input_img_list else None
     if first_frame is None:
@@ -121,7 +175,20 @@ def load_avatar(avatar_id):
     frame_list_cycle = [load_frame(path) for path in input_img_list]
     if (target_width, target_height) != (source_width, source_height):
         coord_list_cycle = [scale_box(box, scale_x, scale_y) for box in coord_list_cycle]
-        mask_coords_list_cycle = [scale_box(box, scale_x, scale_y) for box in mask_coords_list_cycle]
+        if alignment_list_cycle is not None:
+            alignment_list_cycle = [
+                scale_alignment_for_frame(alignment, scale_x, scale_y)
+                for alignment in alignment_list_cycle
+            ]
+        else:
+            mask_coords_list_cycle = [scale_box(box, scale_x, scale_y) for box in mask_coords_list_cycle]
+
+    # Perspective masks are authored in the fixed 256x256 aligned space.  They
+    # must not inherit source-frame scaling, otherwise the loader stretches the
+    # mask back to 256x256 and changes its physical coverage.
+    if alignment_list_cycle is not None:
+        alignment_size = int(avatar_info.get("alignment_size", 256) or 256)
+        mask_coords_list_cycle = [[0, 0, alignment_size, alignment_size] for _ in input_mask_list]
 
     mask_list_cycle = []
     for index, path in enumerate(input_mask_list):
@@ -133,18 +200,43 @@ def load_avatar(avatar_id):
         mask_height = max(1, y_e - y_s)
         if mask.shape[1] != mask_width or mask.shape[0] != mask_height:
             mask = cv2.resize(mask, (mask_width, mask_height), interpolation=cv2.INTER_LINEAR)
-        mask_list_cycle.append(limit_blend_mask_to_lower_face(
-            mask.astype(np.float32) / 255.0,
-            coord_list_cycle[index],
-            mask_coords_list_cycle[index],
-        ))
+        # Upgrade existing aligned avatars in memory. Their old mask artifacts
+        # used broader support, but the stored 478 landmarks are sufficient to
+        # rebuild the new mouth-relative 20% inset without re-training.
+        if alignment_list_cycle is not None and not uses_current_geometry_mask:
+            normalized_mask = build_mediapipe_mouth_mask(
+                alignment_list_cycle[index], mask_width, mask_height,
+            ).astype(np.float32) / 255.0
+        else:
+            normalized_mask = mask.astype(np.float32) / 255.0
+        if not has_compact_landmark_masks:
+            normalized_mask = limit_blend_mask_to_lower_face(
+                normalized_mask,
+                coord_list_cycle[index],
+                mask_coords_list_cycle[index],
+            )
+        mask_list_cycle.append(normalized_mask)
     source_fps = 25.0
     try:
-        with open(avatar_info_path, 'r', encoding='utf-8') as info_file:
-            source_fps = max(1.0, float(json.load(info_file).get('source_fps', source_fps)))
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        source_fps = max(1.0, float(avatar_info.get('source_fps', source_fps)))
+    except (TypeError, ValueError):
         pass
-    return frame_list_cycle,mask_list_cycle,coord_list_cycle,mask_coords_list_cycle,input_latent_list_cycle,source_fps
+    return (
+        frame_list_cycle,
+        mask_list_cycle,
+        coord_list_cycle,
+        mask_coords_list_cycle,
+        input_latent_list_cycle,
+        source_fps,
+        alignment_list_cycle,
+    )
+
+
+def _unpack_avatar_data(avatar):
+    """Accept legacy six-item avatar payloads while loading aligned avatars."""
+    if len(avatar) >= 7:
+        return avatar[:7]
+    return (*avatar[:6], None)
 
 @torch.no_grad()
 def warm_up(batch_size,model):
@@ -177,7 +269,15 @@ class MuseReal(BaseAvatar):
 
         self.vae, self.unet, self.pe, self.timesteps, self.audio_processor = model
 
-        self.frame_list_cycle,self.mask_list_cycle,self.coord_list_cycle,self.mask_coords_list_cycle, self.input_latent_list_cycle,self.source_fps = avatar
+        (
+            self.frame_list_cycle,
+            self.mask_list_cycle,
+            self.coord_list_cycle,
+            self.mask_coords_list_cycle,
+            self.input_latent_list_cycle,
+            self.source_fps,
+            self.alignment_list_cycle,
+        ) = _unpack_avatar_data(avatar)
         self._avatar_data_lock = threading.RLock()
         self._lip_color_state = {}
 
@@ -200,7 +300,7 @@ class MuseReal(BaseAvatar):
     def get_idle_frame(self, idx):
         with self._avatar_data_lock:
             length = max(1, len(self.frame_list_cycle))
-            safe_idx = loop_safe_frame_index(length, idx, self.source_fps, self.opt.fps)
+            safe_idx = int(idx) % length
             return self.frame_list_cycle[safe_idx]
 
     def switch_avatar(self, avatar_id, avatar):
@@ -216,7 +316,8 @@ class MuseReal(BaseAvatar):
                 self.mask_coords_list_cycle,
                 self.input_latent_list_cycle,
                 self.source_fps,
-            ) = avatar
+                self.alignment_list_cycle,
+            ) = _unpack_avatar_data(avatar)
             self.opt.avatar_id = avatar_id
             self.current_frame_index = 0
             self._lip_color_state = {}
@@ -224,18 +325,21 @@ class MuseReal(BaseAvatar):
 
     @torch.no_grad()
     def inference_batch(self, index, audiofeat_batch):
-        # 这里的 index 是针对当前 avatar 的索引
-        # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
+        with self._avatar_data_lock:
+            length = max(1, len(self.input_latent_list_cycle))
+        frame_indices = [self.map_frame_index(length, index + i) for i in range(self.batch_size)]
+        return self.inference_batch_for_indices(index, audiofeat_batch, frame_indices)
+
+    @torch.no_grad()
+    def inference_batch_for_indices(self, index, audiofeat_batch, frame_indices):
+        # frame_indices is the single source of truth for latent, source frame,
+        # bbox and mask selection throughout this batch.
         with self._avatar_data_lock:
             latent_cycle = self.input_latent_list_cycle
-            source_fps = self.source_fps
-        length = len(latent_cycle)
+            length = max(1, len(latent_cycle))
+            resolved_indices = [int(idx) % length for idx in frame_indices]
         whisper_batch = np.stack(audiofeat_batch)
-        latent_batch = []
-        for i in range(self.batch_size):
-            idx = loop_safe_frame_index(length, index + i, source_fps, self.opt.fps)
-            latent = latent_cycle[idx]
-            latent_batch.append(latent)
+        latent_batch = [latent_cycle[idx] for idx in resolved_indices]
         latent_batch = torch.cat(latent_batch, dim=0)
         
         audio_feature_batch = torch.from_numpy(whisper_batch)
@@ -254,13 +358,23 @@ class MuseReal(BaseAvatar):
     def paste_back_frame(self,pred_frame,idx:int):
         with self._avatar_data_lock:
             length = max(1, len(self.frame_list_cycle))
-            safe_idx = loop_safe_frame_index(length, idx, self.source_fps, self.opt.fps)
+            safe_idx = int(idx) % length
             bbox = self.coord_list_cycle[safe_idx]
             ori_frame = self.frame_list_cycle[safe_idx].copy()
             mask = self.mask_list_cycle[safe_idx]
             mask_crop_box = self.mask_coords_list_cycle[safe_idx]
             color_state = self._lip_color_state
+            alignment_list = getattr(self, "alignment_list_cycle", None)
         x1, y1, x2, y2 = bbox
+
+        if alignment_list is not None and alignment_list[safe_idx] is not None:
+            return get_image_blending_perspective(
+                ori_frame,
+                pred_frame.astype(np.uint8),
+                mask,
+                alignment_list[safe_idx],
+                color_state,
+            )
 
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
 

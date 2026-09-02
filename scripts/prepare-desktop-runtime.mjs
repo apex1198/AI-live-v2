@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +23,7 @@ const dashboardRoot = path.join(bundleRoot, 'operator-dashboard');
 const qwenTtsRoot = path.join(bundleRoot, 'qwen-tts');
 const engineRoot = path.join(bundleRoot, 'engine');
 const binRoot = path.join(bundleRoot, 'bin');
+const require = createRequire(import.meta.url);
 
 rmSync(bundleRoot, { recursive: true, force: true });
 mkdirSync(path.join(backendRoot, 'node_modules'), { recursive: true });
@@ -132,6 +134,18 @@ mkdirSync(binRoot, { recursive: true });
 const bundledNode = path.join(binRoot, process.platform === 'win32' ? 'node.exe' : 'node');
 cpSync(process.execPath, bundledNode);
 if (process.platform !== 'win32') chmodSync(bundledNode, 0o755);
+const ffmpegPath = require('ffmpeg-static');
+const ffprobePath = require('ffprobe-static').path;
+if (!ffmpegPath || !existsSync(ffmpegPath)) throw new Error('ffmpeg-static binary is missing; run pnpm install with build scripts enabled');
+if (!ffprobePath || !existsSync(ffprobePath)) throw new Error('ffprobe-static binary is missing');
+for (const [source, name] of [
+  [ffmpegPath, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'],
+  [ffprobePath, process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'],
+]) {
+  const target = path.join(binRoot, name);
+  cpSync(source, target);
+  if (process.platform !== 'win32') chmodSync(target, 0o755);
+}
 
 function collectFiles(directory, files = []) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {

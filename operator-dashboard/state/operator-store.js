@@ -9,6 +9,10 @@
       isMuted: false,
       currentState: 'GAMEPLAY_IDLE',
       currentClip: null,
+      // The idle clip keeps playing behind the live talking canvas. Preserve
+      // it so a completed voice line reveals the same in-progress frame rather
+      // than cutting back to the beginning of a new idle clip.
+      resumeIdleClipAfterTalking: null,
       clipStartedAt: null,
       clipElapsedMs: 0,
       isAiSpeaking: false,
@@ -37,7 +41,7 @@
       },
       talkingEngine: {
         provider: 'livetalking',
-        endpoint: storage.getItem(storageKeys.LIVETALKING_ENDPOINT) || 'http://localhost:8011',
+        endpoint: storage.getItem(storageKeys.LIVETALKING_ENDPOINT) || 'http://localhost:2222',
         model: storage.getItem(storageKeys.LIVETALKING_MODEL) || 'musetalk',
         checkpoint: storage.getItem(storageKeys.W2L_CHECKPOINT) || 'wav2lip',
         detector: storage.getItem(storageKeys.W2L_DETECTOR) || 'mediapipe',

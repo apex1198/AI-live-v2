@@ -61,7 +61,7 @@ export declare class DirectorAgent {
     injectDonation(event: DonationEvent): void;
     injectOperatorCommand(cmd: OperatorCommand): void;
     handleOperatorCommand(cmd: OperatorCommand): void;
-    forceState(targetState: VisualState, reason?: string): void;
+    forceState(targetState: VisualState, reason?: string, clipOverride?: AssetMetadata): void;
     tick(now?: number): DirectorIntent | null;
     private _processBusEvent;
     private _handleGameEvent;

@@ -38,6 +38,7 @@ class BaseASR:
         # Keep the value local to ASR so every feature extractor emits exactly
         # the number of audio frames the avatar inference loop consumes.
         self.audio_frames_per_video = max(1, int(round(50.0 / self.fps)))
+        self._audio_packet_cursor = 0
         self.queue:Queue[AudioFrameData] = Queue()
         self.output_queue:Queue[AudioFrameData] = Queue()
 
@@ -59,6 +60,17 @@ class BaseASR:
                 except queue.Empty:
                     break
         self.frames.clear()
+        self._audio_packet_cursor = 0
+
+    def next_audio_packet_counts(self, frame_count):
+        """Map model frames to the fixed 50 Hz audio clock without drift."""
+        counts = []
+        for _ in range(max(0, int(frame_count))):
+            start = int(np.floor(self._audio_packet_cursor * 50.0 / self.fps + 1e-9))
+            self._audio_packet_cursor += 1
+            end = int(np.floor(self._audio_packet_cursor * 50.0 / self.fps + 1e-9))
+            counts.append(max(1, end - start))
+        return counts
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
         self.queue.put(AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))

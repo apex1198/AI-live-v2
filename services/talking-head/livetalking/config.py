@@ -48,7 +48,7 @@ def parse_args():
                         help='YAML 配置文件路径（设为空字符串可跳过）')
 
     # ─── 音频 ──────────────────────────────────────────────────────────
-    parser.add_argument('--fps', type=float, default=25.0,
+    parser.add_argument('--fps', type=float, default=15.0,
                         help="MuseTalk model generation FPS")
     parser.add_argument('--output_fps', type=int, default=30,
                         help="WebRTC output FPS")
@@ -122,10 +122,9 @@ def parse_args():
         with open(opt.customvideo_config, 'r') as f:
             opt.customopt = json.load(f)
 
-    # Keep the model and transport clocks compatible across native and worker
-    # launches. MuseTalk renders at its native 25 FPS cadence while WebRTC
-    # publishes a stable 30 FPS stream for OBS.
-    opt.fps = 25.0
+    # MuseTalk infers 15 unique frames per second. WebRTC repeats them on a
+    # stable 30 FPS transport clock for smooth OBS playback.
+    opt.fps = 15.0
     opt.output_fps = 30
 
     return opt

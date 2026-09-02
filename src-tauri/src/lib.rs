@@ -15,8 +15,10 @@ use tauri::{AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilde
 
 const SANDBOX_VERSION: &str = "1";
 const ENGINE_LOCK_ADDRESS: &str = "127.0.0.1:18760";
-const RUNTIME_ADDRESS: &str = "127.0.0.1:18765";
-const STUDIO_URL: &str = "http://127.0.0.1:18765/#studio";
+const RUNTIME_ADDRESS: &str = "127.0.0.1:11111";
+const LIVETALKING_ADDRESS: &str = "127.0.0.1:2222";
+const QWEN_TTS_ADDRESS: &str = "127.0.0.1:3333";
+const STUDIO_URL: &str = "http://127.0.0.1:11111/#studio";
 const UI_SCALE: f64 = 0.8;
 // Desktop OAuth client IDs are public identifiers. The client secret is supplied
 // from the ignored .env file at build time and embedded only in the app binary.
@@ -116,9 +118,14 @@ fn runtime_build_id(backend: &Path) -> Result<String, String> {
 }
 
 #[cfg(unix)]
-fn terminate_runtime_port_owner() -> Result<(), String> {
+fn terminate_port_owners(address: &str, service_name: &str) -> Result<(), String> {
+    let port = address
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("Invalid {service_name} address {address}: {error}"))?
+        .port()
+        .to_string();
     let output = Command::new("lsof")
-        .args(["-nP", "-tiTCP:18765", "-sTCP:LISTEN"])
+        .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
         .output()
         .map_err(|error| error.to_string())?;
     let current_pid = std::process::id();
@@ -128,35 +135,48 @@ fn terminate_runtime_port_owner() -> Result<(), String> {
         .filter(|pid| *pid != current_pid)
         .collect();
     if pids.is_empty() {
-        return Err("Could not identify the previous AI runtime process".into());
+        return Ok(());
     }
-    for pid in pids {
+    for pid in &pids {
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .status();
     }
     for _ in 0..50 {
-        if !port_ready(RUNTIME_ADDRESS) {
+        if !port_ready(address) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("The previous AI runtime did not release port 18765".into())
+    for pid in pids {
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+    for _ in 0..20 {
+        if !port_ready(address) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "Previous {service_name} instance did not release {address}"
+    ))
 }
 
 #[cfg(target_os = "windows")]
-fn terminate_runtime_port_owner() -> Result<(), String> {
+fn terminate_port_owners(address: &str, service_name: &str) -> Result<(), String> {
     let output = Command::new("netstat")
         .args(["-ano", "-p", "tcp"])
         .output()
         .map_err(|error| error.to_string())?;
     let pids: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|line| line.contains("127.0.0.1:18765") && line.contains("LISTENING"))
+        .filter(|line| line.contains(address) && line.contains("LISTENING"))
         .filter_map(|line| line.split_whitespace().last().map(str::to_owned))
         .collect();
     if pids.is_empty() {
-        return Err("Could not identify the previous AI runtime process".into());
+        return Ok(());
     }
     for pid in pids {
         let _ = Command::new("taskkill")
@@ -164,12 +184,20 @@ fn terminate_runtime_port_owner() -> Result<(), String> {
             .status();
     }
     for _ in 0..50 {
-        if !port_ready(RUNTIME_ADDRESS) {
+        if !port_ready(address) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("The previous AI runtime did not release port 18765".into())
+    Err(format!(
+        "Previous {service_name} instance did not release {address}"
+    ))
+}
+
+fn terminate_worker_instances() -> Result<(), String> {
+    terminate_port_owners(LIVETALKING_ADDRESS, "LiveTalking worker")?;
+    terminate_port_owners(QWEN_TTS_ADDRESS, "Qwen TTS worker")?;
+    Ok(())
 }
 
 fn source_workspace_root() -> PathBuf {
@@ -464,7 +492,9 @@ fn perform_magic_setup(app: &AppHandle, state: &MagicSetupState) -> Result<Sandb
     let qwen_model = paths.qwen_runtime.join(qwen_model_name);
     if !qwen_model.join("config.json").is_file() {
         copy_tree(
-            &workspace.join("runtime-data/qwen-tts").join(qwen_model_name),
+            &workspace
+                .join("runtime-data/qwen-tts")
+                .join(qwen_model_name),
             &qwen_model,
             false,
         )?;
@@ -546,6 +576,16 @@ fn perform_magic_setup(app: &AppHandle, state: &MagicSetupState) -> Result<Sandb
     for required in [
         paths.runtime.join("backend/dist/index.js"),
         paths.runtime.join("operator-dashboard/index.html"),
+        paths.runtime.join(if cfg!(target_os = "windows") {
+            "bin/ffmpeg.exe"
+        } else {
+            "bin/ffmpeg"
+        }),
+        paths.runtime.join(if cfg!(target_os = "windows") {
+            "bin/ffprobe.exe"
+        } else {
+            "bin/ffprobe"
+        }),
         live_root.join("models/musetalkV15/unet.pth"),
         face_detector,
         qwen_model.join("config.json"),
@@ -576,7 +616,7 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
     if port_ready(RUNTIME_ADDRESS) {
         let (healthy, _running_build_id, is_idol_runtime) = runtime_service_probe();
         if healthy && is_idol_runtime {
-            terminate_runtime_port_owner()?;
+            terminate_port_owners(RUNTIME_ADDRESS, "AI runtime")?;
             for _ in 0..50 {
                 if !port_ready(ENGINE_LOCK_ADDRESS) {
                     break;
@@ -584,7 +624,9 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
                 thread::sleep(Duration::from_millis(100));
             }
             if port_ready(ENGINE_LOCK_ADDRESS) {
-                return Err("The previous AI runtime did not release the exclusive engine lock".into());
+                return Err(
+                    "The previous AI runtime did not release the exclusive engine lock".into(),
+                );
             }
         } else {
             return Err(format!(
@@ -592,6 +634,7 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
             ));
         }
     }
+    terminate_worker_instances()?;
     let dashboard = paths.runtime.join("operator-dashboard");
     #[cfg(target_os = "windows")]
     let node = paths.runtime.join("bin/node.exe");
@@ -609,7 +652,23 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
         .env("AI_IDOL_PROJECTS_ROOT", &paths.projects)
         .env("AI_IDOL_DASHBOARD_DIR", dashboard)
         .env("RUNTIME_DB_PATH", paths.data.join("runtime.sqlite"))
-        .env("PORT", "18765")
+        .env(
+            "FFMPEG_PATH",
+            paths.runtime.join(if cfg!(target_os = "windows") {
+                "bin/ffmpeg.exe"
+            } else {
+                "bin/ffmpeg"
+            }),
+        )
+        .env(
+            "FFPROBE_PATH",
+            paths.runtime.join(if cfg!(target_os = "windows") {
+                "bin/ffprobe.exe"
+            } else {
+                "bin/ffprobe"
+            }),
+        )
+        .env("PORT", "11111")
         .env(
             "GOOGLE_OAUTH_CLIENT_ID",
             std::env::var("GOOGLE_OAUTH_CLIENT_ID")
@@ -633,12 +692,12 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
         )
         .env(
             "CORS_ALLOWED_ORIGINS",
-            "http://127.0.0.1:18765,http://localhost:18765",
+            "http://127.0.0.1:11111,http://localhost:11111",
         )
-        .env("QWEN_TTS_ENDPOINT", "http://127.0.0.1:18002")
+        .env("QWEN_TTS_ENDPOINT", "http://127.0.0.1:3333")
         .env("QWEN_TTS_RUNTIME_DIR", &paths.qwen_runtime)
-        .env("LIVETALKING_ENDPOINT", "http://127.0.0.1:18011")
-        .env("LIVETALKING_PORT", "18011")
+        .env("LIVETALKING_ENDPOINT", "http://127.0.0.1:2222")
+        .env("LIVETALKING_PORT", "2222")
         .env("HF_HOME", paths.cache.join("huggingface"))
         .env("TORCH_HOME", paths.cache.join("torch"))
         .env("XDG_CACHE_HOME", &paths.cache)

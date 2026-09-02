@@ -264,10 +264,13 @@ export class DirectorAgent {
     }
   }
 
-  forceState(targetState: VisualState, reason: string = 'Forced'): void {
+  forceState(targetState: VisualState, reason: string = 'Forced', clipOverride?: AssetMetadata): void {
     const prevState = this._stateMachine.current;
     this._stateMachine.forceTransition(targetState, reason);
-    const clip = this._assetRouter.selectClip(targetState);
+    // A live talking segment temporarily covers the idle layer. Reusing that
+    // same idle asset on exit preserves its existing media playhead instead of
+    // restarting a different clip and producing a visible hard cut.
+    const clip = clipOverride ?? this._assetRouter.selectClip(targetState);
 
     this._state.currentVisual = targetState;
     this._state.currentClip = clip;

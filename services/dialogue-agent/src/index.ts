@@ -2,7 +2,7 @@
  * @idol/dialogue-agent
  *
  * Natural Language Dialogue Generator for Hybrid AI Idol.
- * Supports OpenAI GPT, Google Gemini, and Curated Offline Templates.
+ * Supports local Qwen and OpenAI-compatible dialogue providers.
  */
 
 import type { DirectorIntent, Emotion } from '@idol/event-schema';
@@ -44,85 +44,6 @@ export interface DialogueProvider {
   generate(intent: DirectorIntent, persona: CharacterPersona): Promise<string>;
 }
 
-// ─────────────────────────────────────────────────────────
-// Curated Instant Dialogue Templates (Zero-latency fallback)
-// ─────────────────────────────────────────────────────────
-
-const CURATED_LINES: Record<string, string[]> = {
-  celebrate_big_win: [
-    'Trời ơi, trúng lớn thật rồi mọi người ơi! Đã quá đi mất!',
-    'Pha này nổ to đỉnh chóp luôn! Mimi bảo rồi mà không ai tin!',
-    'Úi giồi ôi, thắng đậm rồi cả nhà ơi, lộc tới lộc tới!',
-  ],
-  react_small_win: [
-    'Có thêm điểm rồi nè, tích tiểu thành đại nha!',
-    'Khởi sắc rồi đó, trận này tự tin lên nhé cả nhà!',
-  ],
-  react_loss: [
-    'Hơi xui một chút thôi, ván sau Mimi gỡ lại liền!',
-    'Suýt chút nữa là ăn rồi, không sao ván sau làm lại nha!',
-  ],
-  console_loss: [
-    'Tiếc quá đi, suýt chút nữa là ăn trọn rồi!',
-    'Không sao, ván sau mình gỡ lại nha!',
-  ],
-  near_miss_tease: [
-    'Úi xém chút nữa là nổ hũ rồi, hồi hộp muốn rớt tim luôn!',
-    'Trời ơi cách có một ô thôi! Ván sau chắc chắn nổ nha!',
-  ],
-  thank_super_chat: [
-    'Cảm ơn bạn rất nhiều vì món quà siêu to nha!',
-    'Cảm ơn bạn đã donate ủng hộ Mimi nè!',
-  ],
-  thank_donor: [
-    'Cảm ơn bạn đã gửi quà tặng cho Mimi nha!',
-    'Mimi nhận được quà rồi nè, cảm ơn bạn nhiều lắm!',
-  ],
-  thank_donation: [
-    'Cảm ơn món quà siêu đáng yêu của bạn nha!',
-    'Mimi cảm ơn bạn rất nhiều vì đã ủng hộ buổi live!',
-  ],
-  invite_to_play: [
-    'Cả nhà vào link bên dưới chơi cùng Mimi nha!',
-    'Game đang vào cầu may mắn nè, mọi người cùng vào chơi chung nhé!',
-  ],
-  goal_invite_play: [
-    'Mọi người vào game chơi chung với Mimi cho vui nè!',
-    'Bấm link vào phòng chơi cùng Mimi một ván nha!',
-  ],
-  goal_follow: [
-    'Cả nhà đừng quên bấm follow và thả tim cho Mimi nhé!',
-    'Thả cho Mimi một tim để lấy may mắn trúng hũ nào!',
-  ],
-  goal_explain_game: [
-    'Game này luật chơi đơn giản lắm, để Mimi chỉ cho nha!',
-  ],
-  goal_ask_chat_question: [
-    'Mọi người đang xem live ở đâu, điểm danh với Mimi nha!',
-    'Dự đoán ván này Mimi thắng hay thua nào mọi người ơi?',
-  ],
-  goal_cta: [
-    'Quà tân thủ đang mở, mọi người nhấp link dưới để nhận nhé!',
-    'Đừng bỏ lỡ sự kiện hôm nay, vào link trên màn hình để tham gia nha!',
-  ],
-  cta_soft: [
-    'Mọi người nhớ bấm follow và thả tim cho Mimi nhé!',
-    'Thả tim rực rỡ màn hình để lấy may mắn cùng Mimi nào!',
-  ],
-  cta_hard: [
-    'Đừng bỏ lỡ sự kiện hôm nay nha, vào link trên màn hình để tham gia nhé!',
-  ],
-  reply_to_chat: [
-    'Mimi thấy bình luận của bạn rồi nha, chuẩn luôn đó!',
-    'Cảm ơn bạn đã trò chuyện cùng Mimi nè!',
-    'Câu hỏi hay quá, Mimi đồng ý luôn!',
-  ],
-  default: [
-    'Chào mừng mọi người đến với livestream của Mimi nha!',
-    'Ván này đang rất kịch tính, cùng theo dõi với Mimi nhé!',
-  ],
-};
-
 function personalizePersonaName(text: string, persona: CharacterPersona): string {
   const personaName = persona.name.trim() || DEFAULT_IDOL_PERSONA.name;
   return text.replace(/\bMimi\b/gi, personaName);
@@ -161,14 +82,9 @@ export function normalizeVietnameseSpokenText(input: string): string {
 }
 
 const LIVE_REPLY_MAX_WORDS = 40;
-const LIVE_REPLY_MIN_WORDS = 28;
 const LIVE_REPLY_META_SENTENCE = /[^.!?]*(?:đã đọc hết\s+(?:các\s+)?(?:câu hỏi|bình luận)|sẽ lần lượt trả lời|không bỏ sót ai)[^.!?]*[.!?]?/giu;
-const LIVE_REPLY_FOLLOW_UPS = [
-  'Mọi người nghĩ sao thì kể mình nghe thêm nha, mình muốn nghe ý kiến của cả nhà lắm đó.',
-  'Cả nhà chia sẻ thêm với mình nha, nói chuyện cùng mọi người như vậy vui lắm luôn.',
-];
 
-function trimToWordBudget(input: string, maxWords = LIVE_REPLY_MAX_WORDS, minWords = 0): string {
+function trimToWordBudget(input: string, maxWords = LIVE_REPLY_MAX_WORDS): string {
   const words = input.split(/\s+/).filter(Boolean);
   if (words.length <= maxWords) return input.trim();
 
@@ -181,65 +97,14 @@ function trimToWordBudget(input: string, maxWords = LIVE_REPLY_MAX_WORDS, minWor
     kept.push(sentence);
     usedWords += sentenceWords;
   }
-  if (kept.length && usedWords >= minWords) return kept.join(' ');
+  if (kept.length) return kept.join(' ');
   return `${words.slice(0, maxWords).join(' ').replace(/[,.!?;:]+$/, '')}.`;
 }
 
-/** Keeps live replies conversational and within the 8–12 second speaking budget. */
+/** Removes non-spoken metadata and caps length without inventing extra dialogue. */
 export function constrainLiveReply(input: string): string {
   const withoutMeta = input.replace(LIVE_REPLY_META_SENTENCE, ' ').replace(/\s+/g, ' ').trim();
-  let expanded = withoutMeta || LIVE_REPLY_FOLLOW_UPS[0]!;
-  for (const followUp of LIVE_REPLY_FOLLOW_UPS) {
-    if (expanded.split(/\s+/).filter(Boolean).length >= LIVE_REPLY_MIN_WORDS) break;
-    expanded = `${expanded.replace(/[.!?]+$/, '')}. ${followUp}`.trim();
-  }
-  return trimToWordBudget(expanded, LIVE_REPLY_MAX_WORDS, LIVE_REPLY_MIN_WORDS);
-}
-
-// ─────────────────────────────────────────────────────────
-// Mock / Offline Provider
-// ─────────────────────────────────────────────────────────
-
-export class MockDialogueProvider implements DialogueProvider {
-  readonly name = 'mock-fallback';
-
-  async generate(intent: DirectorIntent, persona: CharacterPersona): Promise<string> {
-    if (intent.intent === 'reply_to_chat_batch' && intent.speechText) {
-      const entries = intent.speechText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-      if (entries.length) {
-        return entries.map((entry, index) => index === 0
-          ? `${persona.name} thấy ${entry} rồi nha.`
-          : `Còn ${entry} thì ${persona.name} trả lời là mình cùng theo dõi tiếp nha.`).join(' ');
-      }
-    }
-    if (intent.speechText && !intent.speechText.startsWith('[')) {
-      return personalizePersonaName(intent.speechText, persona);
-    }
-
-    const key = intent.intent ?? 'default';
-    const lines = CURATED_LINES[key] ?? CURATED_LINES['default']!;
-    const randomIndex = Math.floor(Math.random() * lines.length);
-    return personalizePersonaName(lines[randomIndex] ?? lines[0]!, persona);
-  }
-}
-
-/** Last-resort production dialogue that never reads raw chat metadata aloud. */
-export class SafeDialogueProvider implements DialogueProvider {
-  readonly name = 'safe-fallback';
-
-  async generate(intent: DirectorIntent, persona: CharacterPersona): Promise<string> {
-    if (intent.intent === 'reply_to_chat_batch') {
-      const lines = [
-        'Đúng rồi đó, nói chuyện với mọi người vui ghê luôn nha!',
-        'Câu này thú vị nè, cả nhà mình cùng trò chuyện tiếp nha!',
-        'Ừ ha, mình cũng đang nghĩ giống vậy đó, dễ thương ghê!',
-      ];
-      return personalizePersonaName(lines[Math.floor(Math.random() * lines.length)]!, persona);
-    }
-    const key = intent.intent ?? 'default';
-    const lines = CURATED_LINES[key] ?? CURATED_LINES['default']!;
-    return personalizePersonaName(lines[Math.floor(Math.random() * lines.length)] ?? lines[0]!, persona);
-  }
+  return trimToWordBudget(withoutMeta, LIVE_REPLY_MAX_WORDS);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -285,7 +150,7 @@ export class OpenAIDialogueProvider implements DialogueProvider {
           messages: [
             {
               role: 'system',
-              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. Tính cách: ${persona.personality}. ${intent.intent === 'reply_to_chat_batch' ? 'Trả lời trực tiếp tối đa hai bình luận trong một đoạn nói tự nhiên từ 28 đến 40 từ, tương đương 8 đến 12 giây. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Bắt buộc trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Có biểu cảm phù hợp. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
+              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. Tính cách: ${persona.personality}. ${intent.intent === 'reply_to_chat_batch' ? 'Trả lời trực tiếp tối đa hai bình luận bằng 1 đến 2 câu nói tự nhiên, không quá 40 từ. Câu trả lời ngắn thì giữ nguyên, không thêm câu xã giao để kéo dài thời lượng. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Bắt buộc trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Có biểu cảm phù hợp. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
             },
             {
               role: 'user',
@@ -342,7 +207,7 @@ export class OllamaDialogueProvider implements DialogueProvider {
           messages: [
             {
               role: 'system',
-              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. ${intent.intent === 'reply_to_chat_batch' ? 'Trả lời trực tiếp tối đa hai bình luận trong một đoạn nói tự nhiên từ 28 đến 40 từ, tương đương 8 đến 12 giây. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Không giải thích suy luận. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
+              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. ${intent.intent === 'reply_to_chat_batch' ? 'Trả lời trực tiếp tối đa hai bình luận bằng 1 đến 2 câu nói tự nhiên, không quá 40 từ. Câu trả lời ngắn thì giữ nguyên, không thêm câu xã giao để kéo dài thời lượng. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Không giải thích suy luận. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
             },
             {
               role: 'user',
@@ -377,7 +242,7 @@ export class DialogueAgent {
     providers?: DialogueProvider[];
   } = {}) {
     this._persona = { ...DEFAULT_IDOL_PERSONA, ...(options.persona || {}) };
-    this._providers = options.providers ?? [new SafeDialogueProvider()];
+    this._providers = options.providers ?? [];
   }
 
   get persona(): CharacterPersona {
@@ -394,12 +259,16 @@ export class DialogueAgent {
 
   async generateDialogue(intent: DirectorIntent): Promise<DialogueGenerationResult> {
     let text = '';
-    let providerName = 'safe-fallback';
+    let providerName = '';
 
     for (let i = 0; i < this._providers.length; i++) {
       const provider = this._providers[(this._activeProviderIndex + i) % this._providers.length]!;
       try {
-        text = await provider.generate(intent, this._persona);
+        text = (await provider.generate(intent, this._persona)).trim();
+        if (!text) {
+          console.warn(`[DialogueAgent] Provider ${provider.name} returned empty dialogue, falling back...`);
+          continue;
+        }
         if (this._persona.language.toLowerCase() === 'vietnamese' && !isLikelyVietnamese(text)) {
           console.warn(`[DialogueAgent] Provider ${provider.name} returned non-Vietnamese dialogue, falling back...`);
           text = '';
@@ -412,20 +281,19 @@ export class DialogueAgent {
       }
     }
 
-    // Safety fallback
     if (!text) {
-      const fallbackList = CURATED_LINES['default']!;
-      text = personalizePersonaName(fallbackList[0]!, this._persona);
-      providerName = 'hardcoded-fallback';
+      throw new Error('AI Director returned no usable dialogue; TTS was skipped');
     }
 
     // Estimate speaking duration: Vietnamese speaking rate is ~4.5 syllables/sec (~3.5 words/sec)
     text = normalizeVietnameseSpokenText(personalizePersonaName(text, this._persona));
     if (intent.intent === 'reply_to_chat_batch') {
       text = constrainLiveReply(text);
-      if (!text) text = personalizePersonaName(CURATED_LINES['reply_to_chat']![0]!, this._persona);
     } else {
       text = trimToWordBudget(text);
+    }
+    if (!text) {
+      throw new Error('AI Director reply was empty after speech cleanup; TTS was skipped');
     }
     const wordCount = text.split(/\s+/).filter(Boolean).length;
     const estimatedDurationMs = Math.max(2000, Math.min(12_000, Math.round((wordCount / 3.5) * 1000)));

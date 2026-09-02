@@ -4139,6 +4139,40 @@ html.native-ui-scale body .web-side-footer {
   #view-studio .live-video-quality-option { transition: none; }
 }
 
+/* Keep every Monitor toolbar status and command on one compact control grid. */
+#view-studio .svg-reference-layout .monitor-hdr {
+  height: 38px;
+  min-height: 38px;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+#view-studio .svg-reference-layout .monitor-hdr :where(
+  .monitor-state-tag,
+  .talking-live-badge,
+  .live-video-quality,
+  .btn-icon-sm
+) {
+  box-sizing: border-box;
+  height: 28px !important;
+  min-height: 28px !important;
+  border-radius: 3px !important;
+}
+
+#view-studio .svg-reference-layout .monitor-hdr .live-video-quality {
+  padding: 1px;
+}
+
+#view-studio .svg-reference-layout .monitor-hdr .live-video-quality-option {
+  height: 24px !important;
+  min-height: 24px !important;
+}
+
+#view-studio .svg-reference-layout .monitor-hdr .monitor-btns {
+  flex: 0 0 auto;
+  align-items: center;
+}
+
 /* AI Engines */
 .engine-manager-view { overflow-y: auto; background: var(--ui-canvas, #171818); }
 .engine-manager-head { flex: 0 0 auto; }

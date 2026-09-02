@@ -412,6 +412,10 @@ class BaseAvatar:
 
     def map_frame_index(self, length, index):
         return mirror_index(length, index)
+
+    def inference_batch_for_indices(self, index, audiofeat_batch, frame_indices):
+        """Run inference for a batch whose source indices were resolved once."""
+        return self.inference_batch(index, audiofeat_batch)
         
     def inference(self, quit_event):
         index = 0
@@ -429,9 +433,22 @@ class BaseAvatar:
             audiofeat_batch = []
             batch_epoch = self._flush_epoch
             try:
-                audiofeat_batch = self.asr.feat_queue.get(block=True, timeout=1)
+                feature_payload = self.asr.feat_queue.get(block=True, timeout=1)
             except queue.Empty:
                 continue
+            if (
+                isinstance(feature_payload, tuple)
+                and len(feature_payload) == 2
+                and isinstance(feature_payload[1], (list, tuple))
+            ):
+                audiofeat_batch, packet_counts = feature_payload
+                packet_counts = [max(1, int(count)) for count in packet_counts]
+            else:
+                audiofeat_batch = feature_payload
+                packet_counts = [self.audio_frames_per_video] * self.batch_size
+            if len(packet_counts) != self.batch_size:
+                logger.warning("Invalid audio packet cadence; using rounded model cadence")
+                packet_counts = [self.audio_frames_per_video] * self.batch_size
             if batch_epoch != last_epoch:
                 index = 0
                 last_epoch = batch_epoch
@@ -439,7 +456,7 @@ class BaseAvatar:
                 
             is_all_silence = True
             audio_frames: list[AudioFrameData] = []
-            for _ in range(self.batch_size * self.audio_frames_per_video):
+            for _ in range(sum(packet_counts)):
                 audioframe:AudioFrameData = self.asr.output_queue.get()
                 if audioframe.type == 0:
                     is_all_silence = False               
@@ -451,15 +468,19 @@ class BaseAvatar:
             if is_all_silence: #全为静音数据，只需要取fullimg，不需要推理
                 for i in range(self.batch_size):
                     idx = self.map_frame_index(length, index)
-                    start = i * self.audio_frames_per_video
-                    self.res_frame_queue.put((None, audio_frames[start:start + self.audio_frames_per_video], idx, batch_epoch))
+                    start = sum(packet_counts[:i])
+                    end = start + packet_counts[i]
+                    self.res_frame_queue.put((None, audio_frames[start:end], idx, batch_epoch))
                     index = index + 1
             else:
                 if current_speaking and not last_speaking and self.custom_index.get(1) is not None: #从静音到说话切换,并且有自定义静态视频
                     index = 0
                 t = time.perf_counter()
-
-                pred = self.inference_batch(index, audiofeat_batch)
+                frame_indices = [
+                    self.map_frame_index(length, index + i)
+                    for i in range(self.batch_size)
+                ]
+                pred = self.inference_batch_for_indices(index, audiofeat_batch, frame_indices)
 
                 batch_time = time.perf_counter() - t
                 counttime += batch_time
@@ -474,8 +495,9 @@ class BaseAvatar:
                     count = 0
                     counttime = 0
                 for i, res_frame in enumerate(pred):
-                    start = i * self.audio_frames_per_video
-                    self.res_frame_queue.put((res_frame, audio_frames[start:start + self.audio_frames_per_video], self.map_frame_index(length, index), batch_epoch))
+                    start = sum(packet_counts[:i])
+                    end = start + packet_counts[i]
+                    self.res_frame_queue.put((res_frame, audio_frames[start:end], frame_indices[i], batch_epoch))
                     index = index + 1
                     
             if current_speaking != last_speaking:

@@ -51,7 +51,7 @@ const __dirname = path.dirname(__filename);
 import { GameAdapter, SlotSimulatorEngine } from '@idol/game-adapter';
 import { ChatManager, MockChatGenerator, SmartChatFilter } from '@idol/chat-adapter';
 import { WebSpeechTTSAdapter } from '@idol/voice';
-import { OpenAIDialogueProvider, OllamaDialogueProvider, SafeDialogueProvider } from '@idol/dialogue-agent';
+import { OpenAIDialogueProvider, OllamaDialogueProvider } from '@idol/dialogue-agent';
 import { MockTalkingProvider, LiveTalkingProvider, TalkingVideoPipeline, MuseTalkBatchPipeline, type VideoFrame } from '@idol/talking-head';
 import { RuntimeDatabase } from './persistence.js';
 import {
@@ -71,9 +71,9 @@ export interface ServerConfig {
   databasePath: string;
 }
 
-type LiveVideoQuality = 'fhd';
+type LiveVideoQuality = 'hd';
 const LIVE_VIDEO_PRESETS: Record<LiveVideoQuality, { width: number; height: number; fps: number }> = {
-  fhd: { width: 1920, height: 1080, fps: 30 },
+  hd: { width: 1280, height: 720, fps: 30 },
 };
 
 const SafeIdSchema = z.string().trim().min(1).max(80).regex(/^[a-zA-Z0-9_-]+$/);
@@ -164,7 +164,7 @@ const TalkingSettingsSchema = z.object({
   alwaysOn: z.boolean().optional(),
 }).strict();
 const LiveVideoSettingsSchema = z.object({
-  quality: z.literal('fhd'),
+  quality: z.literal('hd'),
 }).strict();
 const AvatarSettingsSchema = z.object({
   preset: SafeIdSchema.optional(),
@@ -322,6 +322,10 @@ const ObsSettingsSchema = z.object({
   port: z.number().int().min(1).max(65535).optional(),
   autoConnect: z.boolean().optional(),
   playbackOverlapFrames: z.number().int().min(0).max(4).optional(),
+  outputResolution: z.enum(['auto', '720', '1080', 'custom']).optional(),
+  outputRatio: z.enum(['auto', '16:9', '9:16', 'custom']).optional(),
+  customWidth: z.number().int().min(320).max(7680).optional(),
+  customHeight: z.number().int().min(180).max(4320).optional(),
 }).strict();
 const ObsOutputSignalSchema = z.discriminatedUnion('type', [
   z.object({
@@ -532,11 +536,11 @@ export class IdolRuntimeServer {
     },
     talkingEngine: {
       provider: 'livetalking' as 'livetalking' | 'mock' | 'off',
-      endpoint: process.env['LIVETALKING_ENDPOINT'] || 'http://127.0.0.1:8011',
+      endpoint: process.env['LIVETALKING_ENDPOINT'] || 'http://127.0.0.1:2222',
       model: 'musetalk' as 'musetalk' | 'wav2lip' | 'wav2lip_gan',
       restartIntervalMinutes: 15 as 5 | 10 | 15 | 20,
       alwaysOn: true,
-      videoQuality: 'fhd' as LiveVideoQuality,
+      videoQuality: 'hd' as LiveVideoQuality,
     },
     obs: {
       host: 'localhost',
@@ -544,6 +548,10 @@ export class IdolRuntimeServer {
       password: process.env['OBS_WEBSOCKET_PASSWORD'] || '',
       autoConnect: false,
       playbackOverlapFrames: 2,
+      outputResolution: 'auto' as 'auto' | '720' | '1080' | 'custom',
+      outputRatio: 'auto' as 'auto' | '16:9' | '9:16' | 'custom',
+      customWidth: 1280,
+      customHeight: 720,
     },
   };
 
@@ -621,11 +629,11 @@ export class IdolRuntimeServer {
 
   constructor(config: Partial<ServerConfig> = {}) {
     this._config = {
-      port: config.port ?? parseInt(process.env['PORT'] || '8765', 10),
+      port: config.port ?? parseInt(process.env['PORT'] || '11111', 10),
       host: config.host ?? process.env['HOST'] ?? '127.0.0.1',
       enableSimulation: config.enableSimulation ?? process.env['ENABLE_SIMULATION'] === 'true',
       authToken: config.authToken ?? process.env['RUNTIME_AUTH_TOKEN'] ?? '',
-      allowedOrigins: config.allowedOrigins ?? (process.env['CORS_ALLOWED_ORIGINS'] || 'http://127.0.0.1:8765,http://localhost:8765')
+      allowedOrigins: config.allowedOrigins ?? (process.env['CORS_ALLOWED_ORIGINS'] || 'http://127.0.0.1:11111,http://localhost:11111')
         .split(',').map((origin) => origin.trim()).filter(Boolean),
       maxJsonBodyBytes: config.maxJsonBodyBytes ?? parseInt(process.env['MAX_JSON_BODY_BYTES'] || '1048576', 10),
       maxUploadBytes: config.maxUploadBytes ?? parseInt(process.env['MAX_UPLOAD_BYTES'] || '524288000', 10),
@@ -686,7 +694,7 @@ export class IdolRuntimeServer {
     this._liveTalkingProvider = new LiveTalkingProvider({
       endpointUrl: this._settings.talkingEngine.endpoint,
       model: this._settings.talkingEngine.model,
-      fps: Math.max(1, parseInt(process.env['LIVETALKING_FPS'] || '25', 10) || 25),
+      fps: Math.max(1, parseInt(process.env['LIVETALKING_FPS'] || '15', 10) || 15),
       authToken: process.env['LIVETALKING_AUTH_TOKEN'] || '',
     });
     this._talkingPipeline = new TalkingVideoPipeline(this._liveTalkingProvider, new MockTalkingProvider());
@@ -1100,7 +1108,7 @@ export class IdolRuntimeServer {
   }
 
   private _qwenTtsEndpoint(): string {
-    return (process.env['QWEN_TTS_ENDPOINT'] || 'http://127.0.0.1:8002').replace(/\/$/, '');
+    return (process.env['QWEN_TTS_ENDPOINT'] || 'http://127.0.0.1:3333').replace(/\/$/, '');
   }
 
   private async _qwenTtsHealth(timeoutMs = 2_000): Promise<boolean> {
@@ -1119,12 +1127,27 @@ export class IdolRuntimeServer {
   }
 
   private async _commandVersion(command: string, args: string[]): Promise<string> {
-    return new Promise((resolve) => {
-      execFile(command, args, { timeout: 3_000 }, (error, stdout, stderr) => {
-        if (error) return resolve('Not installed');
-        resolve(String(stdout || stderr || '').trim().split(/\r?\n/)[0] || 'Installed');
+    const configuredPath = process.env[`${command.toUpperCase()}_PATH`];
+    const candidates = [
+      configuredPath,
+      command,
+      ...(process.platform === 'darwin'
+        ? [`/opt/homebrew/bin/${command}`, `/usr/local/bin/${command}`]
+        : process.platform === 'win32'
+          ? [path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'ffmpeg', 'bin', `${command}.exe`)]
+          : [`/usr/bin/${command}`, `/usr/local/bin/${command}`]),
+    ].filter((candidate, index, values): candidate is string => Boolean(candidate) && values.indexOf(candidate) === index);
+
+    for (const candidate of candidates) {
+      const version = await new Promise<string | null>((resolve) => {
+        execFile(candidate, args, { timeout: 3_000 }, (error, stdout, stderr) => {
+          if (error) return resolve(null);
+          resolve(String(stdout || stderr || '').trim().split(/\r?\n/)[0] || 'Installed');
+        });
       });
-    });
+      if (version) return version;
+    }
+    return 'Not installed';
   }
 
   private async _engineStatus(): Promise<{ updatedAt: number; engines: Array<Record<string, unknown>> }> {
@@ -1155,6 +1178,14 @@ export class IdolRuntimeServer {
       : null;
     const torchHome = process.env['TORCH_HOME'] || path.join(os.homedir(), '.cache', 'torch');
     const s3fdPath = process.env['S3FD_MODEL_PATH'] || path.join(torchHome, 'hub', 'checkpoints', 's3fd-619a316812.pth');
+    const ffmpegReady = ffmpegVersion !== 'Not installed';
+    const ffprobeReady = ffprobeVersion !== 'Not installed';
+    const s3fdReady = fs.existsSync(s3fdPath);
+    const missingMediaDependencies = [
+      !ffmpegReady && 'FFmpeg',
+      !ffprobeReady && 'FFprobe',
+      !s3fdReady && 'S3FD',
+    ].filter(Boolean);
     const runtimeMemoryMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
     const stateFromWorker = String(liveWorker['state'] || 'OFFLINE');
     return {
@@ -1165,7 +1196,7 @@ export class IdolRuntimeServer {
           state: ollama.reachable && ollama.installed ? 'READY' : (ollama.reachable ? 'SETUP' : 'OFFLINE'),
           detail: ollama.installed ? 'Primary reply engine · local Ollama' : 'Install qwen3:8b to enable local replies',
           metrics: [ollama.size ? `${(ollama.size / 1024 / 1024 / 1024).toFixed(1)} GB` : 'Local', 'Primary'],
-          actions: ['start', 'stop'],
+          actions: ollama.reachable && ollama.installed ? ['stop'] : ['start'],
         },
         {
           id: 'chatgpt-fallback', category: 'AI DIRECTOR', title: 'ChatGPT Fallback', model: process.env['TTM_MODEL'] || 'chat-latest',
@@ -1178,32 +1209,52 @@ export class IdolRuntimeServer {
           state: qwenTtsReady ? 'READY' : this._qwenTtsState.state,
           detail: qwenTtsReady ? 'Vietnamese voice synthesis ready' : (this._qwenTtsState.error || 'Loaded on demand'),
           metrics: [this._qwenTtsState.owned ? `PID ${this._qwenTtsState.pid || '-'}` : 'On demand', '24 kHz'],
-          actions: this._qwenTtsState.owned ? ['start', 'stop'] : ['start'],
+          actions: qwenTtsReady ? ['stop'] : ['start'],
         },
         {
           id: 'live-avatar', category: 'LIPSYNC', title: 'Lipsync Engine', model: 'MuseTalk',
           state: stateFromWorker,
           detail: liveWorker['ready'] ? 'Lipsync ready' : (liveWorker['error'] || 'Lipsync inactive'),
-          metrics: ['25 model FPS', '30 output FPS', 'FHD', `${runtimeMemoryMb} MB runtime`],
-          actions: ['start', 'stop', 'restart'],
+          metrics: ['15 model FPS', '30 output FPS', 'HD 720p', `${runtimeMemoryMb} MB runtime`],
+          actions: liveWorker['ready'] ? ['restart', 'stop'] : ['start'],
         },
         {
           id: 'obs-bridge', category: 'STREAM OUTPUT', title: 'OBS Bridge', model: 'WebRTC Browser Source',
           state: obsRoute?.receiver && obsRoute?.publisher ? 'READY' : (this._obsController.isConnected ? 'STARTING' : 'OFFLINE'),
           detail: obsRoute?.receiver && obsRoute?.publisher ? 'Video and voice route established' : 'Magic Connect prepares the OBS browser source',
-          metrics: ['1920 × 1080', '30 FPS', 'Video + audio'], actions: ['start', 'stop'],
+          metrics: ['1280 × 720', '30 FPS', 'Video + audio'], actions: obsRoute?.receiver && obsRoute?.publisher ? ['stop'] : ['start'],
         },
         {
           id: 'media-tools', category: 'MEDIA FOUNDATION', title: 'FFmpeg & Face Detector', model: 'FFmpeg · FFprobe · S3FD',
-          state: ffmpegVersion !== 'Not installed' && ffprobeVersion !== 'Not installed' && fs.existsSync(s3fdPath) ? 'READY' : 'SETUP',
-          detail: fs.existsSync(s3fdPath) ? 'Media tools and S3FD face detector ready' : 'S3FD face detector is not prepared',
-          metrics: [ffmpegVersion.replace(/^ffmpeg version\s*/i, 'FFmpeg '), fs.existsSync(s3fdPath) ? 'S3FD ready' : 'S3FD missing'], actions: [],
+          state: missingMediaDependencies.length === 0 ? 'READY' : 'SETUP',
+          detail: missingMediaDependencies.length === 0
+            ? 'Media tools and S3FD face detector ready'
+            : `Missing ${missingMediaDependencies.join(', ')}`,
+          metrics: [
+            ffmpegReady ? ffmpegVersion.replace(/^ffmpeg version\s*/i, 'FFmpeg ') : 'FFmpeg missing',
+            ffprobeReady ? 'FFprobe ready' : 'FFprobe missing',
+            s3fdReady ? 'S3FD ready' : 'S3FD missing',
+          ], actions: missingMediaDependencies.length === 0 ? [] : ['start'],
         },
       ],
     };
   }
 
   private async _runEngineAction(engineId: string, action: 'start' | 'stop' | 'restart'): Promise<void> {
+    if (engineId === 'media-tools') {
+      if (action !== 'start') return;
+      const [ffmpeg, ffprobe] = await Promise.all([
+        this._commandVersion('ffmpeg', ['-version']),
+        this._commandVersion('ffprobe', ['-version']),
+      ]);
+      if (ffmpeg === 'Not installed' || ffprobe === 'Not installed') {
+        throw new Error('Bundled FFmpeg tools are missing. Reinstall the Native App package.');
+      }
+      const torchHome = process.env['TORCH_HOME'] || path.join(os.homedir(), '.cache', 'torch');
+      const s3fdPath = process.env['S3FD_MODEL_PATH'] || path.join(torchHome, 'hub', 'checkpoints', 's3fd-619a316812.pth');
+      if (!fs.existsSync(s3fdPath)) throw new Error('S3FD is missing. Run Magic Setup again to download the face detector.');
+      return;
+    }
     if (engineId === 'qwen-director') {
       const endpoint = (process.env['OLLAMA_ENDPOINT'] || 'http://127.0.0.1:11434').replace(/\/$/, '');
       const response = await fetch(`${endpoint}/${action === 'stop' ? 'api/generate' : 'api/chat'}`, {
@@ -1556,7 +1607,7 @@ export class IdolRuntimeServer {
         LIVETALKING_HOST: endpointUrl.hostname === 'localhost' ? '127.0.0.1' : endpointUrl.hostname,
         LIVETALKING_PORT: endpointUrl.port || (endpointUrl.protocol === 'https:' ? '443' : '80'),
         LIVETALKING_MODEL: workerModel,
-        LIVETALKING_FPS: '25',
+        LIVETALKING_FPS: '15',
         LIVETALKING_OUTPUT_FPS: '30',
         LIVETALKING_VIDEO_QUALITY: this._settings.talkingEngine.videoQuality,
         LIVETALKING_PREPROCESS_QUALITY: 'hd',
@@ -1754,6 +1805,17 @@ export class IdolRuntimeServer {
     return LIVE_VIDEO_PRESETS[this._settings.talkingEngine.videoQuality];
   }
 
+  private _obsOutputPreset(): { width: number; height: number; fps: number } | null {
+    const { outputResolution } = this._settings.obs;
+    // The Monitor pipeline is a native landscape 16:9 stream. Keep OBS on
+    // the same contract so it never crops or letterboxes into a portrait
+    // canvas before the Browser Source receives the video.
+    if (outputResolution === 'auto') return null;
+    const height = outputResolution === '1080' ? 1080 : 720;
+    const width = Math.round(height * 16 / 9);
+    return { width, height, fps: this._liveVideoPreset().fps };
+  }
+
   private async _restartOwnedLiveTalkingWorkerForQuality(): Promise<boolean> {
     const workerProcess = this._liveTalkingWorkerProcess;
     if (!workerProcess) return false;
@@ -1948,7 +2010,7 @@ export class IdolRuntimeServer {
     if (typeof this._settings.talkingEngine.alwaysOn !== 'boolean') {
       this._settings.talkingEngine.alwaysOn = true;
     }
-    this._settings.talkingEngine.videoQuality = 'fhd';
+    this._settings.talkingEngine.videoQuality = 'hd';
     if (obs) this._settings.obs = { ...this._settings.obs, ...obs, password: this._settings.obs.password } as typeof this._settings.obs;
 
     const directorDefaultsVersion = Number(this._db.getSetting<number>('directorDefaultsVersion') || 0);
@@ -2333,6 +2395,9 @@ export class IdolRuntimeServer {
         // 1. Generate Natural Dialogue text via Dialogue Agent
         const dialogue = await this._dialogueAgent.generateDialogue(intent);
         if (!this._isRunning || generationRun !== this._directorGenerationRun) return;
+        if (!dialogue.text.trim()) {
+          throw new Error('AI Director returned an empty reply; no TTS command was created');
+        }
 
         const enrichedIntent = {
           ...intent,
@@ -2350,7 +2415,7 @@ export class IdolRuntimeServer {
           emotion: dialogue.emotion,
           speed: 1,
           ...(intent.intent === 'reply_to_chat_batch'
-            ? { durationMs: Math.min(12_000, Math.max(8_000, dialogue.estimatedDurationMs)) }
+            ? { durationMs: Math.min(12_000, dialogue.estimatedDurationMs) }
             : {}),
         }), dialogue.provider);
       } catch (err) {
@@ -2728,7 +2793,7 @@ export class IdolRuntimeServer {
     requestedDurationMs?: number,
   ): Promise<{ audioBase64: string; mediaType: string; durationMs: number }> {
     if (!requestedDurationMs || audio.durationMs <= requestedDurationMs * 1.03) return audio;
-    const targetDurationMs = Math.max(8_000, Math.min(12_000, requestedDurationMs));
+    const targetDurationMs = Math.min(12_000, requestedDurationMs);
     const tempo = Math.max(1, Math.min(1.08, audio.durationMs / targetDurationMs));
     if (tempo <= 1.03) return audio;
 
@@ -2772,10 +2837,14 @@ export class IdolRuntimeServer {
   ): Promise<void> {
     let started = false;
     let speechStartedAt = 0;
+    let idleClipBeforeTalking: typeof this._director.state.currentClip | undefined;
     const markStarted = async (): Promise<void> => {
       if (started) return;
       started = true;
       speechStartedAt = Date.now();
+      if (this._director.state.currentVisual === 'GAMEPLAY_IDLE') {
+        idleClipBeforeTalking = this._director.state.currentClip;
+      }
       this._director.setSpeaking(true);
       this._director.forceState('TALKING', 'LiveTalking WebRTC audio/video started');
       await this._obsController.setSubtitles(command.text);
@@ -2784,7 +2853,11 @@ export class IdolRuntimeServer {
     const markFinished = async (): Promise<void> => {
       this._director.setSpeaking(false);
       await this._obsController.setSubtitles('');
-      this._director.forceState('GAMEPLAY_IDLE', 'LiveTalking speech completed');
+      this._director.forceState(
+        'GAMEPLAY_IDLE',
+        'LiveTalking speech completed',
+        idleClipBeforeTalking,
+      );
       this._setSpeechRuntime({ state: 'IDLE' });
     };
 
@@ -3579,7 +3652,8 @@ export class IdolRuntimeServer {
       `- Không rõ giới tính: ${label(persona.unknownViewerStrategy)}. Không trộn hệ xưng hô trong cùng một câu trả lời.`,
       '',
       '## Live Reply',
-      '- Trả lời trực tiếp bằng tiếng Việt tự nhiên, 1-2 câu nói, 28-40 từ, tương đương 8-12 giây.',
+      '- Trả lời trực tiếp bằng tiếng Việt tự nhiên, 1-2 câu nói và không quá 40 từ.',
+      '- Giữ nguyên câu trả lời ngắn; không thêm câu xã giao chỉ để kéo dài thời lượng.',
       '- Không mở đầu bằng câu thông báo đã đọc bình luận. Không nói như trợ lý, không lặp nguyên văn câu hỏi.',
       '- Bỏ tag nền tảng, emoji, Markdown và ký hiệu khỏi phần được đọc thành tiếng.',
       `- Cảm xúc ${label(persona.emotionStyle)}: khen -> happy; đùa -> playful; quà/cảm ơn -> grateful; bất ngờ -> surprised; câu thường -> neutral; câu khó -> focused; spam/không an toàn -> bỏ qua.`,
@@ -3614,7 +3688,7 @@ export class IdolRuntimeServer {
   }
 
   private _configureDialogueProvider(): void {
-    const providers: Array<OllamaDialogueProvider | OpenAIDialogueProvider | SafeDialogueProvider> = [
+    const providers: Array<OllamaDialogueProvider | OpenAIDialogueProvider> = [
       new OllamaDialogueProvider({
         endpoint: process.env['OLLAMA_ENDPOINT'] || 'http://127.0.0.1:11434',
         model: 'qwen3:8b',
@@ -3628,7 +3702,6 @@ export class IdolRuntimeServer {
         providerName: 'ttm-chatgpt',
       }));
     }
-    providers.push(new SafeDialogueProvider());
     this._dialogueAgent.setProviders(providers);
   }
 
@@ -3743,13 +3816,14 @@ export class IdolRuntimeServer {
         publisherPeerId: '',
         negotiationId: '',
       });
-      const videoPreset = this._liveVideoPreset();
+      const videoPreset = this._obsOutputPreset() || this._liveVideoPreset();
       const result = await this._obsController.magicConnect({
         url: this._obsBrowserSourceUrl(sessionId),
         sourceName: 'AI IDOL Streamer',
         width: videoPreset.width,
         height: videoPreset.height,
         fps: videoPreset.fps,
+        applyVideoSettings: Boolean(this._obsOutputPreset()),
       });
       this._addLog('info', `OBS Magic Connect ready in scene ${result.sceneName}`);
       this._broadcast({
@@ -5684,7 +5758,7 @@ if (isDirectRun) {
     process.exit(exitCode);
   };
   server.start().then(() => {
-    console.log(`Idol Runtime Server active on port ${process.env['PORT'] || '8765'}`);
+    console.log(`Idol Runtime Server active on port ${process.env['PORT'] || '11111'}`);
     setInterval(() => {}, 1000 * 3600);
   }).catch((err) => {
     console.error('Fatal runtime server error:', err);

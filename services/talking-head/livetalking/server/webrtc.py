@@ -210,7 +210,7 @@ class HumanPlayer:
         self.video_repetition_ratio = max(1.0, output_fps / model_fps)
         self.video_repetitions = max(1, int(math.ceil(self.video_repetition_ratio)))
         self._video_repetition_accumulator = 0.0
-        quality = os.getenv("LIVETALKING_VIDEO_QUALITY", "fhd").strip().lower()
+        quality = os.getenv("LIVETALKING_VIDEO_QUALITY", "hd").strip().lower()
         default_width, default_height = ((1920, 1080) if quality == "fhd" else (1280, 720))
         self.output_max_width = self._positive_env_int("LIVETALKING_MAX_WIDTH", default_width)
         self.output_max_height = self._positive_env_int("LIVETALKING_MAX_HEIGHT", default_height)

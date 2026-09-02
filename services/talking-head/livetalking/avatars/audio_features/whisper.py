@@ -59,9 +59,10 @@ class WhisperASR(BaseASR):
         ############################################## extract audio feature ##############################################
         start_time = time.time()
         is_all_silence = True
-        # One model frame consumes enough 20 ms packets to match the model
-        # cadence. At 12.5 FPS this is four packets per frame, not two.
-        for _ in range(self.batch_size * self.audio_frames_per_video):
+        # At 15 FPS the fixed 50 Hz audio clock uses a drift-free 3, 3, 4
+        # packet cadence instead of rounding every model frame to 60 ms.
+        packet_counts = self.next_audio_packet_counts(self.batch_size)
+        for _ in range(sum(packet_counts)):
             audio_frame = self.get_audio_frame()
             if audio_frame.type == 0:
                 is_all_silence = False
@@ -79,6 +80,6 @@ class WhisperASR(BaseASR):
             whisper_chunks = self._feature2chunks(feature_array=whisper_feature,batch_size=self.batch_size,
                                                   audio_feat_win = [2,3],start=self.stride_left_size/2,
                                                   feature_idx_multiplier=50.0/self.fps)
-        self.feat_queue.put(whisper_chunks)
+        self.feat_queue.put((whisper_chunks, packet_counts))
         # discard the old part to save memory
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]

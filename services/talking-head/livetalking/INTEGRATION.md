@@ -15,7 +15,7 @@ LIVETALKING_AVATAR_ID=musetalk_avatar1 \
 ./run_worker.sh
 ```
 
-The local worker defaults to `http://localhost:8011` because port 8010 is used
+The local worker defaults to `http://localhost:2222` because port 8010 is used
 by the existing Ditto service. Create an avatar through the upstream
 `POST /api/avatar/task` API. MuseTalk preprocessing produces `coords.pkl`,
 `latents.pt`, `mask/`, and `mask_coords.pkl` under `data/avatars/<avatar_id>`.

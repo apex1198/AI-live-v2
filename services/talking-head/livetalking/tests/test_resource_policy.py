@@ -26,15 +26,6 @@ class ResourcePolicyTestCase(unittest.TestCase):
             self.assertEqual(bounded_preprocess_size(2160, 3840), (720, 1280))
             self.assertEqual(bounded_preprocess_size(640, 360), (640, 360))
 
-    def test_preprocess_supports_fhd_live_session(self):
-        with patch.dict('os.environ', {
-            'LIVETALKING_PREPROCESS_QUALITY': 'fhd',
-            'LIVETALKING_MAX_WIDTH': '1920',
-            'LIVETALKING_MAX_HEIGHT': '1080',
-        }):
-            self.assertEqual(bounded_preprocess_size(3840, 2160), (1920, 1080))
-            self.assertEqual(bounded_preprocess_size(2160, 3840), (1080, 1920))
-
     def test_scales_legacy_avatar_coordinates_with_the_frame(self):
         self.assertEqual(scale_box([100, 80, 500, 600], 0.75, 0.75), [75, 60, 375, 450])
 

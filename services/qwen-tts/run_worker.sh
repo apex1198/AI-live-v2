@@ -22,4 +22,4 @@ exec "$PYTHON_BIN" "$SERVICE_DIR/server.py" \
   --model "$MODEL_PATH" \
   --data-dir "$DATA_DIR" \
   --host "${QWEN_TTS_HOST:-127.0.0.1}" \
-  --port "${QWEN_TTS_PORT:-8002}"
+  --port "${QWEN_TTS_PORT:-3333}"

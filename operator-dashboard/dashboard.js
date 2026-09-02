@@ -48,11 +48,11 @@ const STORAGE_KEYS = {
 };
 
 const LIVE_VIDEO_PRESETS = Object.freeze({
-  fhd: Object.freeze({ quality: 'fhd', label: 'FHD', width: 1920, height: 1080, fps: 30, maxBitrate: 8_000_000 }),
+  hd: Object.freeze({ quality: 'hd', label: 'HD', width: 1280, height: 720, fps: 30, maxBitrate: 6_000_000 }),
 });
 
 function liveVideoPreset(quality = App?.talkingEngine?.videoQuality) {
-  return LIVE_VIDEO_PRESETS[quality] || LIVE_VIDEO_PRESETS.fhd;
+  return LIVE_VIDEO_PRESETS[quality] || LIVE_VIDEO_PRESETS.hd;
 }
 
 // Provider secrets are server-side only. Remove credentials persisted by older builds.
@@ -235,6 +235,7 @@ const OBSOutputBridge = {
 
   updateStream(stream) {
     this.stream = stream;
+    this.syncVideoTrack();
     if (this.audioSender && this.pc && !['closed', 'failed'].includes(this.pc.connectionState)) {
       const audioTrack = stream?.getAudioTracks().find(track => track.readyState === 'live') || this.ensureSilentAudioTrack();
       void this.audioSender.replaceTrack(audioTrack).catch(error => {
@@ -245,37 +246,40 @@ const OBSOutputBridge = {
     if (this.receiverReady && !this.pc) void this.publish();
   },
 
+  preferredVideoTrack() {
+    const liveTrack = this.stream?.getVideoTracks().find(track => track.readyState === 'live');
+    if ((App.currentState === 'TALKING' || App.isAiSpeaking) && liveTrack) return liveTrack;
+    return this.ensureMonitorStream()?.getVideoTracks().find(track => track.readyState === 'live') || liveTrack || null;
+  },
+
+  syncVideoTrack() {
+    if (!this.videoSender || !this.pc || ['closed', 'failed'].includes(this.pc.connectionState)) return;
+    const track = this.preferredVideoTrack();
+    if (!track || this.videoSender.track === track) return;
+    track.contentHint = 'motion';
+    void this.videoSender.replaceTrack(track).catch(error => {
+      addLog(`OBS video track update failed: ${error.message}`, 'warn');
+    });
+  },
+
   ensureMonitorStream() {
     if (this.monitorStream?.getVideoTracks().some(track => track.readyState === 'live')) return this.monitorStream;
     const preset = liveVideoPreset();
-    const canvas = document.createElement('canvas');
-    canvas.width = preset.width;
-    canvas.height = preset.height;
+    // The Live Monitor composite is the canonical OBS output. Capturing it
+    // directly avoids a second full-frame canvas copy on every animation frame.
+    const canvas = $('monitor-w2l-canvas');
+    if (!canvas) return this.stream;
+    if (canvas.width !== preset.width) canvas.width = preset.width;
+    if (canvas.height !== preset.height) canvas.height = preset.height;
     const context = canvas.getContext('2d', { alpha: false });
     if (!context || typeof canvas.captureStream !== 'function') return this.stream;
     this.monitorCanvas = canvas;
     this.monitorContext = context;
+    // Tauri's macOS WebView exposes requestFrame() but does not reliably
+    // forward manual canvas frames through WebRTC. Continuous capture keeps
+    // the OBS track advancing while the Monitor plays.
     this.monitorStream = canvas.captureStream(30);
 
-    const renderMonitor = () => {
-      const target = this.monitorCanvas;
-      const ctx = this.monitorContext;
-      if (!target || !ctx) return;
-      const talkingCanvas = $('monitor-w2l-canvas');
-      const source = talkingCanvas?.classList.contains('is-visible') ? talkingCanvas : getActiveMonitorVideo();
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, target.width, target.height);
-      const sourceWidth = source?.videoWidth || source?.width || 0;
-      const sourceHeight = source?.videoHeight || source?.height || 0;
-      if (source && sourceWidth > 0 && sourceHeight > 0) {
-        const scale = Math.max(target.width / sourceWidth, target.height / sourceHeight);
-        const width = Math.round(sourceWidth * scale);
-        const height = Math.round(sourceHeight * scale);
-        ctx.drawImage(source, Math.round((target.width - width) / 2), Math.round((target.height - height) / 2), width, height);
-      }
-      this.monitorRenderFrame = requestAnimationFrame(renderMonitor);
-    };
-    this.monitorRenderFrame = requestAnimationFrame(renderMonitor);
     return this.monitorStream;
   },
 
@@ -296,9 +300,7 @@ const OBSOutputBridge = {
   },
 
   outputStream() {
-    const monitor = this.ensureMonitorStream();
-    if (!monitor) return this.stream;
-    const videoTrack = monitor.getVideoTracks()[0];
+    const videoTrack = this.preferredVideoTrack();
     const audioTrack = this.stream?.getAudioTracks().find(track => track.readyState === 'live') || this.ensureSilentAudioTrack();
     return new MediaStream([videoTrack, audioTrack].filter(Boolean));
   },
@@ -328,7 +330,7 @@ const OBSOutputBridge = {
       const sender = pc.addTrack(track, stream);
       if (track.kind === 'video') {
         this.videoSender = sender;
-        track.contentHint = 'detail';
+        track.contentHint = 'motion';
         const preset = liveVideoPreset();
         const parameters = sender.getParameters();
         if (!parameters.encodings?.length) parameters.encodings = [{}];
@@ -2360,7 +2362,7 @@ const MuseTalkRealtimeEngine = {
   inferenceCount: 0,
   generatedFrameCount: 0,
   lastInferenceTime: 0,
-  inferenceFps: 25.0,
+  inferenceFps: 15.0,
   currentAvatarFrame: 0,
   currentLatent: 0,
   currentAudioChunk: 0,
@@ -2658,6 +2660,25 @@ function applyLiveVideoQualityUI(quality, { persist = true, republish = true } =
   OBSOutputBridge.applyVideoPreset(preset, republish && previousQuality !== preset.quality);
   updateLiveVideoQualityAvailability();
   return preset;
+}
+
+function updateObsCustomOutputUI() {
+  const resolution = $('cfg-obs-output-resolution')?.value || 'auto';
+  const ratio = $('cfg-obs-output-ratio')?.value || 'auto';
+  const custom = $('obs-custom-output');
+  if (custom) custom.hidden = resolution !== 'custom' && ratio !== 'custom';
+  const width = Number($('cfg-obs-custom-width')?.value) || 1280;
+  const height = Number($('cfg-obs-custom-height')?.value) || 720;
+  const ratioLabel = width && height ? `${width / gcd(width, height)}:${height / gcd(width, height)}` : '16:9';
+  const outputRatio = $('obs-video-canvas-ratio');
+  if (outputRatio) outputRatio.textContent = ratio === '16:9' ? '16:9' : ratio === '9:16' ? '9:16' : ratioLabel;
+  const canvasSize = $('obs-video-canvas-size');
+  if (canvasSize && (resolution === 'custom' || ratio === 'custom')) canvasSize.textContent = `${width} x ${height}`;
+}
+
+function gcd(a, b) {
+  while (b) [a, b] = [b, a % b];
+  return a || 1;
 }
 
 async function reconnectLiveMonitorAfterQualityChange() {
@@ -3057,7 +3078,7 @@ async function saveProjectStorageConfig() {
     return;
   }
   if (location.protocol === 'file:') {
-    if (status) status.textContent = 'Open http://localhost:8765 to enable project storage.';
+    if (status) status.textContent = 'Open http://localhost:11111 to enable project storage.';
     return;
   }
   const response = await fetch('/api/storage/config', {
@@ -3075,7 +3096,7 @@ async function saveProjectStorageConfig() {
 async function selectProjectStorageFolder() {
   const status = $('project-storage-status');
   if (location.protocol === 'file:') {
-    if (status) status.textContent = 'Open http://localhost:8765 to select a folder.';
+    if (status) status.textContent = 'Open http://localhost:11111 to select a folder.';
     return;
   }
   if (status) status.textContent = 'Waiting for folder selection…';
@@ -4843,6 +4864,7 @@ function initAvatarCanvas() {
   const monCtx = monW2lCanvas?.getContext('2d');
   const liveStreamCanvas = $('lt-live-stream-canvas');
   const liveStreamCtx = liveStreamCanvas?.getContext('2d');
+  let lastMonitorRenderAt = 0;
 
   const isCanvasVisible = canvas => Boolean(canvas?.isConnected && canvas.getClientRects().length);
 
@@ -4867,16 +4889,36 @@ function initAvatarCanvas() {
     }
 
     // 2. Fullscreen LiveTalking Realtime Video on Monitor Screen when Speaking / TALKING State
-    if (monW2lCanvas && monCtx) {
+    const now = performance.now();
+    if (monW2lCanvas && monCtx && now - lastMonitorRenderAt >= (1000 / 30) - 1) {
+      lastMonitorRenderAt = now;
       const isTalkingActive = (App.currentState === 'TALKING' || App.isAiSpeaking);
       const monBadge = $('mon-w2l-badge');
       const isTrained = (LiveTalkingStudio.isTrainedReady || App.avatar.videoEl);
 
-      if (isTalkingActive && isTrained && isCanvasVisible(monW2lCanvas)) {
+      if (isTalkingActive && isTrained) {
         renderLiveTalkingLipSync(monCtx, monW2lCanvas.width, monW2lCanvas.height, App.isAiSpeaking, App.avatar);
         monW2lCanvas.classList.add('is-visible');
         if (monBadge) monBadge.classList.add('is-visible');
         setMonitorBackgroundVisible(false);
+      } else {
+        const source = getActiveMonitorVideo();
+        const sourceWidth = source?.videoWidth || 0;
+        const sourceHeight = source?.videoHeight || 0;
+        monCtx.fillStyle = '#000';
+        monCtx.fillRect(0, 0, monW2lCanvas.width, monW2lCanvas.height);
+        if (source && sourceWidth > 0 && sourceHeight > 0) {
+          const scale = Math.min(monW2lCanvas.width / sourceWidth, monW2lCanvas.height / sourceHeight);
+          const width = Math.round(sourceWidth * scale);
+          const height = Math.round(sourceHeight * scale);
+          monCtx.drawImage(
+            source,
+            Math.round((monW2lCanvas.width - width) / 2),
+            Math.round((monW2lCanvas.height - height) / 2),
+            width,
+            height,
+          );
+        }
       }
     }
 
@@ -5881,7 +5923,19 @@ function queueRuntimeSpeechPlayback(commandId) {
 }
 
 function setVisualState(state, priority = 5, reason = '', forceRandom = false, serverOwned = false, serverAsset = null) {
+  const previousState = App.currentState;
+  const isSpeechIdleReturn = state === 'GAMEPLAY_IDLE'
+    && /speech.*(?:completed|ended|return)/i.test(String(reason));
+
+  // Do not reset the idle video's playhead after speech. While the live
+  // MuseTalk canvas is visible, the underlying idle video continues playing;
+  // revealing that same clip is the seamless TALKING -> IDLE transition.
+  if (state === 'TALKING' && previousState === 'GAMEPLAY_IDLE' && App.currentClip?.blobUrl) {
+    App.resumeIdleClipAfterTalking = App.currentClip;
+  }
+
   App.currentState = state;
+  OBSOutputBridge.syncVideoTrack();
 
   App.stateHistory.push({
     state: state,
@@ -5891,7 +5945,10 @@ function setVisualState(state, priority = 5, reason = '', forceRandom = false, s
   if (App.stateHistory.length > 20) App.stateHistory.shift();
   renderStateHistory();
 
-  const clipToPlay = resolveRuntimeClip(state, serverAsset, forceRandom);
+  const clipToPlay = isSpeechIdleReturn && App.resumeIdleClipAfterTalking?.blobUrl
+    ? App.resumeIdleClipAfterTalking
+    : resolveRuntimeClip(state, serverAsset, forceRandom);
+  if (isSpeechIdleReturn) App.resumeIdleClipAfterTalking = null;
 
   App.currentClip = clipToPlay;
   App.clipStartedAt = Date.now();
@@ -6450,11 +6507,16 @@ function applyRuntimeSettingsUI(settings = {}) {
     if ($('cfg-obs-host') && document.activeElement !== $('cfg-obs-host')) $('cfg-obs-host').value = settings.obs.host || 'localhost';
     if ($('cfg-obs-port') && document.activeElement !== $('cfg-obs-port')) $('cfg-obs-port').value = String(settings.obs.port || 4455);
     if ($('cfg-obs-autoconnect')) $('cfg-obs-autoconnect').checked = Boolean(settings.obs.autoConnect);
+    if ($('cfg-obs-output-resolution') && document.activeElement !== $('cfg-obs-output-resolution')) $('cfg-obs-output-resolution').value = settings.obs.outputResolution || 'auto';
+    if ($('cfg-obs-output-ratio') && document.activeElement !== $('cfg-obs-output-ratio')) $('cfg-obs-output-ratio').value = settings.obs.outputRatio || 'auto';
+    if ($('cfg-obs-custom-width') && document.activeElement !== $('cfg-obs-custom-width')) $('cfg-obs-custom-width').value = String(settings.obs.customWidth || 1280);
+    if ($('cfg-obs-custom-height') && document.activeElement !== $('cfg-obs-custom-height')) $('cfg-obs-custom-height').value = String(settings.obs.customHeight || 720);
     if (Number.isInteger(settings.obs.playbackOverlapFrames)) {
       App.playbackOverlapFrames = Math.max(0, Math.min(4, settings.obs.playbackOverlapFrames));
       if ($('cfg-playback-overlap-frames')) $('cfg-playback-overlap-frames').value = String(App.playbackOverlapFrames);
     }
     applyObsStatus(settings.obs);
+    updateObsCustomOutputUI();
   }
   if (settings.platformChat) applyPlatformChatStatus(settings.platformChat);
   loadPersistedSettings();
@@ -6572,6 +6634,11 @@ function loadPersistedSettings() {
       if ($('cfg-obs-host')) $('cfg-obs-host').value = obsCfg.host || 'localhost';
       if ($('cfg-obs-port')) $('cfg-obs-port').value = obsCfg.port || '4455';
       if ($('cfg-obs-autoconnect')) $('cfg-obs-autoconnect').checked = Boolean(obsCfg.autoConnect);
+      if ($('cfg-obs-output-resolution')) $('cfg-obs-output-resolution').value = obsCfg.outputResolution || 'auto';
+      if ($('cfg-obs-output-ratio')) $('cfg-obs-output-ratio').value = obsCfg.outputRatio || 'auto';
+      if ($('cfg-obs-custom-width')) $('cfg-obs-custom-width').value = obsCfg.customWidth || 1280;
+      if ($('cfg-obs-custom-height')) $('cfg-obs-custom-height').value = obsCfg.customHeight || 720;
+      updateObsCustomOutputUI();
     } catch {}
   }
 }
@@ -7543,6 +7610,10 @@ async function magicConnectObs(triggerButton = null) {
     port: Number($('cfg-obs-port')?.value || 4455),
     autoConnect: true,
     playbackOverlapFrames: Number($('cfg-playback-overlap-frames')?.value || 2),
+    outputResolution: $('cfg-obs-output-resolution')?.value || 'auto',
+    outputRatio: $('cfg-obs-output-ratio')?.value || 'auto',
+    customWidth: Number($('cfg-obs-custom-width')?.value || 1280),
+    customHeight: Number($('cfg-obs-custom-height')?.value || 720),
   };
   const restartIntervalMinutes = Number($('cfg-livetalking-restart-interval')?.value || 15);
   localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify(obsSettings));
@@ -7573,7 +7644,7 @@ async function magicConnectObs(triggerButton = null) {
       if (presetStatus) presetStatus.textContent = `Ready: OBS and AI IDOL use ${outputPresetCopy}.`;
     } else if (output.videoPreset?.streamActive) {
       if (presetCard) presetCard.dataset.state = 'pending';
-      if (presetStatus) presetStatus.textContent = `OBS is live. Stop streaming, then press Magic Connect once to apply ${outputPresetCopy} safely.`;
+      if (presetStatus) presetStatus.textContent = `Connected while OBS is live using ${outputPresetCopy}. Resolution changes are deferred until streaming stops.`;
     } else {
       if (presetCard) presetCard.dataset.state = 'error';
       if (presetStatus) presetStatus.textContent = 'Video preset could not be applied. Check OBS video settings.';
@@ -7614,17 +7685,26 @@ function bindEventListeners() {
   $('cancel-modal-upload')?.addEventListener('click', () => closeModal('modal-upload-clip'));
 
   // OBS Settings Inputs Persistence
-  ['cfg-obs-host', 'cfg-obs-port', 'cfg-obs-autoconnect', 'cfg-playback-overlap-frames'].forEach(id => {
+  ['cfg-obs-host', 'cfg-obs-port', 'cfg-obs-autoconnect', 'cfg-playback-overlap-frames', 'cfg-obs-output-resolution', 'cfg-obs-output-ratio', 'cfg-obs-custom-width', 'cfg-obs-custom-height'].forEach(id => {
     $(id)?.addEventListener('input', () => {
       const obsSettings = {
         host: $('cfg-obs-host')?.value || 'localhost',
         port: $('cfg-obs-port')?.value || '4455',
         autoConnect: $('cfg-obs-autoconnect')?.checked || false,
         playbackOverlapFrames: Number($('cfg-playback-overlap-frames')?.value || 2),
+        outputResolution: $('cfg-obs-output-resolution')?.value || 'auto',
+        outputRatio: $('cfg-obs-output-ratio')?.value || 'auto',
+        customWidth: Number($('cfg-obs-custom-width')?.value || 1280),
+        customHeight: Number($('cfg-obs-custom-height')?.value || 720),
       };
       App.playbackOverlapFrames = obsSettings.playbackOverlapFrames;
       localStorage.setItem(STORAGE_KEYS.OBS_CONFIG, JSON.stringify(obsSettings));
+      updateObsCustomOutputUI();
     });
+  });
+  ['cfg-obs-output-resolution', 'cfg-obs-output-ratio', 'cfg-obs-custom-width', 'cfg-obs-custom-height'].forEach(id => {
+    $(id)?.addEventListener('change', updateObsCustomOutputUI);
+    $(id)?.addEventListener('input', updateObsCustomOutputUI);
   });
   $('cfg-playback-overlap-frames')?.addEventListener('change', event => {
     const playbackOverlapFrames = Math.max(0, Math.min(4, Number(event.target.value) || 0));
@@ -7651,7 +7731,7 @@ function bindEventListeners() {
   qualityControl?.addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
     event.preventDefault();
-    const qualities = ['fhd'];
+    const qualities = ['hd'];
     const direction = event.key === 'ArrowRight' ? 1 : -1;
     const currentIndex = qualities.indexOf(App.talkingEngine.videoQuality);
     const quality = qualities[(currentIndex + direction + qualities.length) % qualities.length];
@@ -9208,6 +9288,7 @@ function setupStudioShell() {
 
   const engineIcons = { 'qwen-director': 'psychology', 'chatgpt-fallback': 'cloud', 'qwen-tts': 'record_voice_over', 'live-avatar': 'face', 'obs-bridge': 'live_tv', 'media-tools': 'movie_edit' };
   const engineActionIcons = { start: 'play_arrow', stop: 'stop', restart: 'restart_alt' };
+  const engineActionLabels = { start: 'Start Engine', stop: 'Stop', restart: 'Restart' };
   const renderEngineCards = engines => {
     const grid = $('engine-card-grid');
     if (!grid) return;
@@ -9276,7 +9357,9 @@ function setupStudioShell() {
         buttonIcon.className = 'material-symbols-rounded';
         buttonIcon.setAttribute('aria-hidden', 'true');
         buttonIcon.textContent = engineActionIcons[action] || 'settings';
-        button.append(buttonIcon);
+        const buttonLabel = document.createElement('span');
+        buttonLabel.textContent = engineActionLabels[action] || action;
+        button.append(buttonIcon, buttonLabel);
         buttonRow.append(button);
       });
       controlsInner.append(buttonRow);

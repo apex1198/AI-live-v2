@@ -7,7 +7,7 @@ if not defined QWEN_TTS_PYTHON set "QWEN_TTS_PYTHON=%QWEN_TTS_RUNTIME_DIR%\.venv
 if not defined QWEN_TTS_MODEL_PATH set "QWEN_TTS_MODEL_PATH=%QWEN_TTS_RUNTIME_DIR%\gwen-tts-0.6B"
 if not defined QWEN_TTS_DATA_DIR set "QWEN_TTS_DATA_DIR=%QWEN_TTS_RUNTIME_DIR%\data"
 if not defined QWEN_TTS_HOST set "QWEN_TTS_HOST=127.0.0.1"
-if not defined QWEN_TTS_PORT set "QWEN_TTS_PORT=8002"
+if not defined QWEN_TTS_PORT set "QWEN_TTS_PORT=3333"
 
 if not exist "%QWEN_TTS_PYTHON%" (
   echo Qwen TTS Python runtime is missing: %QWEN_TTS_PYTHON%

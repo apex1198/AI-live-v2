@@ -122,7 +122,7 @@ class TaskManager:
                     save_path=task.params.get('save_path', './data/avatars'),
                     bbox_shift=task.params.get('bbox_shift', 0),
                     extra_margin=task.params.get('extra_margin', 10),
-                    parsing_mode=task.params.get('parsing_mode', 'jaw'),
+                    parsing_mode=task.params.get('parsing_mode', 'lower_face'),
                     version=task.params.get('version', 'v15'),
                     progress_callback=progress_callback
                 )

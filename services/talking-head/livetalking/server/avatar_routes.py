@@ -85,7 +85,7 @@ async def create_avatar_task(request):
             "nosmooth": params.get('nosmooth', 'false').lower() == 'true' if isinstance(params.get('nosmooth'), str) else params.get('nosmooth', False),
             "bbox_shift": max(-50, min(50, int(params.get('bbox_shift', 0)))),
             "extra_margin": max(0, min(100, int(params.get('extra_margin', 10)))),
-            "parsing_mode": params.get('parsing_mode', 'jaw') if params.get('parsing_mode', 'jaw') in ('jaw', 'raw') else 'jaw',
+            "parsing_mode": params.get('parsing_mode', 'lower_face') if params.get('parsing_mode', 'lower_face') in ('lower_face', 'mouth', 'jaw', 'raw') else 'lower_face',
             "version": params.get('version', 'v15') if params.get('version', 'v15') in ('v15', 'v1') else 'v15',
             "face_det_batch_size": max(1, min(64, int(params.get('face_det_batch_size', 16))))
         }

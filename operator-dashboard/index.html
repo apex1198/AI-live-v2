@@ -719,6 +719,18 @@
           <label><span>Product knowledge</span><textarea id="director-products" rows="6" placeholder="Tên sản phẩm, lợi ích, giá, ưu đãi và claim được phép nói..."></textarea></label>
         </div>
         <div class="director-actions"><span id="director-save-status">Saved locally for this workspace.</span><button type="button" class="btn-primary" id="build-director-brief"><span class="material-symbols-rounded">auto_awesome</span>Build Director brief</button></div>
+        <div class="show-schedule-panel">
+          <div class="director-panel-title"><div><span class="workspace-eyebrow">SHOW TIMELINE</span><h2>Scene schedule</h2></div><button type="button" class="btn-icon-hdr" id="add-show-cue" title="Add timeline cue" aria-label="Add timeline cue"><span class="material-symbols-rounded" aria-hidden="true">add</span></button></div>
+          <div class="show-cue-editor">
+            <label><span>Minute</span><input id="show-cue-minute" type="number" min="0" max="1440" value="10" /></label>
+            <label><span>Phase</span><input id="show-cue-phase" value="warmup" /></label>
+            <label><span>Action</span><select id="show-cue-action"><option value="speak">AI speaks</option><option value="scene">Change scene</option><option value="cta">CTA</option></select></label>
+            <label><span>Scene</span><select id="show-cue-scene"><option value="GAMEPLAY_IDLE">Idle</option><option value="GAMEPLAY_FOCUS">Gameplay</option><option value="INVITE_PLAY">Invite</option><option value="CTA">CTA</option><option value="HAPPY">Happy</option><option value="TALKING">Talking</option></select></label>
+            <label class="show-cue-prompt"><span>Director prompt</span><input id="show-cue-prompt" placeholder="Mời mọi người vào xem và bắt đầu giao lưu..." /></label>
+          </div>
+          <div class="show-cue-list" id="show-cue-list"></div>
+          <div class="director-actions"><span id="show-schedule-status">Timeline follows live elapsed time.</span><button type="button" class="btn-primary" id="save-show-schedule"><span class="material-symbols-rounded" aria-hidden="true">save</span>Save timeline</button></div>
+        </div>
       </section>
       <aside class="director-sources-panel">
         <div class="director-panel-title"><div><span class="workspace-eyebrow">REFERENCE SOURCES</span><h2>Brief inputs</h2></div><button type="button" class="btn-icon-hdr" id="director-add-source" title="Add reference source" aria-label="Add reference source"><span class="material-symbols-rounded">add</span></button></div>
@@ -744,7 +756,6 @@
     <div class="settings-preferences-layout">
       <nav class="settings-section-tabs" role="tablist" aria-label="Settings sections">
         <button type="button" class="settings-section-tab active" role="tab" aria-selected="true" data-settings-target="output"><span class="material-symbols-rounded" aria-hidden="true">live_tv</span><span>OBS &amp; Output</span></button>
-        <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="engine"><span class="material-symbols-rounded" aria-hidden="true">motion_photos_on</span><span>Lipsync Engine</span></button>
         <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="chat"><span class="material-symbols-rounded" aria-hidden="true">forum</span><span>Live Chat</span></button>
         <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="storage"><span class="material-symbols-rounded" aria-hidden="true">folder_open</span><span>Storage</span></button>
         <button type="button" class="settings-section-tab" role="tab" aria-selected="false" data-settings-target="engines"><span class="material-symbols-rounded" aria-hidden="true">deployed_code</span><span>AI Engines</span></button>
@@ -760,24 +771,6 @@
         <div class="settings-bento-content" id="web-settings-obs-slot"></div>
         <div class="settings-bento-actions" id="web-settings-obs-actions"></div>
       </section>
-      <section class="settings-bento-card" data-settings-pane="engine" role="tabpanel" hidden>
-        <div class="settings-bento-head"><span class="material-symbols-rounded" aria-hidden="true">motion_photos_on</span><div><h2>Lipsync Engine</h2><p>Realtime lipsync.</p></div><span class="settings-status" id="livetalking-engine-badge" data-state="OFFLINE">Inactive</span></div>
-        <div class="livetalking-engine-summary" role="status" aria-live="polite" aria-atomic="true">
-          <span class="livetalking-engine-dot" id="livetalking-engine-dot" data-state="OFFLINE" aria-hidden="true"></span>
-          <div><strong id="livetalking-engine-status">Inactive</strong><small id="livetalking-engine-detail">Stopped</small></div>
-        </div>
-        <label class="livetalking-engine-toggle" for="cfg-livetalking-always-on">
-          <span><strong>Always on</strong><small id="livetalking-engine-mode">Automatic startup</small></span>
-          <input type="checkbox" id="cfg-livetalking-always-on" role="switch" checked />
-        </label>
-        <div class="settings-bento-actions livetalking-engine-actions">
-          <span id="livetalking-engine-action-status" aria-live="polite">Ready.</span>
-          <div>
-            <button type="button" class="btn-secondary" id="stop-livetalking-engine"><span class="material-symbols-rounded" aria-hidden="true">stop</span>Stop</button>
-            <button type="button" class="btn-primary" id="start-livetalking-engine"><span class="material-symbols-rounded" aria-hidden="true">play_arrow</span>Start</button>
-          </div>
-        </div>
-      </section>
       <section class="settings-bento-card" data-settings-pane="chat" role="tabpanel" hidden>
         <div class="settings-bento-head"><span class="material-symbols-rounded" aria-hidden="true">forum</span><div><h2>Live Chat</h2><p>Merge platform chat.</p></div><span class="settings-status" id="platform-chat-source-count">0 live</span></div>
         <div class="platform-chat-summary">
@@ -789,6 +782,7 @@
             <span class="platform-chat-source-code" data-platform="youtube">YT</span>
             <div class="platform-chat-source-copy"><div><strong>YouTube</strong><span class="platform-chat-state" id="youtube-chat-state">Inactive</span></div><small id="youtube-chat-detail">Connect Google for chat.</small></div>
             <div class="platform-chat-source-actions">
+              <label class="platform-ai-reply-toggle"><span>AI Reply</span><input type="checkbox" id="youtube-ai-reply" role="switch" /></label>
               <button type="button" class="btn-secondary platform-chat-connect" id="connect-youtube-chat"><span class="material-symbols-rounded" aria-hidden="true">login</span>Continue with Google</button>
               <button type="button" class="btn-text-action platform-chat-disconnect" id="disconnect-youtube-chat" hidden>Disconnect</button>
             </div>
@@ -797,6 +791,7 @@
             <span class="platform-chat-source-code" data-platform="facebook">FB</span>
             <div class="platform-chat-source-copy"><div><strong>Facebook</strong><span class="platform-chat-state" id="facebook-chat-state">Inactive</span></div><small id="facebook-chat-detail">Connect Facebook for chat.</small></div>
             <div class="platform-chat-source-actions">
+              <label class="platform-ai-reply-toggle"><span>AI Reply</span><input type="checkbox" id="facebook-ai-reply" role="switch" /></label>
               <button type="button" class="btn-secondary platform-chat-connect" id="connect-facebook-chat"><span class="material-symbols-rounded" aria-hidden="true">login</span>Continue with Facebook</button>
               <button type="button" class="btn-text-action platform-chat-disconnect" id="disconnect-facebook-chat" hidden>Disconnect</button>
             </div>
@@ -813,7 +808,7 @@
         <div class="settings-bento-actions"><span id="project-storage-status">Loading settings...</span><button id="save-project-storage" type="button" class="btn-primary">Save folder</button></div>
       </section>
       <section class="settings-bento-card settings-engines-pane" data-settings-pane="engines" role="tabpanel" hidden>
-        <div class="settings-bento-head"><span class="material-symbols-rounded">deployed_code</span><div><h2>AI Engines</h2><p>Control local engines.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
+        <div class="settings-bento-head"><span class="material-symbols-rounded">deployed_code</span><div><h2>AI Engines</h2><p>Configure and control local engines.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
         <div class="settings-engine-subhead"><div><strong>Director configuration</strong><small>Qwen primary. ChatGPT fallback.</small></div></div>
         <div class="ai-director-provider-field"><label for="ai-director-provider">Configuration</label><select id="ai-director-provider"><option value="ollama">Qwen 8B - Primary</option><option value="ttm-chatgpt">ChatGPT - Fallback credential</option></select></div>
         <div class="ai-director-provider-panel" id="ai-director-ollama-panel">
@@ -823,7 +818,7 @@
         </div>
         <div class="ai-director-provider-panel" id="ai-director-ttm-panel" hidden><div class="ai-director-cloud-fields"><label><span>TTM API Key</span><input id="ai-director-api-key" type="password" autocomplete="off" placeholder="Enter API key" /></label><label><span>ChatGPT model</span><select id="ai-director-chatgpt-model"><option value="chat-latest">chat-latest</option></select></label></div><p class="local-ai-note">TTM key stays private.</p><div class="ai-director-inline-actions"><span id="ai-director-ttm-status" aria-live="polite">Enter a key to check models.</span><button id="refresh-ai-director-models" type="button" class="btn-secondary"><span class="material-symbols-rounded">sync</span>Check models</button></div></div>
         <div class="settings-bento-actions"><span id="ai-director-save-status" aria-live="polite"></span><button id="save-ai-director" type="button" class="btn-primary"><span class="material-symbols-rounded">save</span>Save AI Director</button></div>
-        <div class="settings-engine-subhead settings-engine-runtime-head"><div><strong>Runtime engines</strong><small id="engine-manager-summary">Checking local engines...</small></div><button type="button" class="btn-icon-hdr" id="refresh-ai-engines" title="Refresh engine status" aria-label="Refresh engine status"><span class="material-symbols-rounded" aria-hidden="true">refresh</span></button></div>
+        <div class="settings-engine-subhead settings-engine-runtime-head"><div><strong>Engine Health</strong><small id="engine-manager-summary">Checking local engines...</small></div><button type="button" class="btn-icon-hdr" id="refresh-ai-engines" title="Refresh engine status" aria-label="Refresh engine status"><span class="material-symbols-rounded" aria-hidden="true">refresh</span></button></div>
         <div class="engine-card-grid" id="engine-card-grid" aria-busy="true">
           <div class="engine-card-skeleton"></div><div class="engine-card-skeleton"></div>
           <div class="engine-card-skeleton"></div><div class="engine-card-skeleton"></div>

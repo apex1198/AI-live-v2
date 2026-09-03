@@ -363,19 +363,12 @@ def track_face_geometry(frames: Iterable[np.ndarray], model_path: Optional[str] 
         for frame in frame_list:
             raw_landmarks.append(tracker.detect(frame))
 
-    missing_indices = [index for index, points in enumerate(raw_landmarks) if points is None]
-    if missing_indices:
-        preview = ", ".join(str(index) for index in missing_indices[:12])
-        suffix = "..." if len(missing_indices) > 12 else ""
-        raise RuntimeError(
-            "MediaPipe failed to return 478 landmarks for every frame; "
-            f"missing frame indices: {preview}{suffix}"
-        )
     valid = [points for points in raw_landmarks if points is not None]
     if len(valid) < max(3, int(len(frame_list) * 0.5)):
         raise RuntimeError(
             f"MediaPipe detected too few faces ({len(valid)}/{len(frame_list)}) for alignment"
         )
+    raw_landmarks = recover_missing_landmarks(raw_landmarks)
     reference_points = np.median(np.stack(valid, axis=0), axis=0).astype(np.float32)
     result: list[Optional[dict[str, Any]]] = []
     for index, points in enumerate(raw_landmarks):
@@ -384,6 +377,36 @@ def track_face_geometry(frames: Iterable[np.ndarray], model_path: Optional[str] 
             raise RuntimeError(f"Could not build a valid perspective transform for frame {index}")
         result.append(alignment)
     return result
+
+
+def recover_missing_landmarks(
+    landmarks: list[Optional[np.ndarray]],
+) -> list[np.ndarray]:
+    """Recover failed detections while preserving continuous face motion."""
+    valid_indices = [index for index, points in enumerate(landmarks) if points is not None]
+    if not valid_indices:
+        raise RuntimeError("MediaPipe did not detect a face in any frame")
+
+    recovered: list[np.ndarray] = []
+    for index, points in enumerate(landmarks):
+        if points is not None:
+            recovered.append(np.asarray(points, dtype=np.float32))
+            continue
+
+        previous = next((candidate for candidate in reversed(valid_indices) if candidate < index), None)
+        following = next((candidate for candidate in valid_indices if candidate > index), None)
+        if previous is None:
+            recovered.append(np.asarray(landmarks[following], dtype=np.float32).copy())
+            continue
+        if following is None:
+            recovered.append(np.asarray(landmarks[previous], dtype=np.float32).copy())
+            continue
+
+        start = np.asarray(landmarks[previous], dtype=np.float32)
+        end = np.asarray(landmarks[following], dtype=np.float32)
+        weight = float(index - previous) / float(following - previous)
+        recovered.append((start * (1.0 - weight) + end * weight).astype(np.float32))
+    return recovered
 
 
 def warp_to_aligned(frame: np.ndarray, alignment: dict[str, Any]) -> np.ndarray:

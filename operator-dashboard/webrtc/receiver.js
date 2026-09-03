@@ -49,15 +49,21 @@
           void this.emitMediaState('audio-element-missing');
           return false;
         }
-        audio.muted = false;
-        audio.defaultMuted = false;
-        audio.volume = 1;
         if (getApp().isMuted) {
           this.audioPlayable = true;
           void this.emitMediaState('audio-muted-by-operator');
           return false;
         }
         try {
+          // Prime playback while muted first. Browsers allow muted autoplay,
+          // then the dedicated Web App profile can immediately enable sound.
+          if (audio.paused) {
+            audio.muted = true;
+            await audio.play();
+          }
+          audio.muted = false;
+          audio.defaultMuted = false;
+          audio.volume = 1;
           await audio.play();
           this.audioPlayable = true;
           void this.emitMediaState('audio-playable');
@@ -160,8 +166,8 @@
         const audio = document.createElement('audio');
         audio.autoplay = true;
         audio.playsInline = true;
-        audio.muted = false;
-        audio.defaultMuted = false;
+        audio.muted = true;
+        audio.defaultMuted = true;
         audio.volume = 1;
         audio.setAttribute('aria-hidden', 'true');
         audio.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;';

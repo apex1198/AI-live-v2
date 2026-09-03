@@ -45,6 +45,7 @@ const STORAGE_KEYS = {
   STUDIO_COLUMNS:       'idol_studio_columns',
   VIDEO_QUALITY:        'idol_live_video_quality',
   MOCK_CHAT_USER:       'idol_mock_chat_user',
+  FORM_DRAFTS:          'idol_form_drafts_v1',
 };
 
 const LIVE_VIDEO_PRESETS = Object.freeze({
@@ -125,6 +126,9 @@ const LiveMediaOwnership = {
   waiters: new Set(),
 };
 let liveMediaResetPromise = null;
+let operationalAvatarRestorePromise = null;
+let operationalAvatarRestoreTimer = null;
+let appStartupComplete = false;
 
 function settleLiveMediaOwnership(state, ownerClientId = '') {
   LiveMediaOwnership.state = state;
@@ -488,12 +492,21 @@ function platformChatStateCopy(platform, source = {}) {
   if (!source.configured) return { label: 'Setup required', detail: `${provider} login not configured.` };
   if (source.state === 'CONNECTING') return { label: 'Connecting', detail: `Approve ${provider} access.` };
   if (source.state === 'LISTENING') return { label: 'Listening', detail: source.liveTitle ? `${source.accountName || provider} · ${source.liveTitle}` : `${source.accountName || provider} · Live chat connected` };
+  if (source.state === 'PAUSED') return { label: 'Paused', detail: `${source.accountName || provider} · No API calls until Start chat.` };
   if (source.state === 'WAITING_FOR_LIVE') return { label: 'Waiting for live', detail: `${source.accountName || provider} · Start live for chat.` };
   if (source.state === 'ERROR') return { label: 'Needs attention', detail: source.error || `${provider} chat could not connect.` };
   return { label: 'Signed out', detail: platform === 'youtube' ? 'Connect Google for chat.' : 'Connect Facebook for chat.' };
 }
 
-function applyPlatformChatStatus(platformChat = {}) {
+function applyPlatformReplySettings(settings = {}) {
+  ['youtube', 'facebook'].forEach(platform => {
+    const toggle = $(`${platform}-ai-reply`);
+    if (toggle && document.activeElement !== toggle) toggle.checked = Boolean(settings[platform]);
+  });
+}
+
+function applyPlatformChatStatus(platformChat = {}, platformReply = null) {
+  if (platformReply) applyPlatformReplySettings(platformReply);
   const sources = platformChat.sources || {};
   let authenticatedCount = 0;
   let listeningCount = 0;
@@ -512,8 +525,10 @@ function applyPlatformChatStatus(platformChat = {}) {
     }
     if (detail) detail.textContent = copy.detail;
     if (connect) {
-      connect.hidden = Boolean(source.authenticated);
+      connect.hidden = Boolean(source.authenticated && source.state !== 'PAUSED' && source.state !== 'ERROR');
       connect.disabled = !source.configured || source.state === 'CONNECTING';
+      const label = source.authenticated ? 'Start chat' : `Continue with ${platform === 'youtube' ? 'Google' : 'Facebook'}`;
+      connect.innerHTML = `<span class="material-symbols-rounded" aria-hidden="true">${source.authenticated ? 'play_arrow' : 'login'}</span>${label}`;
     }
     if (disconnect) disconnect.hidden = !source.authenticated;
   });
@@ -539,7 +554,9 @@ async function connectPlatformChat(platform) {
   const button = $(`connect-${platform}-chat`);
   const summary = $('platform-chat-summary');
   if (button) button.disabled = true;
-  if (summary) summary.textContent = `Opening ${platform === 'youtube' ? 'Google' : 'Facebook'} login...`;
+  if (summary) summary.textContent = button?.textContent?.includes('Start chat')
+    ? `Checking ${platform === 'youtube' ? 'YouTube' : 'Facebook'} live once...`
+    : `Opening ${platform === 'youtube' ? 'Google' : 'Facebook'} login...`;
   try {
     const payload = await window.RuntimeApi.post(`/api/platform-chat/${platform}/connect`, {});
     applyPlatformChatStatus(payload.platformChat || {});
@@ -557,6 +574,15 @@ async function disconnectPlatformChat(platform) {
   } catch (error) {
     if (summary) summary.textContent = error.message;
   }
+}
+
+async function savePlatformReplySettings() {
+  const settings = {
+    youtube: Boolean($('youtube-ai-reply')?.checked),
+    facebook: Boolean($('facebook-ai-reply')?.checked),
+  };
+  const payload = await window.RuntimeApi.post('/api/platform-chat/reply-settings', settings);
+  applyPlatformReplySettings(payload.platformReply || settings);
 }
 
 function handleRuntimeRealtimeMessage(payload) {
@@ -651,6 +677,7 @@ function connectRuntimeRealtime() {
         peerId: OBS_OUTPUT_PUBLISHER_ID,
         priority: document.visibilityState === 'visible' ? 100 : 10,
       });
+      scheduleOperationalAvatarRestore('runtime reconnected');
     }
     if (state === 'closed') {
       settleLiveMediaOwnership('PENDING');
@@ -712,6 +739,7 @@ function ctaCountdown(ms) {
 // ── Audio Context Unlocker ────────────────────────────────
 async function unlockAudio(requirePlayback = false) {
   try {
+    App.isMuted = false;
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (AudioContextClass && !App.audioCtx) {
       App.audioCtx = new AudioContextClass();
@@ -727,8 +755,12 @@ async function unlockAudio(requirePlayback = false) {
     // Must run inside the user's click gesture. WebRTC audio can arrive several
     // seconds later, after TTS/MuseTalk inference, so autoplay alone is not
     // reliable (especially Safari/Chrome with strict media policies).
-    const playbackReady = await LiveTalkingWebRTCClient?.ensureAudioPlayback?.();
-    if (!playbackReady) throw new Error('Live Monitor audio is not ready');
+    const receiverAudioReady = Boolean(LiveTalkingWebRTCClient?.audioEl);
+    const playbackReady = receiverAudioReady
+      ? await LiveTalkingWebRTCClient.ensureAudioPlayback()
+      : false;
+    if (receiverAudioReady && !playbackReady) throw new Error('Live Monitor audio is not ready');
+    if (requirePlayback && !playbackReady) throw new Error('Live Monitor audio track is not ready');
     App.isAudioUnlocked = true;
     const audioButton = $('btn-test-sound');
     if (audioButton) {
@@ -2537,8 +2569,7 @@ const LiveTalkingWebRTCClient = window.createLiveTalkingWebRTCClient({
     if (media.clientId === LIVE_MEDIA_CLIENT_ID && LiveMediaOwnership.state === 'OWNER') {
       LiveMediaOwnership.mediaReady = media.connectionState === 'CONNECTED'
         && media.audioTrack
-        && media.videoTrack
-        && media.audioPlayable;
+        && media.videoTrack;
     }
     sendRuntimeSignal(media);
   },
@@ -2736,6 +2767,65 @@ function reconnectLiveTalkingAvatar(avatarId) {
   return liveTalkingReconnectPromise;
 }
 
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function restoreOperationalAvatar({ attempts = 5, status = null } = {}) {
+  if (operationalAvatarRestorePromise) return operationalAvatarRestorePromise;
+  operationalAvatarRestorePromise = (async () => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await refreshLiveTalkingWorkerStatus({ silent: true });
+        if (LiveTalkingWorker.alwaysOn && !LiveTalkingWorker.ready) await ensureLiveTalkingWorkerReady();
+        if (!LiveTalkingWorker.ready) throw new Error('Lipsync worker is not ready');
+
+        const avatars = await refreshLiveTalkingAvatarList();
+        const preferredAvatar = [
+          LiveAvatarSession.activeAvatarId,
+          localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR),
+          LiveTalkingStudio.avatarId,
+          ...LiveAvatarSession.selectedAvatarIds,
+          avatars[0]?.id,
+        ].find(id => id && avatars.some(avatar => avatar.id === id));
+        if (!preferredAvatar) throw new Error('No trained avatar is available');
+
+        LiveAvatarSession.activeAvatarId = preferredAvatar;
+        LiveTalkingStudio.avatarId = preferredAvatar;
+        if (!LiveAvatarSession.selectedAvatarIds.includes(preferredAvatar)) {
+          LiveAvatarSession.selectedAvatarIds.push(preferredAvatar);
+        }
+        await saveActiveAvatarSession();
+        await waitForLiveMediaOwnership();
+        const connectedAvatar = LiveTalkingWebRTCClient.isViable?.()
+          && LiveTalkingStudio.avatarId === preferredAvatar;
+        if (!connectedAvatar) await reconnectLiveTalkingAvatar(preferredAvatar);
+        await unlockAudio(false);
+        await LiveTalkingWebRTCClient.ensureAudioPlayback?.();
+        return preferredAvatar;
+      } catch (error) {
+        lastError = error;
+        if (status) status.textContent = `Restoring avatar (${attempt}/${attempts})…`;
+        if (attempt < attempts) await wait(Math.min(1000 * (2 ** (attempt - 1)), 5000));
+      }
+    }
+    throw lastError || new Error('Avatar restore failed');
+  })().finally(() => { operationalAvatarRestorePromise = null; });
+  return operationalAvatarRestorePromise;
+}
+
+function scheduleOperationalAvatarRestore(reason = 'state changed', delayMs = 350) {
+  if (!appStartupComplete) return;
+  clearTimeout(operationalAvatarRestoreTimer);
+  operationalAvatarRestoreTimer = setTimeout(() => {
+    if (!runtimeRealtimeConnected || LiveMediaOwnership.state === 'STANDBY') return;
+    void restoreOperationalAvatar({ attempts: 3 })
+      .catch(error => {
+        addLog(`Avatar restore after ${reason} failed: ${error.message}`, 'warn');
+        scheduleOperationalAvatarRestore('automatic retry', 5000);
+      });
+  }, delayMs);
+}
+
 function applyLiveTalkingWorkerState(worker = {}) {
   LiveTalkingWorker.state = worker.state || (worker.ready ? 'READY' : 'OFFLINE');
   LiveTalkingWorker.ready = Boolean(worker.ready);
@@ -2755,6 +2845,7 @@ function applyLiveTalkingWorkerState(worker = {}) {
   const alwaysOn = $('cfg-livetalking-always-on');
   const startButton = $('start-livetalking-engine');
   const stopButton = $('stop-livetalking-engine');
+  const restartButton = $('restart-livetalking-engine');
   const labels = {
     OFFLINE: 'Inactive',
     STARTING: 'Starting',
@@ -2798,6 +2889,7 @@ function applyLiveTalkingWorkerState(worker = {}) {
     stopButton.disabled = transitioning || !LiveTalkingWorker.ready;
     stopButton.setAttribute('aria-busy', String(LiveTalkingWorker.state === 'STOPPING'));
   }
+  if (restartButton) restartButton.disabled = transitioning;
   updateLiveVideoQualityAvailability();
 }
 
@@ -2811,6 +2903,7 @@ async function refreshLiveTalkingWorkerStatus({ silent = false } = {}) {
     const previousInstanceKey = LiveTalkingWorker.instanceKey;
     applyLiveTalkingWorkerState(payload.worker || {});
     const becameReady = !wasReady && LiveTalkingWorker.ready;
+    if (becameReady) scheduleOperationalAvatarRestore('Lipsync worker became ready');
     if (becameReady && TRAINED_AVATARS.size === 0) {
       await refreshLiveTalkingAvatarList().catch(error => {
         addLog(`Could not restore Avatar Library: ${error.message}`, 'warn');
@@ -6518,7 +6611,8 @@ function applyRuntimeSettingsUI(settings = {}) {
     applyObsStatus(settings.obs);
     updateObsCustomOutputUI();
   }
-  if (settings.platformChat) applyPlatformChatStatus(settings.platformChat);
+  if (settings.platformChat) applyPlatformChatStatus(settings.platformChat, settings.platformReply);
+  else if (settings.platformReply) applyPlatformReplySettings(settings.platformReply);
   loadPersistedSettings();
 }
 
@@ -6643,6 +6737,51 @@ function loadPersistedSettings() {
   }
 }
 
+function isDraftableControl(control) {
+  if (!(control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement || control instanceof HTMLSelectElement)) return false;
+  if (!control.id || control.disabled || control.type === 'file' || control.type === 'password') return false;
+  if (!control.closest('#view-live-settings, #view-director, #view-settings')) return false;
+  return !/(api[-_]?key|token|secret|password|chat-message|source-file)/i.test(`${control.id} ${control.name || ''}`);
+}
+
+function readFormDrafts() {
+  try {
+    const drafts = JSON.parse(localStorage.getItem(STORAGE_KEYS.FORM_DRAFTS) || '{}');
+    return drafts && typeof drafts === 'object' && !Array.isArray(drafts) ? drafts : {};
+  } catch {
+    return {};
+  }
+}
+
+function restoreFormDrafts() {
+  const drafts = readFormDrafts();
+  for (const [id, saved] of Object.entries(drafts)) {
+    const control = $(id);
+    if (!isDraftableControl(control) || !saved || typeof saved !== 'object') continue;
+    if (control.type === 'checkbox' || control.type === 'radio') control.checked = Boolean(saved.checked);
+    else control.value = String(saved.value ?? '');
+  }
+}
+
+function setupFormDraftPersistence() {
+  if (document.documentElement.dataset.formDraftsReady === 'true') return;
+  document.documentElement.dataset.formDraftsReady = 'true';
+  let saveTimer = null;
+  const saveControl = control => {
+    if (!isDraftableControl(control)) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      const drafts = readFormDrafts();
+      drafts[control.id] = control.type === 'checkbox' || control.type === 'radio'
+        ? { checked: control.checked }
+        : { value: control.value };
+      localStorage.setItem(STORAGE_KEYS.FORM_DRAFTS, JSON.stringify(drafts));
+    }, 120);
+  };
+  document.addEventListener('input', event => saveControl(event.target));
+  document.addEventListener('change', event => saveControl(event.target));
+}
+
 const DIRECTOR_STORAGE_KEY = 'idol_director_brief_v1';
 function setupDirectorBrief() {
   const briefPanel = document.querySelector('.director-brief-panel');
@@ -6659,6 +6798,35 @@ function setupDirectorBrief() {
   $('director-save-source')?.addEventListener('click', () => { const file = $('director-source-file')?.files?.[0]; const name = $('director-source-name')?.value.trim() || file?.name || 'Reference source'; const url = $('director-source-url')?.value.trim(); sources.push({ name, detail: file ? `${file.name} · local file` : (url || 'Manual reference'), kind: file ? 'file' : 'link' }); render(); save(false); $('director-source-form').hidden = true; });
   $('director-source-list')?.addEventListener('click', e => { const button = e.target.closest('[data-remove-source]'); if (!button) return; sources.splice(Number(button.dataset.removeSource), 1); render(); save(false); });
   $('build-director-brief')?.addEventListener('click', async () => { save(true); const settings = { goal: $('director-objective').value, personaBrief: $('director-personality').value, context: `${$('director-playbook').value}\n\nProduct knowledge:\n${$('director-products').value}\n\nReferences: ${sources.map(s => s.name).join(', ')}` }; if (location.protocol !== 'file:') await window.RuntimeApi.post('/api/settings/live-session', settings).catch(() => {}); });
+  let showCues = [];
+  const renderShowCues = () => {
+    const list = $('show-cue-list');
+    if (!list) return;
+    list.replaceChildren();
+    if (!showCues.length) {
+      const empty = document.createElement('div'); empty.className = 'show-cue-empty'; empty.textContent = 'No timeline cues yet.'; list.append(empty); return;
+    }
+    showCues.forEach((cue, index) => {
+      const row = document.createElement('div'); row.className = 'show-cue-item';
+      const minute = document.createElement('strong'); minute.textContent = `${cue.minute} min`;
+      const phase = document.createElement('span'); phase.textContent = cue.phase;
+      const action = document.createElement('span'); action.className = 'show-cue-action'; action.textContent = cue.action;
+      const prompt = document.createElement('span'); prompt.textContent = cue.prompt || cue.scene || '';
+      const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.removeShowCue = String(index); remove.title = 'Remove cue'; remove.setAttribute('aria-label', 'Remove cue'); remove.innerHTML = '<span class="material-symbols-rounded" aria-hidden="true">delete</span>';
+      row.append(minute, phase, action, prompt, remove); list.append(row);
+    });
+  };
+  $('add-show-cue')?.addEventListener('click', () => {
+    showCues.push({ id: `cue_${Date.now()}`, minute: Math.max(0, Number($('show-cue-minute')?.value || 0)), phase: $('show-cue-phase')?.value.trim() || 'main_game', action: $('show-cue-action')?.value || 'speak', scene: $('show-cue-scene')?.value || 'GAMEPLAY_IDLE', prompt: $('show-cue-prompt')?.value.trim() || '', enabled: true });
+    showCues.sort((a, b) => a.minute - b.minute); renderShowCues();
+  });
+  $('show-cue-list')?.addEventListener('click', event => { const button = event.target.closest('[data-remove-show-cue]'); if (!button) return; showCues.splice(Number(button.dataset.removeShowCue), 1); renderShowCues(); });
+  $('save-show-schedule')?.addEventListener('click', async () => {
+    const status = $('show-schedule-status'); if (status) status.textContent = 'Saving timeline...';
+    try { const payload = await window.RuntimeApi.post('/api/ai/director/show-schedule', { cues: showCues }); showCues = payload.showSchedule?.cues || showCues; renderShowCues(); if (status) status.textContent = `${showCues.length} cue${showCues.length === 1 ? '' : 's'} active.`; }
+    catch (error) { if (status) status.textContent = error.message; }
+  });
+  if (location.protocol !== 'file:') window.RuntimeApi.get('/api/ai/director/show-schedule').then(payload => { showCues = payload.showSchedule?.cues || []; renderShowCues(); }).catch(() => renderShowCues()); else renderShowCues();
 }
 
 function setupLiveSettingPreferences() {
@@ -7868,6 +8036,15 @@ function bindEventListeners() {
   $('stop-livetalking-engine')?.addEventListener('click', () => {
     stopLiveTalkingWorker().catch(() => {});
   });
+  $('restart-livetalking-engine')?.addEventListener('click', async () => {
+    const actionStatus = $('livetalking-engine-action-status');
+    if (actionStatus) actionStatus.textContent = 'Restarting all Lipsync workers...';
+    try {
+      await window.RuntimeApi.post('/api/engines/live-avatar/action', { action: 'restart' });
+      await refreshLiveTalkingWorkerStatus({ silent: false });
+      if (actionStatus) actionStatus.textContent = 'Lipsync worker restarted.';
+    } catch (error) { if (actionStatus) actionStatus.textContent = error.message; }
+  });
   $('cfg-livetalking-always-on')?.addEventListener('change', event => {
     setLiveTalkingAlwaysOn(event.currentTarget.checked).catch(() => {});
   });
@@ -8652,8 +8829,8 @@ function bindEventListeners() {
   });
 
   // Test Sound & Controls
-  $('btn-test-sound')?.addEventListener('click', () => {
-    unlockAudio();
+  $('btn-test-sound')?.addEventListener('click', async () => {
+    await unlockAudio(false);
     speakAI(idolPreviewLine(), 'happy');
   });
   $('btn-stop-voice')?.addEventListener('click', stopLiveSpeech);
@@ -8897,6 +9074,8 @@ function bindEventListeners() {
   $('connect-facebook-chat')?.addEventListener('click', () => connectPlatformChat('facebook'));
   $('disconnect-youtube-chat')?.addEventListener('click', () => disconnectPlatformChat('youtube'));
   $('disconnect-facebook-chat')?.addEventListener('click', () => disconnectPlatformChat('facebook'));
+  $('youtube-ai-reply')?.addEventListener('change', () => savePlatformReplySettings().catch(error => { if ($('platform-chat-summary')) $('platform-chat-summary').textContent = error.message; }));
+  $('facebook-ai-reply')?.addEventListener('change', () => savePlatformReplySettings().catch(error => { if ($('platform-chat-summary')) $('platform-chat-summary').textContent = error.message; }));
 
   // Injections
   $('inject-jackpot')?.addEventListener('click', injectJackpot);
@@ -9225,17 +9404,13 @@ function setupStudioShell() {
       pane.classList.toggle('active', active);
       pane.toggleAttribute('hidden', !active);
     });
-    clearInterval(engineStatusTimer);
-    engineStatusTimer = null;
     if (selected === 'engines') {
       loadAiDirectorSettings().catch(error => {
         if ($('ai-director-save-status')) $('ai-director-save-status').textContent = error.message;
       });
-      void refreshAiEngines();
-      engineStatusTimer = setInterval(() => void refreshAiEngines({ quiet: true }), 3000);
     }
     if (selected === 'chat') window.RuntimeApi.get('/api/platform-chat/status')
-      .then(payload => applyPlatformChatStatus(payload.platformChat || {}))
+      .then(payload => applyPlatformChatStatus(payload.platformChat || {}, payload.platformReply || {}))
       .catch(error => { if ($('platform-chat-summary')) $('platform-chat-summary').textContent = error.message; });
     if (selected === 'engine') refreshLiveTalkingWorkerStatus({ silent: false });
   };
@@ -9288,7 +9463,7 @@ function setupStudioShell() {
 
   const engineIcons = { 'qwen-director': 'psychology', 'chatgpt-fallback': 'cloud', 'qwen-tts': 'record_voice_over', 'live-avatar': 'face', 'obs-bridge': 'live_tv', 'media-tools': 'movie_edit' };
   const engineActionIcons = { start: 'play_arrow', stop: 'stop', restart: 'restart_alt' };
-  const engineActionLabels = { start: 'Start Engine', stop: 'Stop', restart: 'Restart' };
+  const engineActionLabels = { start: 'Start', stop: 'Stop', restart: 'Restart' };
   const renderEngineCards = engines => {
     const grid = $('engine-card-grid');
     if (!grid) return;
@@ -9404,6 +9579,8 @@ function setupStudioShell() {
       button.disabled = false;
     }
   });
+  void refreshAiEngines();
+  engineStatusTimer = setInterval(() => void refreshAiEngines({ quiet: true }), 5000);
 
   const navigateAppView = (name = 'studio', updateHash = true, settingsPane = null, liveSettingPane = null) => {
     if (name === 'avatar') { name = 'live-settings'; liveSettingPane = 'avatar'; }
@@ -9650,7 +9827,9 @@ async function init() {
   loadReplySkills();
   loadVoiceProfiles();
 
-  loadProjectStorageConfig();
+  await loadProjectStorageConfig();
+  restoreFormDrafts();
+  setupFormDraftPersistence();
 
   try {
     renderLibraryUI();
@@ -9675,33 +9854,18 @@ async function init() {
   const startupOverlay = $('app-startup-overlay');
   const startupStatus = $('app-startup-status');
   if (startupStatus) startupStatus.textContent = LiveTalkingWorker.alwaysOn ? 'Preparing realtime avatar…' : 'Opening live workspace…';
-  await refreshLiveTalkingWorkerStatus({ silent: true });
-  if (LiveTalkingWorker.alwaysOn) {
-    await ensureLiveTalkingWorkerReady().catch(error => {
-      if (startupStatus) startupStatus.textContent = `Live workspace will reconnect automatically: ${error.message}`;
-    });
-  }
+  void refreshLiveTalkingWorkerStatus({ silent: true });
   clearInterval(LiveTalkingWorker.pollTimer);
   LiveTalkingWorker.pollTimer = setInterval(() => refreshLiveTalkingWorkerStatus({ silent: true }), 3000);
-  await refreshLiveTalkingAvatarList().then(async avatars => {
-    if (App.talkingEngine.provider !== 'livetalking') return;
-    const savedActiveAvatar = localStorage.getItem(STORAGE_KEYS.LIVETALKING_AVATAR) || LiveTalkingStudio.avatarId;
-    const selectedAvatar = LiveAvatarSession.activeAvatarId;
-    const selectedPool = LiveAvatarSession.selectedAvatarIds.filter(id => avatars.some(avatar => avatar.id === id));
-    const preferredAvatar = avatars.some(avatar => avatar.id === selectedAvatar)
-      ? selectedAvatar
-      : (selectedPool[0] || (avatars.some(avatar => avatar.id === savedActiveAvatar) ? savedActiveAvatar : avatars[0]?.id));
-    if (!preferredAvatar) {
-      addLog('No trained avatar is available yet.', 'hi');
-      return;
-    }
-    LiveAvatarSession.activeAvatarId = preferredAvatar;
-    if (!LiveAvatarSession.selectedAvatarIds.includes(preferredAvatar)) LiveAvatarSession.selectedAvatarIds.push(preferredAvatar);
-    await saveActiveAvatarSession();
-    if (!LiveTalkingWorker.ready) return;
-    await waitForLiveMediaOwnership();
-    await reconnectLiveTalkingAvatar(preferredAvatar);
-  }).catch(err => addLog(`Live avatar auto-connect failed: ${err.message}`, 'hi'));
+  App.isMuted = false;
+  void unlockAudio(false);
+  appStartupComplete = true;
+  void restoreOperationalAvatar({ attempts: 5, status: startupStatus })
+    .then(avatarId => addLog(`Avatar ${avatarId} restored.`, 'ok'))
+    .catch(error => {
+      addLog(`Live avatar auto-connect failed: ${error.message}`, 'warn');
+      scheduleOperationalAvatarRestore('startup retry');
+    });
   if (startupStatus) startupStatus.textContent = 'Live workspace ready';
   startupOverlay?.classList.add('is-ready');
   setTimeout(() => startupOverlay?.remove(), 450);
@@ -9718,7 +9882,13 @@ async function init() {
   tick();
   setInterval(tick, 200);
 
-  window.addEventListener('click', () => { void unlockAudio(false); }, { once: true });
+  const monitorAudioUnlock = () => { void unlockAudio(false); };
+  document.querySelector('.monitor-box')?.addEventListener('pointerdown', monitorAudioUnlock, { passive: true });
+  window.addEventListener('pointerdown', monitorAudioUnlock, { passive: true });
+  window.addEventListener('focus', monitorAudioUnlock, { passive: true });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') monitorAudioUnlock();
+  });
 }
 
 if (document.readyState === 'loading') {

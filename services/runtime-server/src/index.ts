@@ -87,6 +87,17 @@ const LocalAiInstallSchema = z.object({
 const EngineActionSchema = z.object({
   action: z.enum(['start', 'stop', 'restart']),
 }).strict();
+const PlatformReplySettingsSchema = z.object({ youtube: z.boolean(), facebook: z.boolean() }).strict();
+const ShowCueSchema = z.object({
+  id: SafeIdSchema,
+  minute: z.number().int().min(0).max(1440),
+  phase: z.string().trim().min(1).max(80),
+  action: z.enum(['scene', 'speak', 'cta']),
+  scene: z.enum(['GAMEPLAY_IDLE', 'GAMEPLAY_FOCUS', 'TALKING', 'CTA', 'INVITE_PLAY', 'HAPPY', 'SURPRISED', 'LAUGH', 'LOSE', 'THANK_DONATION']).optional(),
+  prompt: z.string().trim().max(500).default(''),
+  enabled: z.boolean().default(true),
+}).strict();
+const ShowScheduleSchema = z.object({ cues: z.array(ShowCueSchema).max(100) }).strict();
 const StorageConfigSchema = z.object({
   rootPath: z.string().trim().min(1).max(1024),
   projectName: SafeIdSchema.default('ai-livestream'),
@@ -496,6 +507,8 @@ export class IdolRuntimeServer {
       context: '',
       skillMarkdown: '',
     },
+    platformReply: { youtube: false, facebook: false },
+    showSchedule: { cues: [] as Array<z.infer<typeof ShowCueSchema>> },
     avatar: {
       preset: 'mimi_anime',
       customImageUrl: null as string | null,
@@ -577,6 +590,8 @@ export class IdolRuntimeServer {
   private _directorSpeechDrainRunning = false;
   private _avatarStateSwitch: Promise<unknown> = Promise.resolve();
   private _directorGenerationRun = 0;
+  private _pendingPlatformReplyTargets: Array<'youtube' | 'facebook'> = [];
+  private _executedShowCueIds = new Set<string>();
   private _speechPlaybackGates = new Map<string, { release: () => void; timer: ReturnType<typeof setTimeout> }>();
   private _chatBatchBuffer: ChatMessage[] = [];
   private _chatBatchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -944,6 +959,8 @@ export class IdolRuntimeServer {
       avatar: { ...this._settings.avatar },
       persona: { ...persona, apiKeyConfigured: Boolean(this._settings.persona.llmApiKey) },
       liveSession: { ...this._settings.liveSession },
+      platformReply: { ...this._settings.platformReply },
+      showSchedule: { cues: this._settings.showSchedule.cues.map((cue) => ({ ...cue })) },
       liveAvatarMaintenance: {
         restartIntervalMinutes: this._settings.talkingEngine.restartIntervalMinutes,
         state: this._liveTalkingMaintenanceRunning
@@ -1278,7 +1295,14 @@ export class IdolRuntimeServer {
     if (engineId === 'live-avatar') {
       if (action === 'stop') await this._stopLiveTalkingWorker(true);
       else if (action === 'restart') {
-        await this._stopLiveTalkingWorker(false);
+        if (this._liveTalkingWorkerProcess) await this._stopLiveTalkingWorker(false);
+        await new Promise<void>((resolve) => {
+          if (process.platform === 'win32') return resolve();
+          execFile('/usr/bin/pkill', ['-KILL', '-f', 'app.py --transport webrtc'], () => resolve());
+        });
+        for (let attempt = 0; attempt < 30 && this._liveTalkingWorkerProcess; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
         await this._startLiveTalkingWorker();
       } else await this._startLiveTalkingWorker();
       return;
@@ -1991,6 +2015,8 @@ export class IdolRuntimeServer {
     const talkingEngine = this._db.getSetting<Record<string, unknown>>('talkingEngine');
     const liveSession = this._db.getSetting<Record<string, unknown>>('liveSession');
     const obs = this._db.getSetting<Record<string, unknown>>('obs');
+    const platformReply = this._db.getSetting<Record<string, unknown>>('platformReply');
+    const showSchedule = this._db.getSetting<Record<string, unknown>>('showSchedule');
     if (voice) this._settings.voice = { ...this._settings.voice, ...voice, apiKey: this._settings.voice.apiKey } as typeof this._settings.voice;
     if (avatar) this._settings.avatar = { ...this._settings.avatar, ...avatar } as typeof this._settings.avatar;
     if (persona) this._settings.persona = { ...this._settings.persona, ...persona } as typeof this._settings.persona;
@@ -2012,6 +2038,8 @@ export class IdolRuntimeServer {
     }
     this._settings.talkingEngine.videoQuality = 'hd';
     if (obs) this._settings.obs = { ...this._settings.obs, ...obs, password: this._settings.obs.password } as typeof this._settings.obs;
+    if (platformReply) this._settings.platformReply = PlatformReplySettingsSchema.parse({ ...this._settings.platformReply, ...platformReply });
+    if (showSchedule) this._settings.showSchedule = ShowScheduleSchema.parse(showSchedule);
 
     const directorDefaultsVersion = Number(this._db.getSetting<number>('directorDefaultsVersion') || 0);
     if (directorDefaultsVersion < 3) {
@@ -2284,6 +2312,7 @@ export class IdolRuntimeServer {
     this._tickTimer = setInterval(() => {
       try {
         const now = Date.now();
+        this._runDueShowCues(now);
         const intent = this._director.tick(now);
         this._reconcileLiveTalkingMediaOwnership(now);
         // Broadcast heartbeat & system telemetry periodically
@@ -2292,6 +2321,28 @@ export class IdolRuntimeServer {
         this._addLog('error', `Error in Director tick: ${err}`);
       }
     }, 100);
+  }
+
+  private _runDueShowCues(now: number): void {
+    const elapsedMinutes = Math.floor((now - this._director.state.streamStartedAt) / 60_000);
+    for (const cue of this._settings.showSchedule.cues) {
+      if (!cue.enabled || cue.minute > elapsedMinutes || this._executedShowCueIds.has(cue.id)) continue;
+      this._executedShowCueIds.add(cue.id);
+      this._director.handleOperatorCommand({ action: 'CHANGE_PHASE', phase: cue.phase } as OperatorCommand);
+      if (cue.action === 'scene' && cue.scene) {
+        this._director.forceState(cue.scene, `Show cue ${cue.id}`);
+      } else {
+        const intent: DirectorIntent = {
+          type: 'director.intent', action: cue.action === 'cta' ? 'TRIGGER_GOAL' : 'SPEAK',
+          intent: cue.action === 'cta' ? 'scheduled_cta' : 'scheduled_show_prompt',
+          emotion: 'happy', visualState: cue.scene || this._director.state.currentVisual,
+          speechText: cue.prompt || `Bắt đầu phần ${cue.phase} của livestream.`, priority: 4,
+          timestamp: now, maxSpeechSeconds: 15,
+        };
+        void this._handleDirectorIntent(intent);
+      }
+      this._addLog('info', `Show cue started at ${cue.minute}m: ${cue.phase}`);
+    }
   }
 
   // ─────────────────────────────────────────────────────────
@@ -2366,6 +2417,9 @@ export class IdolRuntimeServer {
     }
 
     const messages = this._chatBatchBuffer.splice(0, this._chatBatchMaxMessages);
+    this._pendingPlatformReplyTargets = [...new Set(messages
+      .map((message) => message.platform)
+      .filter((platform): platform is 'youtube' | 'facebook' => platform === 'youtube' || platform === 'facebook'))];
     const highestPriority = Math.max(...messages.map((message) => message.priorityScore || (message.isSuperChat ? 100 : 40)));
     const emotion = messages.some((message) => message.isSuperChat) ? 'excited' : 'playful';
     const speechText = messages
@@ -2407,6 +2461,15 @@ export class IdolRuntimeServer {
         this._broadcast({ type: 'DIRECTOR_INTENT', intent: enrichedIntent, timestamp: Date.now() });
         this._addLog('info', `[Dialogue:${dialogue.provider}][Voice:${this._settings.voice.provider}] ${this._settings.persona.name} says: "${dialogue.text}" (duration ~${dialogue.estimatedDurationMs}ms)`);
         await this._obsController.setSubtitles(dialogue.text);
+        if (intent.intent === 'reply_to_chat_batch') {
+          const targets = this._pendingPlatformReplyTargets.splice(0);
+          const enabledTargets = targets.filter((platform) => this._settings.platformReply[platform]);
+          const results = await Promise.allSettled(enabledTargets.map((platform) => this._platformChat.sendReply(platform, dialogue.text)));
+          results.forEach((result, index) => {
+            if (result.status === 'rejected') this._addLog('warn', `Platform AI reply failed: ${String(result.reason)}`);
+            else this._addLog('info', `AI reply sent to ${enabledTargets[index] || 'platform chat'}`);
+          });
+        }
 
         // 2. One production path: server TTS -> LiveTalking -> WebRTC A/V.
         this._enqueueDirectorSpeechCommand(SpeechCommandSchema.parse({
@@ -3019,8 +3082,7 @@ export class IdolRuntimeServer {
       && owner.sessionId === this._liveTalkingProvider.sessionId
       && owner.connectionState === 'CONNECTED'
       && owner.audioTrack
-      && owner.videoTrack
-      && owner.audioPlayable,
+      && owner.videoTrack,
     );
     return {
       ownerClientId: owner?.clientId || null,
@@ -3259,7 +3321,6 @@ export class IdolRuntimeServer {
     }
     const media = this._publicLiveTalkingMediaState();
     if (!media['ownerClientId']) throw new Error('No active Live Monitor owns the avatar session');
-    if (!media['audioPlayable']) throw new Error('Live Monitor audio is blocked; click the Monitor once to enable voice');
     throw new Error('Live Monitor WebRTC media is not ready; reconnecting the avatar is required');
   }
 
@@ -4050,16 +4111,59 @@ export class IdolRuntimeServer {
 
     if (pathname === '/api/platform-chat/status' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, platformChat: this._platformChat.publicState() }));
+      res.end(JSON.stringify({ success: true, platformChat: this._platformChat.publicState(), platformReply: this._settings.platformReply }));
+      return;
+    }
+
+    if (pathname === '/api/platform-chat/reply-settings' && method === 'POST') {
+      this._readJsonBody(req, (body) => {
+        const input = this._parseBody(PlatformReplySettingsSchema, body, res);
+        if (!input) return;
+        this._settings.platformReply = input;
+        this._db.setSetting('platformReply', input);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, platformReply: input }));
+      });
+      return;
+    }
+
+    if (pathname === '/api/ai/director/show-schedule' && method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, showSchedule: this._settings.showSchedule }));
+      return;
+    }
+
+    if (pathname === '/api/ai/director/show-schedule' && method === 'POST') {
+      this._readJsonBody(req, (body) => {
+        const input = this._parseBody(ShowScheduleSchema, body, res);
+        if (!input) return;
+        this._settings.showSchedule = { cues: [...input.cues].sort((a, b) => a.minute - b.minute) };
+        this._executedShowCueIds.clear();
+        this._db.setSetting('showSchedule', this._settings.showSchedule);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, showSchedule: this._settings.showSchedule }));
+      });
       return;
     }
 
     const platformChatConnectMatch = pathname.match(/^\/api\/platform-chat\/(youtube|facebook)\/connect$/);
     if (platformChatConnectMatch && method === 'POST') {
       const platform = platformChatConnectMatch[1] as PlatformChatId;
-      this._platformChat.beginLogin(platform).then(() => {
+      const source = this._platformChat.publicState().sources[platform];
+      if (source.authenticated) {
+        try {
+          this._platformChat.resume(platform);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, platformChat: this._platformChat.publicState() }));
+        } catch (error) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }));
+        }
+        return;
+      }
+      this._platformChat.beginLogin(platform).then((login) => {
         res.writeHead(202, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, platformChat: this._platformChat.publicState() }));
+        res.end(JSON.stringify({ success: true, authUrl: login.authUrl, platformChat: this._platformChat.publicState() }));
       }).catch((error) => {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }));

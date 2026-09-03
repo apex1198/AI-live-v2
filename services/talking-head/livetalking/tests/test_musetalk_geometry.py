@@ -16,6 +16,7 @@ from avatars.musetalk.utils.face_geometry import (
     MOUTH_INDICES,
     build_alignment,
     face_geometry_summary,
+    recover_missing_landmarks,
 )
 
 
@@ -41,6 +42,16 @@ def _make_reference_landmarks():
 
 
 class MuseTalkGeometryTestCase(unittest.TestCase):
+    def test_missing_landmarks_are_interpolated_and_edge_filled(self):
+        first = _make_reference_landmarks()
+        last = first + np.array([12.0, 6.0], dtype=np.float32)
+        recovered = recover_missing_landmarks([None, first, None, None, last, None])
+
+        np.testing.assert_allclose(recovered[0], first)
+        np.testing.assert_allclose(recovered[2], first * (2.0 / 3.0) + last * (1.0 / 3.0))
+        np.testing.assert_allclose(recovered[3], first * (1.0 / 3.0) + last * (2.0 / 3.0))
+        np.testing.assert_allclose(recovered[5], last)
+
     def test_lower_face_mask_follows_oval_and_leaves_five_percent_edge_margin(self):
         landmarks = np.zeros((478, 2), dtype=np.float32)
         # FACE_OVAL_INDICES are ordered from the forehead, down the right side,

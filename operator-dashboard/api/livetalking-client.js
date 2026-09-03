@@ -6,7 +6,12 @@
 
   function requireWorkerOk(payload) {
     if (typeof payload?.code === 'number' && payload.code !== 0) {
-      throw new Error(payload.msg || 'LiveTalking worker request failed');
+      const taskErrors = Array.isArray(payload?.data?.tasks)
+        ? payload.data.tasks
+          .map(task => task?.error_msg)
+          .filter(Boolean)
+        : [];
+      throw new Error(taskErrors.join('; ') || payload.msg || 'LiveTalking worker request failed');
     }
     return payload;
   }

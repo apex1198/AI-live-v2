@@ -5,6 +5,7 @@ export type PlatformChatId = 'youtube' | 'facebook';
 export type PlatformChatConnectionState =
   | 'NOT_CONFIGURED'
   | 'SIGNED_OUT'
+  | 'PAUSED'
   | 'CONNECTING'
   | 'WAITING_FOR_LIVE'
   | 'LISTENING'
@@ -87,8 +88,8 @@ interface PlatformChatCoordinatorOptions {
   environment?: NodeJS.ProcessEnv;
 }
 
-const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
-const FACEBOOK_SCOPES = ['public_profile', 'pages_show_list', 'pages_read_engagement'];
+const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl';
+const FACEBOOK_SCOPES = ['public_profile', 'pages_show_list', 'pages_read_engagement', 'pages_manage_posts'];
 const OAUTH_ATTEMPT_TTL_MS = 10 * 60_000;
 
 function stringValue(value: unknown): string {
@@ -249,7 +250,7 @@ export class PlatformChatCoordinator {
       platform,
       configured,
       authenticated: Boolean(credential?.accessToken),
-      state: !configured ? 'NOT_CONFIGURED' : credential?.accessToken ? 'WAITING_FOR_LIVE' : 'SIGNED_OUT',
+      state: !configured ? 'NOT_CONFIGURED' : credential?.accessToken ? 'PAUSED' : 'SIGNED_OUT',
       accountName: credential?.accountName || '',
       liveTitle: '',
       lastMessageAt: null,
@@ -288,12 +289,18 @@ export class PlatformChatCoordinator {
   start(): void {
     if (this._running) return;
     this._running = true;
-    for (const platform of ['youtube', 'facebook'] as const) {
-      if (this._configured(platform) && this._credential(platform)?.accessToken) {
-        this._schedule(platform, 0);
-      }
-    }
     this._options.onStatus(this.publicState());
+  }
+
+  resume(platform: PlatformChatId): void {
+    if (!this._credential(platform)?.accessToken) throw new Error(`${platform} is signed out`);
+    if (platform === 'youtube') {
+      this._youtubeLiveChatId = '';
+      this._youtubePageToken = '';
+      this._youtubeJoinedAt = 0;
+    }
+    this._emitStatus(platform, { state: 'WAITING_FOR_LIVE', error: '', liveTitle: '' });
+    this._schedule(platform, 0);
   }
 
   stop(): void {
@@ -318,7 +325,7 @@ export class PlatformChatCoordinator {
         this._log('warn', `${platform} live chat: ${message}`);
         if (!this._credential(platform)?.accessToken) return;
         this._emitStatus(platform, { state: 'ERROR', error: message, liveTitle: '' });
-        this._schedule(platform, 15_000);
+        if (platform === 'facebook') this._schedule(platform, 15_000);
       });
     }, Math.max(0, delayMs));
     this._timers.set(platform, timer);
@@ -535,6 +542,34 @@ export class PlatformChatCoordinator {
     return readJson(response, 'YouTube API');
   }
 
+  async sendReply(platform: PlatformChatId, message: string): Promise<void> {
+    const text = stringValue(message).slice(0, 200);
+    if (!text) return;
+    if (platform === 'youtube') {
+      if (!this._youtubeLiveChatId) throw new Error('YouTube Live Chat is not active');
+      const accessToken = await this._youtubeAccessToken();
+      const url = new URL('https://www.googleapis.com/youtube/v3/liveChat/messages');
+      url.searchParams.set('part', 'snippet');
+      const response = await this._fetch(url, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ snippet: { liveChatId: this._youtubeLiveChatId, type: 'textMessageEvent', textMessageDetails: { messageText: text } } }),
+      });
+      await readJson(response, 'YouTube API');
+      return;
+    }
+    const page = this._credentials.facebook?.pages.find((candidate) => candidate.id === this._facebookPageId);
+    if (!page || !this._facebookLiveVideoId) throw new Error('Facebook Live Chat is not active');
+    const version = this._env['META_GRAPH_VERSION'] || 'v24.0';
+    const url = new URL(`https://graph.facebook.com/${version}/${encodeURIComponent(this._facebookLiveVideoId)}/comments`);
+    const response = await this._fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${page.accessToken}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ message: text }),
+    });
+    await readJson(response, 'Facebook API');
+  }
+
   private async _pollYouTube(): Promise<void> {
     const accessToken = await this._youtubeAccessToken();
     if (!this._youtubeLiveChatId) {
@@ -545,8 +580,7 @@ export class PlatformChatCoordinator {
       });
       const broadcast = selectActiveYouTubeBroadcast(broadcasts.items || []);
       if (!broadcast) {
-        this._emitStatus('youtube', { state: 'WAITING_FOR_LIVE', error: '', liveTitle: '' });
-        this._schedule('youtube', 15_000);
+        this._emitStatus('youtube', { state: 'PAUSED', error: '', liveTitle: '' });
         return;
       }
       this._youtubeLiveChatId = stringValue(broadcast.snippet.liveChatId);
@@ -584,8 +618,7 @@ export class PlatformChatCoordinator {
     if (payload.offlineAt) {
       this._youtubeLiveChatId = '';
       this._youtubePageToken = '';
-      this._emitStatus('youtube', { state: 'WAITING_FOR_LIVE', error: '', liveTitle: '' });
-      this._schedule('youtube', 10_000);
+      this._emitStatus('youtube', { state: 'PAUSED', error: '', liveTitle: '' });
       return;
     }
     this._schedule('youtube', Math.max(2_000, Number(payload.pollingIntervalMillis || 5_000)));

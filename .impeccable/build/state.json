@@ -1,0 +1,213 @@
+{
+  "tool": "build-phase",
+  "version": 2,
+  "startedAt": "2026-09-04T09:52:55.100Z",
+  "comp": ".impeccable/mocks/charcoal-cue-rail.png",
+  "direction": null,
+  "breakpoint": "1440x900",
+  "artifact": null,
+  "phase": "hero",
+  "phases": {
+    "comps": {
+      "status": "skipped",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [
+        {
+          "at": "2026-09-04T09:52:55.100Z",
+          "text": "started with an approved comp; the comp round happened before this state (surface round or manual)"
+        }
+      ],
+      "gate": null,
+      "forced": null
+    },
+    "spec": {
+      "status": "closed",
+      "openedAt": "2026-09-04T09:52:55.099Z",
+      "closedAt": "2026-09-04T09:55:25.934Z",
+      "attempts": 8,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "16 regions, 0 plates, 8 text regions measured",
+        "at": "2026-09-04T09:55:25.933Z"
+      },
+      "forced": null
+    },
+    "plates": {
+      "status": "closed",
+      "openedAt": "2026-09-04T09:55:25.934Z",
+      "closedAt": "2026-09-04T09:55:44.871Z",
+      "attempts": 1,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "no plates owed",
+        "at": "2026-09-04T09:55:44.870Z"
+      },
+      "forced": null
+    },
+    "hero": {
+      "status": "open",
+      "openedAt": "2026-09-04T09:55:44.871Z",
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": {
+        "ok": false,
+        "reasons": [
+          "hero overall 54.8% < 72% (structure 81%, color 81%, detail 0%)",
+          "region sidebar is missing (detail 10%, structure 85%): the comp shows material the build does not",
+          "region topbar is missing (detail 0%, structure 36%): the comp shows material the build does not",
+          "region live-session-title is missing (detail 0%, structure 67%): the comp shows material the build does not",
+          "region surface-actions is missing (detail 1%, structure 40%): the comp shows material the build does not",
+          "region monitor-header is missing (detail 0%, structure 95%): the comp shows material the build does not",
+          "region monitor-state is missing (detail 4%, structure 42%): the comp shows material the build does not",
+          "region playback-timeline is missing (detail 0%, structure 69%): the comp shows material the build does not",
+          "region cue-header is missing (detail 0%, structure 72%): the comp shows material the build does not",
+          "region cue-now is missing (detail 0%, structure 72%): the comp shows material the build does not",
+          "region cue-next is missing (detail 0%, structure 68%): the comp shows material the build does not",
+          "region cue-after is missing (detail 0%, structure 71%): the comp shows material the build does not",
+          "region cue-closing is missing (detail 0%, structure 63%): the comp shows material the build does not",
+          "region control-header is missing (detail 0%, structure 75%): the comp shows material the build does not",
+          "region control-rows is missing (detail 0%, structure 69%): the comp shows material the build does not",
+          "region engine-rows is missing (detail 0%, structure 63%): the comp shows material the build does not",
+          "READINGS, each one CSS edit (1):",
+          "text monitor-state: ink is #d8d8d8 in the build, #4a4d4b in the comp; use the comp's colour",
+          "the build carries ink in 8 grid cells where the comp is calm (E0, F0, G0, H0, E5, D6, E6, F6); nothing exists on the page that the comp does not show (a kicker, an extra nav item, a divider, a second row of controls); remove it or name it in a stated decision after the hero passes"
+        ],
+        "summary": "hero 55% (missing)",
+        "score": 0.5482,
+        "verdict": "missing",
+        "report": ".impeccable/review/diff/hero/report.json",
+        "sideBySide": ".impeccable/review/diff/hero/side-by-side.png",
+        "worst": [
+          "topbar missing 32%",
+          "monitor-state missing 35%",
+          "surface-actions missing 40%"
+        ],
+        "worstIds": [
+          "topbar",
+          "monitor-state",
+          "surface-actions"
+        ],
+        "worstCrops": [
+          {
+            "id": "topbar",
+            "verdict": "missing",
+            "score": {
+              "overall": 0.3156,
+              "structure": 0.3637,
+              "color": 0.7533,
+              "colorIntersection": 0.3639,
+              "paletteMatch": 0.963,
+              "detail": 0,
+              "detailRaw": 0.0189,
+              "detailAdded": 0.2604,
+              "bands": 0
+            },
+            "file": ".impeccable/review/diff/hero/regions/topbar.png"
+          },
+          {
+            "id": "monitor-state",
+            "verdict": "missing",
+            "score": {
+              "overall": 0.3455,
+              "structure": 0.4211,
+              "color": 0.5182,
+              "colorIntersection": 0.0444,
+              "paletteMatch": 0.7733,
+              "detail": 0.0359,
+              "detailRaw": 0.1245,
+              "detailAdded": 0.1771,
+              "bands": 0
+            },
+            "file": ".impeccable/review/diff/hero/regions/monitor-state.png"
+          },
+          {
+            "id": "surface-actions",
+            "verdict": "missing",
+            "score": {
+              "overall": 0.4027,
+              "structure": 0.4012,
+              "color": 0.6262,
+              "colorIntersection": 0.3927,
+              "paletteMatch": 0.7519,
+              "detail": 0.0149,
+              "detailRaw": 0.0357,
+              "detailAdded": 0.0417,
+              "bands": 0.4
+            },
+            "file": ".impeccable/review/diff/hero/regions/surface-actions.png"
+          }
+        ],
+        "advisories": [],
+        "regionVerdicts": {
+          "sidebar": "missing",
+          "topbar": "missing",
+          "live-session-title": "missing",
+          "surface-actions": "missing",
+          "monitor-header": "missing",
+          "monitor-screen": "contradicted",
+          "monitor-state": "missing",
+          "playback-timeline": "missing",
+          "cue-header": "missing",
+          "cue-now": "missing",
+          "cue-next": "missing",
+          "cue-after": "missing",
+          "cue-closing": "missing",
+          "control-header": "missing",
+          "control-rows": "missing",
+          "engine-rows": "missing"
+        },
+        "at": "2026-09-04T10:06:22.919Z"
+      },
+      "forced": null,
+      "readingsSeen": {
+        "text monitor-state: ink is #d8d8d8 in the build, #4a4d4b in the comp; use the comp's colour": 1
+      },
+      "records": 1
+    },
+    "sections": {
+      "status": "pending",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    },
+    "motion": {
+      "status": "pending",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    },
+    "responsive": {
+      "status": "pending",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    },
+    "review": {
+      "status": "pending",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    }
+  },
+  "finish": null,
+  "plates": {}
+}

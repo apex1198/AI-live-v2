@@ -24,6 +24,7 @@ from avatars.musetalk.model_resources import (
 )
 from avatars.musetalk.myutil import (
     build_landmark_lower_face_mask,
+    build_adaptive_mediapipe_mask,
     build_mediapipe_mouth_mask,
     build_parsed_lower_face_mask,
 )
@@ -155,7 +156,7 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
             "training_fps": TRAINING_FPS,
             "model_fps": MODEL_FPS,
             "loop_mode": "ping_pong",
-            "mask_format": "mediapipe_478_lower_face_mouth_inset20pct_feather5_v10",
+            "mask_format": "pending",
             "mask_parsing_mode": parsing_mode,
             "mask_feather_px": 5,
             "mask_edge_padding_ratio": 0.05,
@@ -224,10 +225,18 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
                 min(frame_list[index].shape[0], int(np.ceil(y2))),
             ]
         print(f"MediaPipe 478 geometry tracking enabled for {len(alignment_list_cycle)} frames")
-    except FileNotFoundError as exc:
-        # Keep avatar generation usable on machines that have not installed
-        # the optional landmark model yet; the generated metadata records the
-        # legacy path by removing alignment.pkl below.
+    except (FileNotFoundError, RuntimeError) as exc:
+        allow_legacy_fallback = os.getenv(
+            "LIVETALKING_ALLOW_LEGACY_MASK_FALLBACK", "0"
+        ).strip().lower() in {"1", "true", "yes"}
+        if not allow_legacy_fallback:
+            raise RuntimeError(
+                "MediaPipe face geometry is required for a tracked MuseTalk mask; "
+                "avatar generation stopped instead of creating a misaligned legacy mask"
+            ) from exc
+        # The legacy path is available only as an explicit compatibility mode.
+        # Its metadata remains distinct so runtime loaders cannot mistake it
+        # for a geometry-tracked dataset.
         print(f"MediaPipe geometry tracking unavailable, using legacy crop: {exc}")
 
     with open(info_path, "r", encoding="utf-8") as info_file:
@@ -295,6 +304,8 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
 
     mask_coords_list_cycle = []
     mask_list_cycle = []
+    strategy_counts = {}
+    previous_strategy = None
     for i, frame in enumerate(frame_list):
         cv2.imwrite(f"{save_full_path}/{str(i).zfill(8)}.png", frame)
 
@@ -303,7 +314,23 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
             aligned_frame = warp_to_aligned(frame, alignment)
             mode = parsing_mode if version == "v15" else "raw"
             if parsing_mode == 'lower_face':
-                mask = build_mediapipe_mouth_mask(alignment, ALIGNMENT_SIZE, ALIGNMENT_SIZE)
+                adaptive_mask, decision = build_adaptive_mediapipe_mask(
+                    alignment, previous_strategy, ALIGNMENT_SIZE, ALIGNMENT_SIZE
+                )
+                previous_strategy = decision["strategy"]
+                strategy_counts[previous_strategy] = strategy_counts.get(previous_strategy, 0) + 1
+                alignment["adaptive_mask_strategy"] = previous_strategy
+                alignment["adaptive_mask_decision"] = decision
+                if adaptive_mask is not None:
+                    mask = adaptive_mask
+                else:
+                    parsed = np.asarray(fp_local(
+                        Image.fromarray(cv2.cvtColor(aligned_frame, cv2.COLOR_BGR2RGB)),
+                        size=(512, 512), mode="lower_face",
+                    ))
+                    mask = build_parsed_lower_face_mask(
+                        cv2.resize(parsed, (ALIGNMENT_SIZE, ALIGNMENT_SIZE), interpolation=cv2.INTER_NEAREST)
+                    )
             else:
                 parsed = np.asarray(fp_local(
                     Image.fromarray(cv2.cvtColor(aligned_frame, cv2.COLOR_BGR2RGB)),
@@ -337,6 +364,23 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', bbox_shif
 
     with open(mask_coords_path, 'wb') as f:
         pickle.dump(mask_coords_list_cycle, f)
+
+    with open(info_path, "r", encoding="utf-8") as info_file:
+        avatar_info = json.load(info_file)
+    if geometry_enabled and parsing_mode == "lower_face":
+        avatar_info.update({
+            "mask_format": "hybrid_adaptive_v11",
+            "mask_strategy_counts": strategy_counts,
+            "mask_strategy_policy": "mediapipe_compact_or_expanded_with_face_parsing_fallback",
+        })
+    else:
+        avatar_info.update({
+            "mask_format": "legacy_face_parsing_lower_face_v1",
+            "mask_strategy_counts": {},
+            "mask_strategy_policy": "axis_aligned_face_parsing_fallback",
+        })
+    with open(info_path, "w", encoding="utf-8") as info_file:
+        json.dump(avatar_info, info_file)
 
     with open(coords_path, 'wb') as f:
         pickle.dump(coord_list, f)

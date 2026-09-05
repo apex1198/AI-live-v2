@@ -33,7 +33,12 @@ export const DEFAULT_IDOL_PERSONA: CharacterPersona = {
 };
 
 export interface DialogueGenerationResult {
+  /** Backwards-compatible alias for speechText. */
   text: string;
+  /** Natural text intended for YouTube/Facebook chat and visual subtitles. */
+  replyText: string;
+  /** Speech-safe text intended exclusively for TTS. */
+  speechText: string;
   emotion: Emotion;
   estimatedDurationMs: number;
   provider: string;
@@ -150,7 +155,7 @@ export class OpenAIDialogueProvider implements DialogueProvider {
           messages: [
             {
               role: 'system',
-              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. Tính cách: ${persona.personality}. ${intent.intent === 'reply_to_chat_batch' ? 'Trả lời trực tiếp tối đa hai bình luận bằng 1 đến 2 câu nói tự nhiên, không quá 40 từ. Câu trả lời ngắn thì giữ nguyên, không thêm câu xã giao để kéo dài thời lượng. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Bắt buộc trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Có biểu cảm phù hợp. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
+              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. Tính cách: ${persona.personality}. ${intent.intent === 'reply_to_chat_batch' ? 'Các bình luận đầu vào đã được tổng hợp theo đúng một người xem. Trả lời trực tiếp người đó bằng đúng 1 câu tự nhiên, không quá 40 từ, bao quát các ý quan trọng và không lặp lại từng bình luận. Không thêm câu xã giao để kéo dài. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Bắt buộc trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Đây là nội dung reply dạng chữ: giữ nguyên tên riêng, chữ viết tắt và mã; có thể dùng tối đa một emoji phù hợp. Chỉ trả về câu trả lời, không giải thích suy luận và không dùng Markdown.`,
             },
             {
               role: 'user',
@@ -171,6 +176,69 @@ export class OpenAIDialogueProvider implements DialogueProvider {
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error));
     }
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// Gemini Dialogue Provider (Vertex AI + Google OAuth/ADC)
+// ─────────────────────────────────────────────────────────
+
+export interface GeminiLLMConfig {
+  accessToken: () => Promise<string>;
+  projectId: string;
+  location?: string;
+  model?: string;
+  temperature?: number;
+}
+
+export class GeminiDialogueProvider implements DialogueProvider {
+  readonly name = 'gemini-google';
+  private readonly _config: Required<Omit<GeminiLLMConfig, 'accessToken'>> & Pick<GeminiLLMConfig, 'accessToken'>;
+
+  constructor(config: GeminiLLMConfig) {
+    this._config = {
+      location: 'us-central1',
+      model: 'gemini-2.5-pro',
+      temperature: 0.7,
+      ...config,
+    };
+  }
+
+  async generate(intent: DirectorIntent, persona: CharacterPersona): Promise<string> {
+    if (!this._config.projectId) throw new Error('Gemini needs a Google Cloud project ID');
+    const accessToken = await this._config.accessToken();
+    if (!accessToken) throw new Error('Google account is not connected for Gemini');
+
+    const systemInstruction = `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. ${intent.intent === 'reply_to_chat_batch' ? 'Các bình luận đầu vào đã được tổng hợp theo đúng một người xem. Trả lời trực tiếp người đó bằng đúng 1 câu tự nhiên, không quá 40 từ, bao quát các ý quan trọng và không lặp lại từng bình luận. Không thêm câu xã giao để kéo dài. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Đây là nội dung reply dạng chữ: giữ nguyên tên riêng, chữ viết tắt và mã; có thể dùng tối đa một emoji phù hợp. Chỉ trả về câu trả lời, không giải thích suy luận và không dùng Markdown.`;
+    const endpoint = `https://${this._config.location}-aiplatform.googleapis.com/v1/projects/${encodeURIComponent(this._config.projectId)}/locations/${encodeURIComponent(this._config.location)}/publishers/google/models/${encodeURIComponent(this._config.model)}:generateContent`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        contents: [{
+          role: 'user',
+          parts: [{ text: `Tình huống: [${intent.action}]. Ý định: ${intent.intent}. Cảm xúc: ${intent.emotion || 'happy'}. Nội dung cần phản hồi: ${intent.speechText || 'Tự sinh lời thoại phù hợp bằng tiếng Việt'}.` }],
+        }],
+        generationConfig: {
+          maxOutputTokens: intent.intent === 'reply_to_chat_batch' ? 88 : 72,
+          temperature: this._config.temperature,
+        },
+      }),
+    });
+    const payload = await response.json().catch(() => ({})) as any;
+    if (!response.ok) {
+      throw new Error(payload.error?.message || `Gemini HTTP ${response.status}`);
+    }
+    const text = payload.candidates?.[0]?.content?.parts
+      ?.map((part: { text?: unknown }) => String(part?.text || ''))
+      .join('')
+      .trim();
+    if (!text) throw new Error('Gemini returned an empty response');
+    return text;
   }
 }
 
@@ -207,7 +275,7 @@ export class OllamaDialogueProvider implements DialogueProvider {
           messages: [
             {
               role: 'system',
-              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. ${intent.intent === 'reply_to_chat_batch' ? 'Trả lời trực tiếp tối đa hai bình luận bằng 1 đến 2 câu nói tự nhiên, không quá 40 từ. Câu trả lời ngắn thì giữ nguyên, không thêm câu xã giao để kéo dài thời lượng. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Không giải thích suy luận. Chỉ viết lời để đọc thành tiếng, không dùng emoji, icon, Markdown hoặc ký hiệu trang trí. Viết chữ viết tắt và mã bằng phiên âm tiếng Việt.`,
+              content: `${persona.systemPrompt || ''}\n${persona.sessionSkillMarkdown || ''}\nTên Idol: ${persona.name}. ${intent.intent === 'reply_to_chat_batch' ? 'Các bình luận đầu vào đã được tổng hợp theo đúng một người xem. Trả lời trực tiếp người đó bằng đúng 1 câu tự nhiên, không quá 40 từ, bao quát các ý quan trọng và không lặp lại từng bình luận. Không thêm câu xã giao để kéo dài. Không nói rằng bạn đã đọc bình luận, sẽ trả lời lần lượt hoặc sợ bỏ sót ai.' : 'Chỉ trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1 đến 2 câu và không quá 40 từ.'} Giữ đúng cách xưng hô và cá tính của Idol. Đây là nội dung reply dạng chữ: giữ nguyên tên riêng, chữ viết tắt và mã; có thể dùng tối đa một emoji phù hợp. Chỉ trả về câu trả lời, không giải thích suy luận và không dùng Markdown.`,
             },
             {
               role: 'user',
@@ -285,21 +353,35 @@ export class DialogueAgent {
       throw new Error('AI Director returned no usable dialogue; TTS was skipped');
     }
 
-    // Estimate speaking duration: Vietnamese speaking rate is ~4.5 syllables/sec (~3.5 words/sec)
-    text = normalizeVietnameseSpokenText(personalizePersonaName(text, this._persona));
+    // Keep the platform reply and spoken reply as separate representations.
+    // Chat keeps natural spelling and optional emoji; TTS receives a phonetic,
+    // symbol-free version so display-oriented rules never leak into speech.
+    let replyText = personalizePersonaName(text, this._persona).replace(/[`*_~#>|]/g, ' ').replace(/\s+/g, ' ').trim();
     if (intent.intent === 'reply_to_chat_batch') {
-      text = constrainLiveReply(text);
+      replyText = constrainLiveReply(replyText);
     } else {
-      text = trimToWordBudget(text);
+      replyText = trimToWordBudget(replyText);
     }
-    if (!text) {
-      throw new Error('AI Director reply was empty after speech cleanup; TTS was skipped');
+    if (!replyText) {
+      throw new Error('AI Director reply was empty after text cleanup');
     }
-    const wordCount = text.split(/\s+/).filter(Boolean).length;
+
+    let speechText = normalizeVietnameseSpokenText(replyText);
+    speechText = intent.intent === 'reply_to_chat_batch'
+      ? constrainLiveReply(speechText)
+      : trimToWordBudget(speechText);
+    if (!speechText) {
+      throw new Error('AI Director reply was empty after TTS cleanup; TTS was skipped');
+    }
+
+    // Estimate speaking duration: Vietnamese speaking rate is ~4.5 syllables/sec (~3.5 words/sec)
+    const wordCount = speechText.split(/\s+/).filter(Boolean).length;
     const estimatedDurationMs = Math.max(2000, Math.min(12_000, Math.round((wordCount / 3.5) * 1000)));
 
     return {
-      text,
+      text: speechText,
+      replyText,
+      speechText,
       emotion: intent.emotion ?? 'happy',
       estimatedDurationMs,
       provider: providerName,

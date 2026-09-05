@@ -63,9 +63,9 @@ def parse_args():
     # parser.add_argument('--H', type=int, default=450, help="GUI height")
 
     # ─── 数字人模型 ────────────────────────────────────────────────────
-    parser.add_argument('--model', type=str, default='wav2lip',
+    parser.add_argument('--model', type=str, default='musetalk',
                         help="avatar model: musetalk/wav2lip/ultralight")
-    parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
+    parser.add_argument('--avatar_id', type=str, default='musetalk_avatar1',
                         help="avatar id in data/avatars")
     parser.add_argument('--batch_size', type=int, default=4, help="infer batch")
     parser.add_argument('--modelres', type=int, default=192)
@@ -76,7 +76,7 @@ def parse_args():
                         help="custom action json")
 
     # ─── TTS ───────────────────────────────────────────────────────────
-    parser.add_argument('--tts', type=str, default='edgetts',
+    parser.add_argument('--tts', type=str, default='qwentts',
                         help="tts plugin: edgetts/gpt-sovits/cosyvoice/fishtts/tencent/doubao/indextts2/azuretts/qwentts")
     parser.add_argument('--REF_FILE', type=str, default="zh-CN-YunxiaNeural",
                         help="参考文件名或语音模型ID")
@@ -122,9 +122,9 @@ def parse_args():
         with open(opt.customvideo_config, 'r') as f:
             opt.customopt = json.load(f)
 
-    # MuseTalk infers 15 unique frames per second. WebRTC repeats them on a
-    # stable 30 FPS transport clock for smooth OBS playback.
-    opt.fps = 15.0
+    # The operator may select a 15 or 25 FPS model cadence. WebRTC remains a
+    # fixed 30 FPS stream and repeats model frames as needed.
+    opt.fps = 25.0 if float(opt.fps) == 25.0 else 15.0
     opt.output_fps = 30
 
     return opt

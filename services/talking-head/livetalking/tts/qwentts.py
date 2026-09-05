@@ -17,8 +17,14 @@ try:
         AudioFormat,
     )
 except ImportError:
-    logger.error("QwenTTS 需要安装 dashscope SDK: pip install dashscope>=1.25.11")
-    raise
+    dashscope = None
+    QwenTtsRealtime = None
+    QwenTtsRealtimeCallback = object
+    AudioFormat = None
+    logger.warning(
+        "DashScope SDK is unavailable; QwenTTS will use local-audio mode "
+        "and accept audio uploaded by the runtime"
+    )
 
 
 SRC_SR = 24000   # Qwen TTS 只支持 24kHz 输出
@@ -49,12 +55,14 @@ class QwenTTS(BaseTTS):
         self.ws_url = getattr(opt, 'qwen_tts_url',
                               'wss://dashscope.aliyuncs.com/api-ws/v1/realtime')
 
-        # 设置 DashScope API Key
+        # The runtime synthesizes speech with the local Qwen TTS service and
+        # uploads the resulting WAV to /humanaudio. LiveTalking still creates
+        # an avatar TTS object for compatibility, but must not open a cloud
+        # WebSocket when no DashScope key is configured.
         api_key = getattr(opt, 'dashscope_api_key', None) or os.environ.get('DASHSCOPE_API_KEY')
-        if api_key:
+        self._cloud_enabled = bool(api_key and dashscope and QwenTtsRealtime and AudioFormat)
+        if self._cloud_enabled:
             dashscope.api_key = api_key
-        else:
-            logger.warning("QwenTTS: DASHSCOPE_API_KEY 未设置，请设置环境变量或通过参数传入")
 
         # ---------- 内部状态 ----------
         self._remainder = np.array([], dtype=np.float32)  # 上次重采样后不足一 chunk 的 16kHz 样本
@@ -62,6 +70,15 @@ class QwenTTS(BaseTTS):
         self._first_chunk = True          # 当前合成的一句话里的第一个音频包
         self._current_text = ''
         self._current_textevent = {}
+
+        self._tts_client = None
+        self._callback = None
+        if not self._cloud_enabled:
+            logger.info(
+                "QwenTTS initialized in local-audio mode; "
+                "LiveTalking will receive PCM/WAV from the runtime Qwen service"
+            )
+            return
 
         # ---------- 回调类 ----------
         tts_ref = self
@@ -119,6 +136,11 @@ class QwenTTS(BaseTTS):
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         text, textevent = msg
+        if not self._cloud_enabled or self._tts_client is None:
+            # Speech is synthesized by services/qwen-tts and delivered through
+            # BaseAvatar.put_audio_file; this compatibility path is intentional.
+            logger.debug("QwenTTS local-audio mode ignored text request: %s", text[:80])
+            return
         t_start = time.perf_counter()
 
         ref_file = textevent.get('tts', {}).get('ref_file',self.voice)
@@ -163,9 +185,10 @@ class QwenTTS(BaseTTS):
             self._remainder = np.array([], dtype=np.float32)
             return
 
-        # 整段 24kHz PCM -> float32 -> 一次性 resample 到 16kHz
-        samples_16k = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
-        #samples_16k = resampy.resample(x=samples_24k, sr_orig=SRC_SR, sr_new=DST_SR)
+        # Convert the cloud stream from Qwen's 24 kHz PCM to the project's
+        # fixed 16 kHz / 20 ms audio clock before feeding the avatar.
+        samples_24k = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+        samples_16k = resampy.resample(x=samples_24k, sr_orig=SRC_SR, sr_new=DST_SR)
 
         # 拼接上次剩余
         if self._remainder.shape[0] > 0:
@@ -215,5 +238,6 @@ class QwenTTS(BaseTTS):
         self.parent.put_audio_frame(np.zeros(self.chunk, np.float32), eventpoint)
 
     def stop_tts(self):
-        self._tts_client.close()
-        logger.info("QwenTTS 已关闭")
+        if self._tts_client is not None:
+            self._tts_client.close()
+            logger.info("QwenTTS 已关闭")

@@ -269,33 +269,37 @@ class HumanPlayer:
         if not isinstance(frame, np.ndarray) or frame.ndim < 2:
             return frame
         height, width = frame.shape[:2]
-        scale = min(
-            1.0,
-            self.output_max_width / max(1, width),
-            self.output_max_height / max(1, height),
-        )
-        if scale >= 1.0:
+        target_width = self.output_max_width - (self.output_max_width % 2)
+        target_height = self.output_max_height - (self.output_max_height % 2)
+        if target_width < 2 or target_height < 2:
             return frame
-
-        target_width = max(2, int(round(width * scale)))
-        target_height = max(2, int(round(height * scale)))
-        target_width -= target_width % 2
-        target_height -= target_height % 2
-        resized = cv2.resize(
-            frame,
-            (target_width, target_height),
-            interpolation=cv2.INTER_AREA,
+        scale = min(
+            target_width / max(1, width),
+            target_height / max(1, height),
         )
+        resized_width = max(2, int(round(width * scale)))
+        resized_height = max(2, int(round(height * scale)))
+        resized_width -= resized_width % 2
+        resized_height -= resized_height % 2
+        if (width, height) == (target_width, target_height):
+            return frame
+        interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        resized = cv2.resize(frame, (resized_width, resized_height), interpolation=interpolation)
+        canvas_shape = (target_height, target_width, *frame.shape[2:])
+        canvas = np.zeros(canvas_shape, dtype=frame.dtype)
+        left = (target_width - resized_width) // 2
+        top = (target_height - resized_height) // 2
+        canvas[top:top + resized_height, left:left + resized_width] = resized
         if not self._reported_output_resize:
             mylogger.info(
-                "WebRTC output capped from %dx%d to %dx%d",
+                "WebRTC output normalized from %dx%d to %dx%d (letterbox)",
                 width,
                 height,
                 target_width,
                 target_height,
             )
             self._reported_output_resize = True
-        return resized
+        return canvas
 
     def push_video(self, frame, preserve=False):
         from av import VideoFrame

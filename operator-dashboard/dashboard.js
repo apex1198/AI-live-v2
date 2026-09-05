@@ -43,6 +43,7 @@ const STORAGE_KEYS = {
   OBS_CONFIG:           'idol_obs_config',
   MODEL_TASKS:          'idol_model_tasks',
   STUDIO_COLUMNS:       'idol_studio_columns',
+  STUDIO_MONITOR_HEIGHT:'idol_studio_monitor_height',
   VIDEO_QUALITY:        'idol_live_video_quality',
   MOCK_CHAT_USER:       'idol_mock_chat_user',
   FORM_DRAFTS:          'idol_form_drafts_v1',
@@ -110,6 +111,7 @@ const App = window.createOperatorStore(STORAGE_KEYS);
 let runtimeRealtimeSocket = null;
 let runtimeRealtimeConnected = false;
 let runtimeRealtimeReconnectTimer = null;
+let runtimeRealtimeSuspended = false;
 let runtimeSpeechState = 'IDLE';
 let pendingRuntimePlaybackCommandId = null;
 const OBS_PUBLISHER_ID_KEY = 'idol_obs_output_publisher_id';
@@ -123,9 +125,14 @@ const LiveMediaOwnership = {
   state: 'PENDING',
   ownerClientId: '',
   mediaReady: false,
+  liveSessionId: '',
+  liveAvatarId: '',
   waiters: new Set(),
 };
 let liveMediaResetPromise = null;
+let liveMediaReconnectRequested = false;
+let liveMediaRecoveryTimer = null;
+let liveMediaRecoveryAttempt = 0;
 let operationalAvatarRestorePromise = null;
 let operationalAvatarRestoreTimer = null;
 let appStartupComplete = false;
@@ -139,20 +146,77 @@ function settleLiveMediaOwnership(state, ownerClientId = '') {
 }
 
 function applyLiveMediaSnapshot(media = {}) {
+  LiveMediaOwnership.liveSessionId = String(media.sessionId || '');
+  LiveMediaOwnership.liveAvatarId = String(media.avatarId || '');
+  updateAvatarLibraryTransientState();
   if (media.ownerClientId !== LIVE_MEDIA_CLIENT_ID) {
     LiveMediaOwnership.mediaReady = false;
     return;
   }
   LiveMediaOwnership.mediaReady = Boolean(media.ready);
+  if (LiveMediaOwnership.mediaReady) liveMediaRecoveryAttempt = 0;
+  if (!LiveMediaOwnership.mediaReady && appStartupComplete && LiveMediaOwnership.state === 'OWNER') {
+    const connectionState = String(media.connectionState || 'new').toUpperCase();
+    // The worker can need several seconds for ICE, model startup and the first
+    // encoded frame. Resetting during that window closes a healthy session and
+    // creates a permanent reconnect loop.
+    if (['NEW', 'CONNECTING'].includes(connectionState)
+      && LiveTalkingWebRTCClient?.isNegotiating?.()) return;
+    const reason = media.sessionId
+      ? `runtime media ${connectionState.toLowerCase()}`
+      : 'runtime media session missing';
+    if (TRAINED_AVATARS.size > 0) {
+      scheduleLiveMediaRecovery(reason);
+    } else {
+      scheduleOperationalAvatarRestore(reason);
+    }
+  }
+}
+
+function scheduleLiveMediaRecovery(reason = 'media is not ready', delayMs = 350) {
+  if (!appStartupComplete
+    || LiveMediaOwnership.state !== 'OWNER'
+    || liveMediaResetPromise
+    || liveMediaRecoveryTimer) return;
+  liveMediaRecoveryTimer = setTimeout(() => {
+    liveMediaRecoveryTimer = null;
+    if (LiveMediaOwnership.mediaReady) {
+      liveMediaRecoveryAttempt = 0;
+      return;
+    }
+    if (LiveTalkingWebRTCClient?.isNegotiating?.()) {
+      // A healthy offer can need a few seconds before the first decoded frame.
+      // Keep a watchdog armed instead of abandoning recovery permanently.
+      scheduleLiveMediaRecovery('WebRTC negotiation still pending', 2500);
+      return;
+    }
+    const avatarId = [LiveAvatarSession?.activeAvatarId, LiveTalkingStudio?.avatarId]
+      .find(id => id && TRAINED_AVATARS.has(id))
+      || TRAINED_AVATARS.keys().next().value;
+    if (!avatarId || LiveMediaOwnership.state !== 'OWNER') {
+      if (LiveMediaOwnership.state === 'OWNER') scheduleOperationalAvatarRestore(reason, 500);
+      return;
+    }
+    void reconnectLiveTalkingAvatar(avatarId).catch(error => {
+      addLog(`Live Monitor self-heal failed after ${reason}: ${error.message}`, 'warn');
+      liveMediaRecoveryAttempt += 1;
+      const retryDelay = Math.min(15_000, 1000 * (2 ** Math.min(liveMediaRecoveryAttempt, 4)));
+      scheduleLiveMediaRecovery('automatic retry', retryDelay);
+    });
+  }, delayMs);
 }
 
 function disconnectLiveMedia(reason, reconnect = false) {
+  liveMediaReconnectRequested ||= reconnect;
   if (liveMediaResetPromise) return liveMediaResetPromise;
   liveMediaResetPromise = Promise.resolve()
     .then(() => LiveTalkingWebRTCClient?.disconnect?.())
     .catch(error => addLog(`Could not reset Live Monitor: ${error.message}`, 'warn'))
     .then(async () => {
-      if (!reconnect || LiveMediaOwnership.state !== 'OWNER' || !LiveTalkingWorker?.ready) return;
+      const shouldReconnect = reconnect || liveMediaReconnectRequested;
+      liveMediaReconnectRequested = false;
+      if (!shouldReconnect || LiveMediaOwnership.state !== 'OWNER') return;
+      if (!LiveTalkingWorker?.ready) await ensureLiveTalkingWorkerReady();
       const avatarId = [LiveAvatarSession?.activeAvatarId, LiveTalkingStudio?.avatarId]
         .find(id => id && TRAINED_AVATARS.has(id))
         || TRAINED_AVATARS.keys().next().value;
@@ -170,17 +234,20 @@ function registerLiveMediaClient() {
   return sendRuntimeSignal({
     type: 'LIVETALKING_MEDIA_REGISTER',
     clientId: LIVE_MEDIA_CLIENT_ID,
-    priority: document.visibilityState === 'visible' ? 100 : 10,
+    priority: document.hasFocus() ? 100 : (document.visibilityState === 'visible' ? 50 : 10),
   });
 }
 
 async function waitForLiveMediaOwnership(timeoutMs = 5000) {
-  if (LiveMediaOwnership.state === 'OWNER') return true;
+  if (LiveMediaOwnership.state === 'OWNER' && runtimeRealtimeConnected) return true;
   if (LiveMediaOwnership.state === 'STANDBY') {
     throw new Error('Live Monitor is active in another tab');
   }
   if (!runtimeRealtimeConnected) connectRuntimeRealtime();
   registerLiveMediaClient();
+  const registrationTimer = setInterval(() => {
+    if (LiveMediaOwnership.state !== 'OWNER') registerLiveMediaClient();
+  }, 300);
   await new Promise(resolve => {
     const timer = setTimeout(() => {
       LiveMediaOwnership.waiters.delete(done);
@@ -192,6 +259,7 @@ async function waitForLiveMediaOwnership(timeoutMs = 5000) {
     };
     LiveMediaOwnership.waiters.add(done);
   });
+  clearInterval(registrationTimer);
   if (LiveMediaOwnership.state !== 'OWNER') {
     throw new Error(LiveMediaOwnership.state === 'STANDBY'
       ? 'Live Monitor is active in another tab'
@@ -589,9 +657,7 @@ function handleRuntimeRealtimeMessage(payload) {
   if (payload.type === 'LIVETALKING_MEDIA_OWNER_GRANTED') {
     settleLiveMediaOwnership('OWNER', payload.clientId || LIVE_MEDIA_CLIENT_ID);
     applyLiveMediaSnapshot(payload.media || {});
-    if (!LiveTalkingWebRTCClient?.sessionId && LiveTalkingWorker?.ready && TRAINED_AVATARS.size > 0) {
-      void disconnectLiveMedia('', true);
-    }
+    if (!LiveTalkingWebRTCClient?.sessionId) scheduleOperationalAvatarRestore('ownership granted');
     return;
   }
   if (payload.type === 'LIVETALKING_MEDIA_STANDBY') {
@@ -600,12 +666,33 @@ function handleRuntimeRealtimeMessage(payload) {
     return;
   }
   if (payload.type === 'LIVETALKING_MEDIA_REVOKED') {
-    settleLiveMediaOwnership('STANDBY', payload.ownerClientId || '');
-    void disconnectLiveMedia(payload.reason || 'ownership revoked');
+    const shouldReacquire = ['MEDIA_NOT_READY', 'VIDEO_FRAME_STALLED']
+      .includes(String(payload.reason || '').toUpperCase());
+    settleLiveMediaOwnership(shouldReacquire ? 'PENDING' : 'STANDBY', payload.ownerClientId || '');
+    void disconnectLiveMedia(payload.reason || 'ownership revoked').finally(() => {
+      if (!shouldReacquire) return;
+      registerLiveMediaClient();
+      scheduleOperationalAvatarRestore(payload.reason || 'ownership reacquire', 250);
+    });
+    return;
+  }
+  if (payload.type === 'LIVETALKING_MEDIA_RECOVERY_REQUIRED') {
+    LiveMediaOwnership.mediaReady = false;
+    LiveMediaOwnership.liveSessionId = '';
+    LiveMediaOwnership.liveAvatarId = '';
+    updateAvatarLibraryTransientState();
+    if (LiveMediaOwnership.state !== 'STANDBY') {
+      settleLiveMediaOwnership('PENDING');
+      registerLiveMediaClient();
+      scheduleOperationalAvatarRestore(payload.reason || 'runtime requested media recovery', 250);
+    }
     return;
   }
   if (payload.type === 'LIVETALKING_MEDIA_RESET_REQUIRED') {
     LiveMediaOwnership.mediaReady = false;
+    LiveMediaOwnership.liveSessionId = '';
+    LiveMediaOwnership.liveAvatarId = '';
+    updateAvatarLibraryTransientState();
     LiveTalkingWorker.sessionFailureCount = 3;
     void disconnectLiveMedia(payload.reason || 'worker session changed', true);
     return;
@@ -645,6 +732,7 @@ function handleRuntimeRealtimeMessage(payload) {
     localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
     updateAvatarPoolCount();
     updateLibraryTransientState();
+    updateAvatarLibraryTransientState();
   } else if (payload.type === 'DIRECTOR_INTENT' && payload.intent?.dialogueProvider) {
     applyRuntimeSpeechState({ dialogueProvider: payload.intent.dialogueProvider });
   } else if (payload.type === 'SETTINGS_UPDATED' && payload.settings) {
@@ -665,12 +753,20 @@ function handleRuntimeRealtimeMessage(payload) {
 }
 
 function connectRuntimeRealtime() {
-  if (location.protocol === 'file:' || !window.RuntimeApi?.connectRealtime) return;
+  if (runtimeRealtimeSuspended || location.protocol === 'file:' || !window.RuntimeApi?.connectRealtime) return;
   if (runtimeRealtimeSocket && runtimeRealtimeSocket.readyState < WebSocket.CLOSING) return;
   runtimeRealtimeSocket = window.RuntimeApi.connectRealtime(handleRuntimeRealtimeMessage, state => {
     runtimeRealtimeConnected = state === 'open';
     if (state === 'open') {
       registerLiveMediaClient();
+      let attempts = 0;
+      const reinforceOwnership = () => {
+        if (!runtimeRealtimeConnected || LiveMediaOwnership.state === 'OWNER' || attempts >= 8) return;
+        attempts += 1;
+        registerLiveMediaClient();
+        setTimeout(reinforceOwnership, Math.min(1500, 150 * (2 ** attempts)));
+      };
+      setTimeout(reinforceOwnership, 100);
       sendRuntimeSignal({
         type: 'OBS_OUTPUT_REGISTER',
         role: 'publisher',
@@ -684,10 +780,34 @@ function connectRuntimeRealtime() {
       void disconnectLiveMedia('runtime connection closed');
       OBSOutputBridge.closePeer();
       clearTimeout(runtimeRealtimeReconnectTimer);
+      if (runtimeRealtimeSuspended) return;
       runtimeRealtimeReconnectTimer = setTimeout(connectRuntimeRealtime, 2000);
     }
   });
 }
+
+function releaseRuntimeRealtime() {
+  runtimeRealtimeSuspended = true;
+  clearTimeout(runtimeRealtimeReconnectTimer);
+  runtimeRealtimeReconnectTimer = null;
+  if (runtimeRealtimeSocket?.readyState === WebSocket.OPEN) {
+    sendRuntimeSignal({
+      type: 'LIVETALKING_MEDIA_RELEASE',
+      clientId: LIVE_MEDIA_CLIENT_ID,
+    });
+  }
+  runtimeRealtimeConnected = false;
+  runtimeRealtimeSocket?.close(1000, 'Dashboard page hidden');
+  runtimeRealtimeSocket = null;
+}
+
+window.addEventListener('pagehide', releaseRuntimeRealtime, { capture: true });
+window.addEventListener('beforeunload', releaseRuntimeRealtime, { capture: true });
+window.addEventListener('pageshow', event => {
+  if (!event.persisted) return;
+  runtimeRealtimeSuspended = false;
+  connectRuntimeRealtime();
+});
 
 document.addEventListener('visibilitychange', () => {
   if (!runtimeRealtimeConnected) return;
@@ -699,6 +819,8 @@ document.addEventListener('visibilitychange', () => {
     priority: document.visibilityState === 'visible' ? 100 : 10,
   });
 });
+window.addEventListener('focus', registerLiveMediaClient);
+window.addEventListener('blur', registerLiveMediaClient);
 
 // ── DOM Helpers ───────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -2570,6 +2692,16 @@ const LiveTalkingWebRTCClient = window.createLiveTalkingWebRTCClient({
       LiveMediaOwnership.mediaReady = media.connectionState === 'CONNECTED'
         && media.audioTrack
         && media.videoTrack;
+      LiveMediaOwnership.liveSessionId = String(media.sessionId || '');
+      LiveMediaOwnership.liveAvatarId = media.sessionId
+        ? String(LiveAvatarSession.activeAvatarId || LiveTalkingStudio.avatarId || '')
+        : '';
+      updateAvatarLibraryTransientState();
+      if (!LiveMediaOwnership.mediaReady
+        && media.sessionId
+        && ['DISCONNECTED', 'FAILED', 'CLOSED'].includes(String(media.connectionState || '').toUpperCase())) {
+        scheduleLiveMediaRecovery(`peer media ${String(media.connectionState).toLowerCase()}`);
+      }
     }
     sendRuntimeSignal(media);
   },
@@ -2643,6 +2775,8 @@ const LiveTalkingWorker = {
   state: 'OFFLINE',
   ready: false,
   alwaysOn: true,
+  modelFps: 15,
+  outputFps: 30,
   error: '',
   instanceKey: '',
   pollTimer: null,
@@ -2663,6 +2797,25 @@ function updateLiveVideoQualityAvailability() {
   document.querySelectorAll('[data-video-quality]').forEach(button => {
     button.disabled = busy;
   });
+}
+
+function updateLiveTalkingFpsAvailability() {
+  const select = $('lt-model-fps-select');
+  if (!select) return;
+  const speechBusy = runtimeSpeechState === 'GENERATING' || runtimeSpeechState === 'SPEAKING';
+  const workerBusy = LiveTalkingWorker.state === 'STARTING' || LiveTalkingWorker.state === 'STOPPING';
+  select.disabled = speechBusy || workerBusy || LiveTalkingStudio.isTraining;
+}
+
+function applyLiveTalkingFpsUI(modelFps, outputFps = 30) {
+  const selectedModelFps = Number(modelFps) === 25 ? 25 : 15;
+  LiveTalkingWorker.modelFps = selectedModelFps;
+  LiveTalkingWorker.outputFps = 30;
+  const select = $('lt-model-fps-select');
+  if (select && document.activeElement !== select) select.value = String(selectedModelFps);
+  const status = $('livetalking-fps-status');
+  if (status) status.textContent = `Model ${selectedModelFps} FPS · Output ${Number(outputFps) || 30} FPS`;
+  updateLiveTalkingFpsAvailability();
 }
 
 function applyLiveVideoQualityUI(quality, { persist = true, republish = true } = {}) {
@@ -2762,7 +2915,20 @@ async function setLiveVideoQuality(quality) {
 
 function reconnectLiveTalkingAvatar(avatarId) {
   if (liveTalkingReconnectPromise) return liveTalkingReconnectPromise;
-  liveTalkingReconnectPromise = activateLiveTalkingAvatar(avatarId)
+  liveTalkingReconnectPromise = (async () => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      try {
+        await waitForLiveMediaOwnership();
+        if (!LiveTalkingWorker.ready) await ensureLiveTalkingWorkerReady();
+        return await activateLiveTalkingAvatar(avatarId);
+      } catch (error) {
+        lastError = error;
+        if (attempt < 4) await wait(Math.min(750 * (2 ** (attempt - 1)), 4000));
+      }
+    }
+    throw lastError || new Error('Live avatar reconnect failed');
+  })()
     .finally(() => { liveTalkingReconnectPromise = null; });
   return liveTalkingReconnectPromise;
 }
@@ -2830,6 +2996,7 @@ function applyLiveTalkingWorkerState(worker = {}) {
   LiveTalkingWorker.state = worker.state || (worker.ready ? 'READY' : 'OFFLINE');
   LiveTalkingWorker.ready = Boolean(worker.ready);
   if (typeof worker.alwaysOn === 'boolean') LiveTalkingWorker.alwaysOn = worker.alwaysOn;
+  if (worker.modelFps || worker.outputFps) applyLiveTalkingFpsUI(worker.modelFps, worker.outputFps);
   if (worker.videoQuality) applyLiveVideoQualityUI(worker.videoQuality);
   LiveTalkingWorker.error = worker.error || '';
   LiveTalkingWorker.instanceKey = worker.ready
@@ -2891,6 +3058,7 @@ function applyLiveTalkingWorkerState(worker = {}) {
   }
   if (restartButton) restartButton.disabled = transitioning;
   updateLiveVideoQualityAvailability();
+  updateLiveTalkingFpsAvailability();
 }
 
 async function refreshLiveTalkingWorkerStatus({ silent = false } = {}) {
@@ -3171,7 +3339,7 @@ async function saveProjectStorageConfig() {
     return;
   }
   if (location.protocol === 'file:') {
-    if (status) status.textContent = 'Open http://localhost:11111 to enable project storage.';
+    if (status) status.textContent = 'Open http://localhost:6767 to enable project storage.';
     return;
   }
   const response = await fetch('/api/storage/config', {
@@ -3189,7 +3357,7 @@ async function saveProjectStorageConfig() {
 async function selectProjectStorageFolder() {
   const status = $('project-storage-status');
   if (location.protocol === 'file:') {
-    if (status) status.textContent = 'Open http://localhost:11111 to select a folder.';
+    if (status) status.textContent = 'Open http://localhost:6767 to select a folder.';
     return;
   }
   if (status) status.textContent = 'Waiting for folder selection…';
@@ -3254,37 +3422,28 @@ async function installLocalAiModel() {
   }, 2000);
 }
 
-const AiDirectorState = { provider: 'ollama', model: 'qwen3:8b', apiKeyConfigured: false };
+const AiDirectorState = { provider: 'ollama', model: 'qwen3:8b', geminiProject: '', geminiLocation: 'us-central1' };
 
 function setAiDirectorProviderUI(provider) {
-  const selected = provider === 'ttm-chatgpt' ? 'ttm-chatgpt' : 'ollama';
+  const selected = provider === 'gemini' ? 'gemini' : 'ollama';
   AiDirectorState.provider = selected;
   if ($('ai-director-provider')) $('ai-director-provider').value = selected;
   $('ai-director-ollama-panel')?.toggleAttribute('hidden', selected !== 'ollama');
-  $('ai-director-ttm-panel')?.toggleAttribute('hidden', selected !== 'ttm-chatgpt');
-}
-
-function populateChatGptModels(models = [], preferredModel = '') {
-  const select = $('ai-director-chatgpt-model');
-  if (!select) return;
-  const values = [...new Set(['chat-latest', preferredModel, ...models].filter(Boolean))];
-  select.replaceChildren(...values.map(model => Object.assign(document.createElement('option'), { value: model, textContent: model })));
-  select.value = values.includes(preferredModel) ? preferredModel : values[0];
+  $('ai-director-gemini-panel')?.toggleAttribute('hidden', selected !== 'gemini');
+  if (selected === 'gemini') void refreshGeminiGoogleAuth();
 }
 
 function applyAiDirectorSettings(persona = {}) {
-  const provider = persona.llmProvider === 'ollama' ? 'ollama' : 'ttm-chatgpt';
-  const model = persona.llmModel || (provider === 'ttm-chatgpt' ? 'chat-latest' : 'qwen3:8b');
+  const provider = persona.llmProvider === 'gemini' ? 'gemini' : 'ollama';
+  const model = persona.llmModel || (provider === 'gemini' ? 'gemini-2.5-pro' : 'qwen3:8b');
   AiDirectorState.provider = provider;
   AiDirectorState.model = model;
-  AiDirectorState.apiKeyConfigured = Boolean(persona.apiKeyConfigured);
+  AiDirectorState.geminiProject = persona.geminiProject || '';
+  AiDirectorState.geminiLocation = persona.geminiLocation || 'us-central1';
   if ($('local-ai-model-name') && provider === 'ollama') $('local-ai-model-name').value = model;
-  populateChatGptModels([], provider === 'ttm-chatgpt' ? model : 'chat-latest');
-  const keyInput = $('ai-director-api-key');
-  if (keyInput) {
-    keyInput.value = '';
-    keyInput.placeholder = AiDirectorState.apiKeyConfigured ? 'Saved API key' : 'Enter API key';
-  }
+  if ($('ai-director-gemini-model') && provider === 'gemini') $('ai-director-gemini-model').value = model;
+  if ($('ai-director-gemini-project')) $('ai-director-gemini-project').value = AiDirectorState.geminiProject;
+  if ($('ai-director-gemini-location')) $('ai-director-gemini-location').value = AiDirectorState.geminiLocation;
   setAiDirectorProviderUI(provider);
 }
 
@@ -3310,32 +3469,52 @@ function applyLiveTalkingMaintenanceState(maintenance = {}) {
 
 async function loadAiDirectorSettings() {
   const payload = await window.RuntimeApi.get('/api/ai/director/status');
-  applyAiDirectorSettings({ llmProvider: payload.provider, llmModel: payload.model, apiKeyConfigured: payload.apiKeyConfigured });
+  applyAiDirectorSettings({ llmProvider: payload.provider, llmModel: payload.model, geminiProject: payload.geminiProject, geminiLocation: payload.geminiLocation });
   if (payload.provider === 'ollama') await refreshLocalAiStatus();
 }
 
-async function refreshChatGptModels() {
-  const status = $('ai-director-ttm-status');
-  const button = $('refresh-ai-director-models');
-  const apiKey = $('ai-director-api-key')?.value.trim() || '';
-  if (status) status.textContent = 'Checking TTM API...';
-  if (button) button.disabled = true;
+async function refreshGeminiGoogleAuth() {
+  const status = $('ai-director-gemini-status');
+  const button = $('connect-ai-director-gemini');
+  if (status) status.textContent = 'Checking Google account…';
   try {
-    const payload = await window.RuntimeApi.post('/api/ai/director/models', apiKey ? { apiKey } : {});
-    populateChatGptModels(payload.models || [], $('ai-director-chatgpt-model')?.value || AiDirectorState.model);
-    if (status) status.textContent = `${payload.models?.length || 0} models available.`;
+    const payload = await window.RuntimeApi.get('/api/ai/director/gemini/auth/status');
+    const auth = payload.auth || {};
+    if ($('ai-director-gemini-project') && !String($('ai-director-gemini-project').value || '').trim() && auth.projectId) {
+      $('ai-director-gemini-project').value = auth.projectId;
+    }
+    if (status) status.textContent = auth.message || (auth.connected ? 'Google account connected.' : 'Google sign-in is required.');
+    if (button) button.textContent = auth.connected ? 'Google connected' : 'Connect Google';
+  } catch (error) {
+    if (status) status.textContent = error.message || 'Google account status is unavailable.';
+  }
+}
+
+async function connectGeminiGoogleAccount() {
+  const status = $('ai-director-gemini-status');
+  const button = $('connect-ai-director-gemini');
+  if (button) button.disabled = true;
+  if (status) status.textContent = 'Opening Google sign-in…';
+  try {
+    await window.RuntimeApi.post('/api/ai/director/gemini/auth/start', {});
+    if (status) status.textContent = 'Finish Google sign-in in the browser, then this status will update.';
+    const timer = setInterval(async () => {
+      await refreshGeminiGoogleAuth();
+      if ($('connect-ai-director-gemini')?.textContent === 'Google connected') clearInterval(timer);
+    }, 2500);
   } finally {
     if (button) button.disabled = false;
   }
 }
 
 async function saveAiDirectorSettings() {
-  const provider = $('ai-director-provider')?.value === 'ttm-chatgpt' ? 'ttm-chatgpt' : 'ollama';
-  const model = provider === 'ttm-chatgpt'
-    ? ($('ai-director-chatgpt-model')?.value || 'chat-latest')
+  const provider = $('ai-director-provider')?.value === 'gemini' ? 'gemini' : 'ollama';
+  const model = provider === 'gemini'
+    ? ($('ai-director-gemini-model')?.value.trim() || 'gemini-2.5-pro')
     : ($('local-ai-model-name')?.value.trim() || 'qwen3:8b');
-  const apiKey = $('ai-director-api-key')?.value.trim() || '';
-  const payload = await window.RuntimeApi.post('/api/ai/director/config', { provider, model, ...(apiKey ? { apiKey } : {}) });
+  const projectId = $('ai-director-gemini-project')?.value.trim() || '';
+  const location = $('ai-director-gemini-location')?.value.trim() || 'us-central1';
+  const payload = await window.RuntimeApi.post('/api/ai/director/config', { provider, model, ...(provider === 'gemini' ? { projectId, location } : {}) });
   applyAiDirectorSettings(payload.settings || {});
   if ($('ai-director-save-status')) $('ai-director-save-status').textContent = 'AI Director saved.';
 }
@@ -4040,22 +4219,28 @@ function renderAvatarLibrary(avatars) {
   grid.replaceChildren(...valid.map(avatar => {
     const card = document.createElement('article');
     const selected = LiveAvatarSession.selectedAvatarIds.includes(avatar.id);
-    card.className = `avatar-library-card${selected ? ' selected' : ''}`;
+    const liveNow = isAvatarLiveNow(avatar.id);
+    card.className = `avatar-library-card${selected ? ' selected' : ''}${liveNow ? ' live-now' : ''}`;
+    card.dataset.avatarId = avatar.id;
     card.tabIndex = 0;
     card.setAttribute('role', 'checkbox');
     card.setAttribute('aria-checked', String(selected));
-    card.setAttribute('aria-label', `${selected ? 'Deactivate' : 'Activate'} ${avatar.name || avatar.id} in the Avatar pool`);
+    card.setAttribute('aria-label', `${selected ? 'Disable' : 'Enable'} ${avatar.name || avatar.id} in the Avatar Pool${liveNow ? '; live now' : ''}`);
 
     const preview = document.createElement('div');
     preview.className = 'avatar-card-preview';
     const status = document.createElement('span');
     status.className = 'avatar-card-status';
-    status.textContent = selected ? 'Active' : 'Inactive';
+    status.textContent = selected ? 'Enabled' : 'Disabled';
+    const liveStatus = document.createElement('span');
+    liveStatus.className = 'avatar-card-live-status';
+    liveStatus.textContent = 'Live now';
+    liveStatus.hidden = !liveNow;
     const fallback = document.createElement('span');
     fallback.className = 'material-symbols-rounded avatar-card-fallback';
     fallback.setAttribute('aria-hidden', 'true');
     fallback.textContent = 'person';
-    preview.append(status, fallback);
+    preview.append(fallback);
 
     if (avatar.thumbnailUrl && location.protocol !== 'file:') {
       const image = document.createElement('img');
@@ -4139,12 +4324,17 @@ function renderAvatarLibrary(avatars) {
       }
     });
     actions.append(edit, remove);
-    preview.append(actions);
 
     const body = document.createElement('div');
     body.className = 'avatar-card-body';
     const title = document.createElement('h3');
     title.textContent = avatar.name || avatar.id;
+    const heading = document.createElement('div');
+    heading.className = 'avatar-card-heading';
+    const statuses = document.createElement('div');
+    statuses.className = 'avatar-card-statuses';
+    statuses.append(status, liveStatus);
+    heading.append(title, statuses);
     const meta = document.createElement('p');
     const durationMs = Number(avatar.durationMs || avatar.duration_ms || 0);
     const durationLabel = durationMs > 0 ? `${(durationMs / 1000).toFixed(1)}s` : 'ready';
@@ -4185,9 +4375,9 @@ function renderAvatarLibrary(avatars) {
     poolIcon.setAttribute('aria-hidden', 'true');
     poolIcon.textContent = selected ? 'check_circle' : 'circle';
     const label = document.createElement('span');
-    label.textContent = selected ? 'Active in Avatar Pool' : 'Inactive';
+    label.textContent = selected ? 'Included in automatic rotation' : 'Excluded from automatic rotation';
     live.append(poolIcon, label);
-    body.append(title, meta, stateField, live);
+    body.append(heading, meta, stateField, live, actions);
     card.append(preview, body);
 
     const toggleSelection = async () => {
@@ -4213,6 +4403,38 @@ function renderAvatarLibrary(avatars) {
     });
     return card;
   }));
+  updateAvatarLibraryTransientState();
+}
+
+function isAvatarLiveNow(avatarId) {
+  const localSessionId = String(LiveTalkingWebRTCClient?.sessionId || '');
+  const liveSessionId = LiveMediaOwnership.liveSessionId || localSessionId;
+  const liveAvatarId = LiveMediaOwnership.liveAvatarId
+    || (localSessionId ? String(LiveAvatarSession.activeAvatarId || LiveTalkingStudio.avatarId || '') : '');
+  return Boolean(liveSessionId) && String(avatarId || '') === liveAvatarId;
+}
+
+function updateAvatarLibraryTransientState() {
+  document.querySelectorAll('.avatar-library-card[data-avatar-id]').forEach(card => {
+    const avatarId = String(card.dataset.avatarId || '');
+    const selected = LiveAvatarSession.selectedAvatarIds.includes(avatarId);
+    const liveNow = isAvatarLiveNow(avatarId);
+    card.classList.toggle('selected', selected);
+    card.classList.toggle('live-now', liveNow);
+    card.setAttribute('aria-checked', String(selected));
+    const name = card.querySelector('.avatar-card-body h3')?.textContent || avatarId;
+    card.setAttribute('aria-label', `${selected ? 'Disable' : 'Enable'} ${name} in the Avatar Pool${liveNow ? '; live now' : ''}`);
+    const poolStatus = card.querySelector('.avatar-card-status');
+    if (poolStatus) poolStatus.textContent = selected ? 'Enabled' : 'Disabled';
+    const liveStatus = card.querySelector('.avatar-card-live-status');
+    if (liveStatus) liveStatus.hidden = !liveNow;
+    const poolIcon = card.querySelector('.avatar-live-check .material-symbols-rounded');
+    if (poolIcon) poolIcon.textContent = selected ? 'check_circle' : 'circle';
+    const poolLabel = card.querySelector('.avatar-live-check span:last-child');
+    if (poolLabel) poolLabel.textContent = selected
+      ? 'Included in automatic rotation'
+      : 'Excluded from automatic rotation';
+  });
 }
 
 function renderActiveAvatarOptions(ids) {
@@ -4259,8 +4481,8 @@ function renderActiveAvatarOptions(ids) {
 
 function updateAvatarPoolCount() {
   if ($('lt-avatar-pool-count')) $('lt-avatar-pool-count').textContent = LiveAvatarSession.selectedAvatarIds.length
-    ? `${LiveAvatarSession.selectedAvatarIds.length} active Avatar${LiveAvatarSession.selectedAvatarIds.length === 1 ? '' : 's'}`
-    : 'No active Avatar';
+    ? `${LiveAvatarSession.selectedAvatarIds.length} enabled Avatar${LiveAvatarSession.selectedAvatarIds.length === 1 ? '' : 's'}`
+    : 'No enabled Avatar';
 }
 
 async function saveActiveAvatarSession() {
@@ -4282,7 +4504,7 @@ async function saveActiveAvatarSession() {
   }
   localStorage.setItem(STORAGE_KEYS.ACTIVE_AVATAR, LiveAvatarSession.activeAvatarId);
   localStorage.setItem(STORAGE_KEYS.AVATAR_POOL, JSON.stringify(LiveAvatarSession.selectedAvatarIds));
-  addLog(`Avatar Pool saved: ${LiveAvatarSession.selectedAvatarIds.length} active`, 'ok');
+  addLog(`Avatar Pool saved: ${LiveAvatarSession.selectedAvatarIds.length} enabled`, 'ok');
 }
 
 async function setAvatarPoolSelection(avatarId, selected) {
@@ -4297,7 +4519,7 @@ async function setAvatarPoolSelection(avatarId, selected) {
   if (selected) next.add(id);
   else next.delete(id);
   if (next.size === 0 && TRAINED_AVATARS.size > 0) {
-    throw new Error('Keep at least one Avatar active in the Pool');
+    throw new Error('Keep at least one Avatar enabled in the Pool');
   }
   LiveAvatarSession.selectedAvatarIds = [...next];
   LiveAvatarSession.excludedAvatarIds = LiveAvatarSession.excludedAvatarIds.filter(item => item !== id);
@@ -4385,6 +4607,7 @@ async function activateLiveTalkingAvatar(avatarId) {
   updateLiveTalkingUI();
   loadPersistedSettings();
   renderLibraryUI();
+  updateAvatarLibraryTransientState();
   logLiveTalkingTerminal(`Activated ${id} for the live session (${result.sessionId || 'active'})`, 'ok');
   addLog(`Active live avatar: ${id}`, 'ok');
   return result;
@@ -4408,6 +4631,10 @@ async function switchPooledAvatar(avatarId) {
   updateAvatarPoolCount();
   lastLibraryRenderSignature = '';
   renderLibraryUI();
+  // The runtime intentionally tears down the prior media session before a
+  // trained dataset changes. Reconnect with this avatar only after state has
+  // been persisted, so no old mouth mask survives the switch.
+  await reconnectLiveTalkingAvatar(id);
   return payload;
 }
 
@@ -5097,10 +5324,7 @@ function stopLiveSpeech() {
 }
 
 async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
-  await waitForLiveMediaOwnership();
-  if (!LiveTalkingWebRTCClient.sessionId) throw new Error('Activate a Lipsync avatar first');
-  if (!LiveTalkingWebRTCClient.hasLiveTracks?.()) throw new Error('Live Monitor audio/video tracks are not ready');
-  await LiveTalkingWebRTCClient.ensureAudioPlayback();
+  await ensureLiveMediaReadyForSpeech();
   const runId = ++liveTalkingSpeechRun;
   const runtimeProvider = ['qwentts', 'omnivoice'].includes(provider) ? provider : 'qwentts';
   const normalizedEmotion = ['neutral', 'happy', 'excited', 'surprised', 'sad', 'angry', 'playful', 'focused', 'grateful', 'laughing'].includes(emotion)
@@ -5167,6 +5391,47 @@ async function submitRuntimeSpeechCommand(text, emotion, speed, provider) {
   }
 }
 
+async function ensureLiveMediaReadyForSpeech(timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  for (let attempt = 0; attempt < 3 && Date.now() < deadline; attempt += 1) {
+    try {
+      await waitForLiveMediaOwnership(Math.min(8_000, Math.max(1_000, deadline - Date.now())));
+      if (!LiveTalkingWorker?.ready) await ensureLiveTalkingWorkerReady();
+      const avatarId = await selectAvatarForSpeech();
+      const ready = Boolean(
+        LiveTalkingWebRTCClient?.sessionId
+        && LiveTalkingWebRTCClient?.hasLiveTracks?.(),
+      );
+      if (!ready) {
+        addLog(`Live Monitor media is reconnecting (${attempt + 1}/3).`, 'warn');
+        await reconnectLiveTalkingAvatar(avatarId);
+      }
+
+      while (Date.now() < deadline) {
+        if (LiveMediaOwnership.state !== 'OWNER') break;
+        if (LiveTalkingWebRTCClient?.sessionId && LiveTalkingWebRTCClient?.hasLiveTracks?.()) {
+          await LiveTalkingWebRTCClient.ensureAudioPlayback();
+          LiveMediaOwnership.mediaReady = true;
+          return true;
+        }
+        if (!LiveTalkingWebRTCClient?.isNegotiating?.()) break;
+        await wait(150);
+      }
+      throw new Error('Live Monitor WebRTC tracks did not become ready');
+    } catch (error) {
+      lastError = error;
+      LiveMediaOwnership.mediaReady = false;
+      if (LiveMediaOwnership.state !== 'STANDBY') {
+        registerLiveMediaClient();
+        await disconnectLiveMedia('speech media recovery', true).catch(() => {});
+      }
+      if (attempt < 2) await wait(Math.min(4_000, 750 * (2 ** attempt)));
+    }
+  }
+  throw new Error(`Live Monitor automatic recovery timed out: ${lastError?.message || 'media unavailable'}`);
+}
+
 async function speakAI(text, emotion = 'happy') {
   if (App.isMuted || !text) return;
   unlockAudio();
@@ -5201,11 +5466,7 @@ async function speakAI(text, emotion = 'happy') {
     const voice = App.voice.voiceId || $('lt-omnivoice-voice-select')?.value || 'voice_bright_storyteller';
     return await speakWithOmniVoice(text, emotion, voice, speed);
   } else {
-    const voiceURI = $('lt-webspeech-voice-select')?.value || '';
-    if (App.talkingEngine.provider === 'livetalking') {
-      return await speakWithLiveTalkingText(text, emotion, voiceURI, speed);
-    }
-    return speakWithWebSpeech(text, emotion, voiceURI, speed);
+    throw new Error(`Unsupported TTS provider: ${prov}. Web TTS fallback is disabled.`);
   }
 }
 
@@ -5293,11 +5554,10 @@ async function speakWithOmniVoice(text, emotion = 'happy', voice = 'vi-female', 
     await handleAudioResponse(new Response(blob, { headers: { 'Content-Type': blob.type } }), text, emotion, `OmniVoice-${voice}`);
   } catch (err) {
     console.error('[Runtime OmniVoice TTS Error]:', err);
-    addLog(`OmniVoice unavailable: ${err.message}. Using the Lipsync voice fallback.`, 'err');
-    if (App.talkingEngine.provider === 'livetalking') {
-      return speakWithLiveTalkingText(text, emotion, '', speed);
-    }
-    return speakWithWebSpeech(text, emotion, '', speed);
+    App.isAiSpeaking = false;
+    updateVoiceStatusUI('error', err.message);
+    addLog(`OmniVoice unavailable: ${err.message}. Web TTS fallback is disabled.`, 'err');
+    throw err;
   }
 }
 
@@ -5343,7 +5603,9 @@ async function handleAudioResponse(res, text, emotion, voiceLabel) {
 
   App.audioElement.onerror = (e) => {
     console.warn('Playback Error:', e);
-    speakWithWebSpeech(text, emotion);
+    App.isAiSpeaking = false;
+    updateVoiceStatusUI('error', 'Generated audio could not be played');
+    addLog('Generated TTS audio could not be played. Web TTS fallback is disabled.', 'err');
   };
 
   const estDurMs = Math.round((App.audioElement.duration || 4) * 1000);
@@ -5359,127 +5621,6 @@ async function handleAudioResponse(res, text, emotion, voiceLabel) {
       addLog(`🔊 Playing voice [${voiceLabel}] (${blob.size} bytes)...`, 'ok');
     },
   });
-}
-
-function speakWithWebSpeech(text, emotion = 'happy', customVoiceURI = '', customSpeed = null) {
-  if (!('speechSynthesis' in window)) {
-    addLog('This browser does not support Web Speech API', 'err');
-    updateVoiceStatusUI('error', 'Web Speech is not supported');
-    App.isAiSpeaking = false;
-    return;
-  }
-
-  let elapsedSec = 0;
-
-  try {
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.resume();
-
-    const u = new SpeechSynthesisUtterance(text);
-    const speed = customSpeed || App.voice.speed || 1.0;
-    u.rate = speed;
-    u.pitch = 1.0;
-    u.volume = 1.0;
-
-    const voices = cachedVoices.length > 0 ? cachedVoices : window.speechSynthesis.getVoices();
-    let selectedVoice = null;
-    if (customVoiceURI) {
-      selectedVoice = voices.find(v => (v.voiceURI === customVoiceURI || v.name === customVoiceURI));
-    }
-    if (!selectedVoice) {
-      selectedVoice = voices.find(v => (v.lang && (v.lang.includes('vi') || v.lang.includes('VI'))) || (v.name && v.name.toLowerCase().includes('viet')));
-    }
-    if (!selectedVoice && voices.length > 0) {
-      selectedVoice = voices.find(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('samantha') || v.default) || voices[0];
-    }
-
-    if (selectedVoice) {
-      u.voice = selectedVoice;
-      u.lang = selectedVoice.lang || 'vi-VN';
-    }
-
-    const wordCount = text.split(/\s+/).filter(Boolean).length;
-    const estSec = Math.max(1.8, (wordCount / 2.8) / speed);
-    const estDurMs = Math.round(estSec * 1000);
-
-    // Start LiveTalking Vietnamese Acoustic LipSync Engine & MuseTalk Realtime Engine with synchronized callback
-    LiveLipSyncEngine.startSpeech(text, estDurMs, emotion);
-    MuseTalkRealtimeEngine.ingestAudio({
-      text,
-      durationMs: estDurMs,
-      type: 'WebSpeech',
-      onPlaybackStart: () => {
-        startSynchronizedPlayback(null, text, emotion, selectedVoice?.name || 'WebSpeech', estDurMs).then(() => {
-          window.speechSynthesis.speak(u);
-        });
-      },
-    });
-
-    u.onboundary = (event) => {
-      LiveLipSyncEngine.onSpeechBoundary(event.charIndex, event.name);
-    };
-
-    u.onstart = () => {
-      updateVoiceStatusUI('playing', `Playing Web Speech (${App.voice.speed}x)...`, 20);
-      addLog(`🔊 Playing Web Speech voice (${u.voice?.name || 'Default'})...`, 'ok');
-    };
-
-    const progressTimer = setInterval(() => {
-      if (!App.isAiSpeaking) {
-        clearInterval(progressTimer);
-        return;
-      }
-      elapsedSec += 0.2;
-      const pct = Math.min(95, (elapsedSec / estSec) * 100);
-      updateVoiceStatusUI('playing', `Playing Web Speech (${Math.round(elapsedSec)}s / ${Math.round(estSec)}s)`, pct);
-    }, 200);
-
-    let safetyWatchdog = setTimeout(() => {
-      if (App.isAiSpeaking) {
-        clearInterval(progressTimer);
-        LiveLipSyncEngine.stopSpeech();
-        MuseTalkRealtimeEngine.stopAudio();
-        App.isAiSpeaking = false;
-        updateVoiceStatusUI('idle');
-        const subBox = $('mon-subtitles');
-        if (subBox) subBox.classList.remove('visible');
-      }
-    }, estDurMs + 2000);
-
-    u.onend = () => {
-      clearTimeout(safetyWatchdog);
-      clearInterval(progressTimer);
-      LiveLipSyncEngine.stopSpeech();
-      MuseTalkRealtimeEngine.stopAudio();
-      App.isAiSpeaking = false;
-      updateVoiceStatusUI('idle');
-      const subBox = $('mon-subtitles');
-      if (subBox) subBox.classList.remove('visible');
-
-      // Automatically return to GAMEPLAY_IDLE after finishing talking speech
-      if (App.currentState === 'TALKING' && App.autoMix) {
-        setTimeout(() => {
-          if (App.currentState === 'TALKING' && !App.isAiSpeaking) {
-            requestStateTransition('GAMEPLAY_IDLE', 7, 'speech-ended-return', App.globalRandom, false);
-            addLog('🗣️ Reply complete → returning to GAMEPLAY_IDLE', 'ok');
-          }
-        }, 1000);
-      }
-    };
-
-    u.onerror = (e) => {
-      clearTimeout(safetyWatchdog);
-      clearInterval(progressTimer);
-      LiveLipSyncEngine.stopSpeech();
-      MuseTalkRealtimeEngine.stopAudio();
-      App.isAiSpeaking = false;
-      updateVoiceStatusUI('idle');
-      console.warn('WebSpeech Error:', e);
-    };
-  } catch (err) {
-    App.isAiSpeaking = false;
-    updateVoiceStatusUI('error', 'Web Speech playback error');
-  }
 }
 
 function renderSavedVoicesList() {
@@ -5831,16 +5972,15 @@ function renderClipCardHTML(clip, state) {
     <div class="clip-card ${isPlaying ? 'active playing' : ''} ${isOff ? 'is-off' : ''}" data-clip-id="${clip.id}" data-state="${state}">
       <div class="clip-thumb" style="background:#131b26;">
         ${thumbnail}
-        <span class="clip-lbl">MP4</span>
         <span class="clip-play material-symbols-rounded" aria-hidden="true">play_arrow</span>
       </div>
       <div class="clip-meta">
         <span class="clip-n">${clip.label || clip.id}</span>
-        <span class="clip-d">${durSec}</span>
+        <span class="clip-d"><span class="clip-format-tag" aria-label="Format">MP4</span><span class="clip-duration">${durSec}</span></span>
+        <div class="now-badge" style="display:${isPlaying ? 'block' : 'none'};">NOW</div>
       </div>
       <div class="clip-actions">
         ${modeBtnHtml}
-        <div class="now-badge" style="display:${isPlaying ? 'block' : 'none'};">NOW</div>
         <button type="button" class="btn-delete-clip" data-del-id="${clip.id}" data-del-state="${state}" title="Delete clip" aria-label="Delete clip"><span class="material-symbols-rounded" aria-hidden="true">delete</span></button>
       </div>
     </div>
@@ -5859,15 +5999,14 @@ function renderTalkingAvatarCardHTML(avatar) {
     <div class="clip-card live-avatar-card ${isActive ? 'active playing' : ''}" data-avatar-id="${avatar.id}" data-state="TALKING">
       <div class="clip-thumb live-avatar-preview">
         ${thumbnail}
-        <span class="clip-lbl">AVATAR</span>
         <span class="clip-play material-symbols-rounded" aria-hidden="true">${isActive ? 'graphic_eq' : 'play_arrow'}</span>
       </div>
       <div class="clip-meta">
         <span class="clip-n">${avatar.id}</span>
-        <span class="clip-d">${stateLabel} · ${durationLabel}</span>
+        <span class="clip-d"><span class="clip-format-tag" aria-label="Format">AVATAR</span><span class="clip-state">${stateLabel} · ${durationLabel}</span></span>
+        <div class="now-badge" style="display:${isActive ? 'block' : 'none'};">ACTIVE</div>
       </div>
       <div class="clip-actions">
-        <div class="now-badge" style="display:${isActive ? 'block' : 'none'};">ACTIVE</div>
         <button class="btn-remove-live-avatar" data-avatar-id="${avatar.id}" title="Remove this avatar state from Live"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
       </div>
     </div>
@@ -5992,26 +6131,9 @@ async function commitRuntimeSpeechPlayback(commandId) {
 
 function queueRuntimeSpeechPlayback(commandId) {
   pendingRuntimePlaybackCommandId = commandId;
-  const activeVideo = getActiveMonitorVideo();
-  const hasTimeRemaining = activeVideo
-    && !activeVideo.paused
-    && Number.isFinite(activeVideo.duration)
-    && activeVideo.duration > 0
-    && activeVideo.duration - activeVideo.currentTime > 0.08;
-
-  if (App.currentState === 'GAMEPLAY_IDLE' && hasTimeRemaining) {
-    App.queuedTransition = {
-      state: 'TALKING',
-      priority: 7,
-      reason: 'idle-complete-speech-ready',
-      forceRandom: true,
-      commandId,
-    };
-    setQueuedTransitionStatus('TALKING');
-    updateMonitorScreen(App.currentState, App.currentClip);
-    return;
-  }
-
+  // Speech is time-sensitive. The live WebRTC frame is already decoded before
+  // the runtime asks for this boundary, so do not wait for a long idle loop to
+  // finish before releasing the cached TTS audio.
   void commitRuntimeSpeechPlayback(commandId);
 }
 
@@ -6589,6 +6711,7 @@ function applyRuntimeSettingsUI(settings = {}) {
     App.talkingEngine.provider = settings.talkingEngine.provider || App.talkingEngine.provider;
     App.talkingEngine.endpoint = settings.talkingEngine.endpoint || App.talkingEngine.endpoint;
     App.talkingEngine.model = settings.talkingEngine.model || App.talkingEngine.model;
+    applyLiveTalkingFpsUI(settings.talkingEngine.modelFps, 30);
   }
   if (settings.liveSession) applyLiveSessionSettingsUI(settings.liveSession);
   if (settings.persona) applyAiDirectorSettings(settings.persona);
@@ -7014,7 +7137,7 @@ function renderReplySkillLibrary() {
     const name = document.createElement('strong');
     name.textContent = skill.name;
     const meta = document.createElement('small');
-    meta.textContent = skill.source === 'generated' ? 'Live Session Setting' : skill.fileName;
+    meta.textContent = skill.source === 'generated' ? 'Live Goal · secondary context' : `${skill.fileName} · highest priority`;
     copy.append(name, meta);
     select.append(icon, copy);
     item.append(select);
@@ -7059,7 +7182,7 @@ async function loadReplySkills() {
   try {
     const payload = await window.RuntimeApi.get('/api/settings/reply-skills');
     applyReplySkillPayload(payload);
-    setReplySkillStatus('Saved skills are ready.');
+    setReplySkillStatus('Saved models are ready. The selected model overrides Live Goal on conflicts.');
   } catch (error) {
     ReplySkillState.busy = false;
     renderReplySkillLibrary();
@@ -7071,11 +7194,11 @@ async function selectReplySkill(id) {
   if (ReplySkillState.busy || id === ReplySkillState.activeSkillId) return;
   ReplySkillState.busy = true;
   renderReplySkillLibrary();
-  setReplySkillStatus('Applying reply skill...');
+  setReplySkillStatus('Applying Reply AI Model...');
   try {
     const payload = await window.RuntimeApi.post('/api/settings/reply-skills/select', { id });
     applyReplySkillPayload(payload);
-    setReplySkillStatus('Reply skill selected for the next live response.');
+    setReplySkillStatus('Reply AI Model selected. It overrides Live Goal on conflicts.');
   } catch (error) {
     ReplySkillState.busy = false;
     renderReplySkillLibrary();
@@ -7096,7 +7219,7 @@ async function uploadReplySkill(file) {
     const markdown = await file.text();
     const payload = await window.RuntimeApi.post('/api/settings/reply-skills', { fileName: file.name, markdown });
     applyReplySkillPayload(payload);
-    setReplySkillStatus(`${file.name} is saved and active.`);
+    setReplySkillStatus(`${file.name} is saved as the active Reply AI Model and overrides Live Goal on conflicts.`);
   } catch (error) {
     ReplySkillState.busy = false;
     renderReplySkillLibrary();
@@ -7842,8 +7965,50 @@ async function magicConnectObs(triggerButton = null) {
   }
 }
 
+async function refreshMuseTalkMaskMode() {
+  const group = $('musetalk-mask-options');
+  const status = $('musetalk-mask-status');
+  if (!group || location.protocol === 'file:') return;
+  group.setAttribute('aria-busy', 'true');
+  try {
+    const payload = await window.RuntimeApi.get('/api/talking-head/musetalk/mask-mode');
+    const input = group.querySelector(`input[value="${payload.mode}"]`);
+    if (input) input.checked = true;
+    if (status) status.textContent = `Active: ${payload.mode}`;
+  } catch (error) {
+    if (status) status.textContent = `Mask control unavailable: ${error.message}`;
+  } finally {
+    group.removeAttribute('aria-busy');
+  }
+}
+
+async function setMuseTalkMaskMode(mode) {
+  const group = $('musetalk-mask-options');
+  const status = $('musetalk-mask-status');
+  if (!group) return;
+  group.setAttribute('aria-busy', 'true');
+  if (status) status.textContent = `Switching to ${mode}…`;
+  try {
+    const payload = await window.RuntimeApi.post('/api/talking-head/musetalk/mask-mode', { mode });
+    const input = group.querySelector(`input[value="${payload.mode}"]`);
+    if (input) input.checked = true;
+    if (status) status.textContent = `Active: ${payload.mode} · applies immediately`;
+    addLog(`MuseTalk mask switched to ${payload.mode}.`, 'ok');
+  } catch (error) {
+    if (status) status.textContent = `Could not switch mask: ${error.message}`;
+    addLog(`MuseTalk mask switch failed: ${error.message}`, 'err');
+    await refreshMuseTalkMaskMode();
+  } finally {
+    group.removeAttribute('aria-busy');
+  }
+}
+
 // ── Event Listeners ───────────────────────────────────────
 function bindEventListeners() {
+  $('musetalk-mask-options')?.addEventListener('change', event => {
+    const input = event.target.closest('input[name="musetalk-mask-mode"]');
+    if (input) void setMuseTalkMaskMode(input.value);
+  });
   // Topbar Modals
   $('btn-modal-obs')?.addEventListener('click', () => window.openStudioSettings?.('output'));
   $('close-modal-obs')?.addEventListener('click', () => closeModal('modal-obs'));
@@ -8163,6 +8328,32 @@ function bindEventListeners() {
   $('lt-model-select')?.addEventListener('change', (e) => {
     LiveTalkingStudio.modelType = e.target.value;
     logLiveTalkingTerminal(`ℹ️ Selected model: ${e.target.value.toUpperCase()}`, 'info');
+  });
+
+  $('lt-model-fps-select')?.addEventListener('change', async event => {
+    const select = event.currentTarget;
+    const previousFps = LiveTalkingWorker.modelFps;
+    const modelFps = Number(select.value) === 25 ? 25 : 15;
+    select.disabled = true;
+    const status = $('livetalking-fps-status');
+    if (status) status.textContent = `Applying ${modelFps} FPS model cadence…`;
+    try {
+      const payload = await window.RuntimeApi.post('/api/settings/talking', { modelFps });
+      applyLiveTalkingFpsUI(payload.settings?.modelFps, payload.settings?.outputFps);
+      if (payload.workerRestartRequired) {
+        if (status) status.textContent = `Model ${modelFps} FPS saved. Restart the external worker to apply it.`;
+      } else if (payload.workerRestarted) {
+        if (status) status.textContent = `Model ${modelFps} FPS active · Output 30 FPS`;
+        await refreshLiveTalkingWorkerStatus({ silent: true });
+      }
+      addLog(`Lipsync model cadence set to ${modelFps} FPS; output remains 30 FPS.`, 'ok');
+    } catch (error) {
+      applyLiveTalkingFpsUI(previousFps, 30);
+      if (status) status.textContent = error.message;
+      addLog(`Could not change lipsync model FPS: ${error.message}`, 'warn');
+    } finally {
+      updateLiveTalkingFpsAvailability();
+    }
   });
 
   $('lt-avatar-id-input')?.addEventListener('input', (e) => {
@@ -9121,9 +9312,17 @@ function setupMonitorFirstStudio() {
 
   const center = document.createElement('section');
   center.className = 'fcp-center-workspace';
+  const monitorSplitter = document.createElement('div');
+  monitorSplitter.className = 'monitor-chat-splitter';
+  monitorSplitter.setAttribute('role', 'separator');
+  monitorSplitter.setAttribute('aria-label', 'Resize Monitor and Unify Chat');
+  monitorSplitter.setAttribute('aria-orientation', 'horizontal');
+  monitorSplitter.setAttribute('aria-valuemin', '48');
+  monitorSplitter.setAttribute('aria-valuemax', '74');
+  monitorSplitter.tabIndex = 0;
   voiceStatus.classList.add('fcp-voice-status-strip');
   states.classList.add('fcp-avatar-state-strip');
-  center.append(stage, voiceStatus, states, chat);
+  center.append(stage, voiceStatus, monitorSplitter, states, chat);
 
   const sourcePanel = document.createElement('section');
   sourcePanel.className = 'fcp-source-workspace';
@@ -9215,6 +9414,7 @@ function setupMonitorFirstStudio() {
   appBody.replaceChildren(sourcePanel, center, splitter);
   appBody.classList.add('monitor-first-layout', 'fcp-editor-layout', 'svg-reference-layout', 'live-two-column-layout');
   setupLiveTwoColumnResize(appBody);
+  setupLiveMonitorResize(center);
   window.setLiveSourceTab = setSourceTab;
 }
 
@@ -9270,6 +9470,56 @@ function setupLiveTwoColumnResize(layout) {
   });
 
   applyWidth();
+}
+
+function setupLiveMonitorResize(center) {
+  const splitter = center.querySelector('.monitor-chat-splitter');
+  if (!splitter || splitter.dataset.resizeReady === 'true') return;
+  splitter.dataset.resizeReady = 'true';
+
+  const clamp = value => Math.min(74, Math.max(48, value));
+  let monitorHeight = 65;
+  const saved = Number(localStorage.getItem(STORAGE_KEYS.STUDIO_MONITOR_HEIGHT));
+  if (Number.isFinite(saved)) monitorHeight = clamp(saved);
+
+  const applyHeight = (persist = false) => {
+    center.style.setProperty('--studio-monitor-height', `${monitorHeight.toFixed(2)}fr`);
+    center.style.setProperty('--studio-chat-height', `${(100 - monitorHeight).toFixed(2)}fr`);
+    splitter.setAttribute('aria-valuenow', monitorHeight.toFixed(1));
+    if (persist) localStorage.setItem(STORAGE_KEYS.STUDIO_MONITOR_HEIGHT, monitorHeight.toFixed(2));
+  };
+
+  const resizeAt = (clientY, persist = false) => {
+    const bounds = center.getBoundingClientRect();
+    if (!bounds.height) return;
+    monitorHeight = clamp(((clientY - bounds.top) / bounds.height) * 100);
+    applyHeight(persist);
+  };
+
+  splitter.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    splitter.setPointerCapture(event.pointerId);
+    center.classList.add('is-resizing-monitor');
+    resizeAt(event.clientY);
+  });
+  splitter.addEventListener('pointermove', event => {
+    if (splitter.hasPointerCapture(event.pointerId)) resizeAt(event.clientY);
+  });
+  const finishResize = event => {
+    if (splitter.hasPointerCapture(event.pointerId)) splitter.releasePointerCapture(event.pointerId);
+    center.classList.remove('is-resizing-monitor');
+    applyHeight(true);
+  };
+  splitter.addEventListener('pointerup', finishResize);
+  splitter.addEventListener('pointercancel', finishResize);
+  splitter.addEventListener('keydown', event => {
+    if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return;
+    event.preventDefault();
+    monitorHeight = event.key === 'Home' ? 65 : clamp(monitorHeight + (event.key === 'ArrowUp' ? 1 : -1));
+    applyHeight(true);
+  });
+
+  applyHeight();
 }
 
 function setupStudioColumnResize(layout) {
@@ -9750,9 +10000,9 @@ function setupStudioShell() {
     });
   });
   $('ai-director-provider')?.addEventListener('change', event => setAiDirectorProviderUI(event.target.value));
-  $('refresh-ai-director-models')?.addEventListener('click', () => {
-    refreshChatGptModels().catch(error => {
-      if ($('ai-director-ttm-status')) $('ai-director-ttm-status').textContent = error.message;
+  $('connect-ai-director-gemini')?.addEventListener('click', () => {
+    connectGeminiGoogleAccount().catch(error => {
+      if ($('ai-director-gemini-status')) $('ai-director-gemini-status').textContent = error.message;
     });
   });
   $('save-ai-director')?.addEventListener('click', () => {
@@ -9788,6 +10038,65 @@ function setupNativeHeaderDrag() {
   });
 }
 
+const REQUIRED_STARTUP_ENGINES = ['qwen-tts', 'live-avatar'];
+
+function renderStartupEngine(engineId, state, detail = '') {
+  const prefix = engineId === 'qwen-tts' ? 'qwen' : 'avatar';
+  const dot = $(`startup-${prefix}-dot`);
+  const label = $(`startup-${prefix}-status`);
+  const normalized = String(state || 'STARTING').toUpperCase();
+  const ready = normalized === 'READY';
+  const failed = normalized === 'ERROR';
+  if (dot) dot.className = `app-startup-worker-dot ${ready ? 'ready' : failed ? 'error' : 'starting'}`;
+  if (label) label.textContent = ready ? 'Online' : failed ? (detail || 'Error') : 'Starting…';
+}
+
+async function waitForRequiredWorkers() {
+  const status = $('app-startup-status');
+  const retry = $('app-startup-retry');
+  if (retry) retry.hidden = true;
+  if (status) status.textContent = 'Starting voice and live avatar workers…';
+  REQUIRED_STARTUP_ENGINES.forEach(id => renderStartupEngine(id, 'STARTING'));
+
+  // Avoid loading both ML runtimes at the exact same instant. Qwen TTS is
+  // smaller and becomes ready first, then MuseTalk can claim the remaining
+  // memory without a large startup spike.
+  for (const id of REQUIRED_STARTUP_ENGINES) {
+    await window.RuntimeApi.post(`/api/engines/${id}/action`, { action: 'start' }).catch(() => {});
+  }
+
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    try {
+      const payload = await window.RuntimeApi.get('/api/engines');
+      const engines = Array.isArray(payload.engines) ? payload.engines : [];
+      const required = REQUIRED_STARTUP_ENGINES.map(id => engines.find(engine => engine.id === id));
+      required.forEach((engine, index) => renderStartupEngine(
+        REQUIRED_STARTUP_ENGINES[index],
+        engine?.state || 'STARTING',
+        engine?.detail || '',
+      ));
+      if (required.every(engine => engine?.state === 'READY')) {
+        if (status) status.textContent = 'All workers online. Opening Studio…';
+        return;
+      }
+    } catch (error) {
+      if (status) status.textContent = `Still waiting for local workers… ${error.message}`;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+
+  if (status) status.textContent = 'A worker took too long to start. Check the worker setup, then try again.';
+  REQUIRED_STARTUP_ENGINES.forEach(id => {
+    const prefix = id === 'qwen-tts' ? 'qwen' : 'avatar';
+    const dot = $(`startup-${prefix}-dot`);
+    if (dot && !dot.classList.contains('ready')) dot.className = 'app-startup-worker-dot error';
+  });
+  if (retry) retry.hidden = false;
+  await new Promise(resolve => retry?.addEventListener('click', resolve, { once: true }));
+  return waitForRequiredWorkers();
+}
+
 async function init() {
   try {
     setupStudioShell();
@@ -9805,6 +10114,9 @@ async function init() {
   } catch (e) {
     console.warn('bindEventListeners error:', e);
   }
+
+  await waitForRequiredWorkers();
+  await refreshMuseTalkMaskMode();
 
   // Establish Live Monitor ownership before any avatar offer can replace a session.
   connectRuntimeRealtime();

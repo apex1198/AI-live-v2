@@ -43,6 +43,7 @@ from avatars.musetalk.myutil import (
     get_image_blending,
     get_image_blending_perspective,
     limit_blend_mask_to_lower_face,
+    should_paste_generated_face,
 )
 from avatars.musetalk.utils.utils import load_all_model
 from avatars.musetalk.model_resources import bounded_preprocess_size, scale_box, set_shared_vae, vae_lock
@@ -59,6 +60,25 @@ from utils.logger import logger
 from utils.image import mirror_index
 from utils.device import initialize_device
 from registry import register
+
+MUSETALK_MASK_MODES = {"none", "repo", "mediapipe_478", "adaptive"}
+_musetalk_mask_mode = os.getenv("MUSETALK_MASK_MODE", "adaptive")
+if _musetalk_mask_mode not in MUSETALK_MASK_MODES:
+    _musetalk_mask_mode = "adaptive"
+
+
+def get_musetalk_mask_mode():
+    return _musetalk_mask_mode
+
+
+def set_musetalk_mask_mode(mode):
+    global _musetalk_mask_mode
+    normalized = str(mode or "").strip().lower()
+    if normalized not in MUSETALK_MASK_MODES:
+        raise ValueError(f"Unsupported MuseTalk mask mode: {mode}")
+    _musetalk_mask_mode = normalized
+    logger.info("MuseTalk mask mode changed to %s", normalized)
+    return normalized
 
 
 def loop_safe_frame_index(length, index, source_fps, model_fps):
@@ -104,7 +124,8 @@ def load_avatar(avatar_id):
             avatar_info = json.load(info_file)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         pass
-    has_compact_landmark_masks = avatar_info.get('mask_format') in {
+    has_geometry_alignment = avatar_info.get("alignment_format") == ALIGNMENT_FORMAT
+    has_compact_landmark_masks = has_geometry_alignment and avatar_info.get('mask_format') in {
         'mouth_landmarks_inward15_v1',
         'mouth_landmarks_adaptive_inward_v2',
         'mouth_landmarks_adaptive_inward_expanded130_v3',
@@ -115,8 +136,12 @@ def load_avatar(avatar_id):
         'mediapipe_478_lower_face_inset5pct_feather5_v8',
         'mediapipe_478_lower_face_inset5pct_scale80_feather5_v9',
         'mediapipe_478_lower_face_mouth_inset20pct_feather5_v10',
+        'hybrid_adaptive_v11',
     }
-    uses_current_geometry_mask = avatar_info.get('mask_format') == 'mediapipe_478_lower_face_mouth_inset20pct_feather5_v10'
+    uses_current_geometry_mask = has_geometry_alignment and avatar_info.get('mask_format') in {
+        'mediapipe_478_lower_face_mouth_inset20pct_feather5_v10',
+        'hybrid_adaptive_v11',
+    }
     input_latent_list_cycle = torch.load(latents_out_path, map_location=device)
     with open(coords_path, 'rb') as f:
         coord_list_cycle = pickle.load(f)
@@ -191,6 +216,8 @@ def load_avatar(avatar_id):
         mask_coords_list_cycle = [[0, 0, alignment_size, alignment_size] for _ in input_mask_list]
 
     mask_list_cycle = []
+    repo_mask_list_cycle = []
+    mediapipe_mask_list_cycle = []
     for index, path in enumerate(input_mask_list):
         mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if mask is None:
@@ -200,13 +227,21 @@ def load_avatar(avatar_id):
         mask_height = max(1, y_e - y_s)
         if mask.shape[1] != mask_width or mask.shape[0] != mask_height:
             mask = cv2.resize(mask, (mask_width, mask_height), interpolation=cv2.INTER_LINEAR)
+        repo_mask = mask.astype(np.float32) / 255.0
+        repo_mask_list_cycle.append(repo_mask)
+        mediapipe_mask = (
+            build_mediapipe_mouth_mask(
+                alignment_list_cycle[index], mask_width, mask_height,
+            ).astype(np.float32) / 255.0
+            if alignment_list_cycle is not None
+            else repo_mask.copy()
+        )
+        mediapipe_mask_list_cycle.append(mediapipe_mask)
         # Upgrade existing aligned avatars in memory. Their old mask artifacts
         # used broader support, but the stored 478 landmarks are sufficient to
         # rebuild the new mouth-relative 20% inset without re-training.
         if alignment_list_cycle is not None and not uses_current_geometry_mask:
-            normalized_mask = build_mediapipe_mouth_mask(
-                alignment_list_cycle[index], mask_width, mask_height,
-            ).astype(np.float32) / 255.0
+            normalized_mask = mediapipe_mask.copy()
         else:
             normalized_mask = mask.astype(np.float32) / 255.0
         if not has_compact_landmark_masks:
@@ -229,14 +264,22 @@ def load_avatar(avatar_id):
         input_latent_list_cycle,
         source_fps,
         alignment_list_cycle,
+        repo_mask_list_cycle,
+        mediapipe_mask_list_cycle,
     )
 
 
 def _unpack_avatar_data(avatar):
     """Accept legacy six-item avatar payloads while loading aligned avatars."""
+    if avatar is None:
+        raise RuntimeError("MuseTalk avatar dataset was not loaded")
+    if not isinstance(avatar, (tuple, list)) or len(avatar) < 6:
+        raise RuntimeError("MuseTalk avatar dataset is incomplete")
+    if len(avatar) >= 9:
+        return avatar[:9]
     if len(avatar) >= 7:
-        return avatar[:7]
-    return (*avatar[:6], None)
+        return (*avatar[:7], avatar[1], avatar[1])
+    return (*avatar[:6], None, avatar[1], avatar[1])
 
 @torch.no_grad()
 def warm_up(batch_size,model):
@@ -277,6 +320,8 @@ class MuseReal(BaseAvatar):
             self.input_latent_list_cycle,
             self.source_fps,
             self.alignment_list_cycle,
+            self.repo_mask_list_cycle,
+            self.mediapipe_mask_list_cycle,
         ) = _unpack_avatar_data(avatar)
         self._avatar_data_lock = threading.RLock()
         self._lip_color_state = {}
@@ -317,6 +362,8 @@ class MuseReal(BaseAvatar):
                 self.input_latent_list_cycle,
                 self.source_fps,
                 self.alignment_list_cycle,
+                self.repo_mask_list_cycle,
+                self.mediapipe_mask_list_cycle,
             ) = _unpack_avatar_data(avatar)
             self.opt.avatar_id = avatar_id
             self.current_frame_index = 0
@@ -361,13 +408,23 @@ class MuseReal(BaseAvatar):
             safe_idx = int(idx) % length
             bbox = self.coord_list_cycle[safe_idx]
             ori_frame = self.frame_list_cycle[safe_idx].copy()
-            mask = self.mask_list_cycle[safe_idx]
+            mask_mode = get_musetalk_mask_mode()
+            if mask_mode == "repo":
+                mask = self.repo_mask_list_cycle[safe_idx]
+            elif mask_mode == "mediapipe_478":
+                mask = self.mediapipe_mask_list_cycle[safe_idx]
+            elif mask_mode == "none":
+                mask = np.ones_like(self.mask_list_cycle[safe_idx], dtype=np.float32)
+            else:
+                mask = self.mask_list_cycle[safe_idx]
             mask_crop_box = self.mask_coords_list_cycle[safe_idx]
             color_state = self._lip_color_state
             alignment_list = getattr(self, "alignment_list_cycle", None)
         x1, y1, x2, y2 = bbox
 
         if alignment_list is not None and alignment_list[safe_idx] is not None:
+            if not should_paste_generated_face(alignment_list[safe_idx]):
+                return ori_frame
             return get_image_blending_perspective(
                 ori_frame,
                 pred_frame.astype(np.uint8),

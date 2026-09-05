@@ -271,6 +271,21 @@ async def delete_avatar_task(request):
         return json_error(msg)
     return json_ok(data={"msg": msg})
 
+async def get_musetalk_mask_mode_route(request):
+    from avatars.musetalk_avatar import get_musetalk_mask_mode
+    return json_ok(data={"mode": get_musetalk_mask_mode()})
+
+async def set_musetalk_mask_mode_route(request):
+    try:
+        payload = await request.json()
+        from avatars.musetalk_avatar import set_musetalk_mask_mode
+        return json_ok(data={"mode": set_musetalk_mask_mode(payload.get("mode"))})
+    except ValueError as exc:
+        return json_error(str(exc), code=400)
+    except Exception as exc:
+        logger.exception("set_musetalk_mask_mode error:")
+        return json_error(str(exc))
+
 def setup_avatar_routes(app):
     app.router.add_post("/api/avatar/task", create_avatar_task)
     app.router.add_get("/api/avatar/task/{task_id}", get_avatar_task_status)
@@ -279,3 +294,5 @@ def setup_avatar_routes(app):
     app.router.add_get("/api/avatars", list_trained_avatars)
     app.router.add_get("/api/avatars/{avatar_id}/thumbnail", get_avatar_thumbnail)
     app.router.add_delete("/api/avatars/{avatar_id}", delete_trained_avatar)
+    app.router.add_get("/api/musetalk/mask-mode", get_musetalk_mask_mode_route)
+    app.router.add_post("/api/musetalk/mask-mode", set_musetalk_mask_mode_route)

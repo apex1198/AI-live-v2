@@ -180,6 +180,15 @@ export function normalizeFacebookComment(comment: any, liveSessionId: string): U
   };
 }
 
+export function isYouTubeOwnerChatItem(item: any): boolean {
+  return item?.authorDetails?.isChatOwner === true;
+}
+
+export function isFacebookPageComment(comment: any, pageId: string): boolean {
+  const authorId = stringValue(comment?.from?.id);
+  return Boolean(authorId && pageId && authorId === pageId);
+}
+
 async function openSystemBrowser(url: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     if (process.platform === 'darwin') {
@@ -555,7 +564,9 @@ export class PlatformChatCoordinator {
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ snippet: { liveChatId: this._youtubeLiveChatId, type: 'textMessageEvent', textMessageDetails: { messageText: text } } }),
       });
-      await readJson(response, 'YouTube API');
+      const payload = await readJson(response, 'YouTube API');
+      const sentMessageId = stringValue(payload?.id);
+      if (sentMessageId) this._seenMessageIds.youtube.add(sentMessageId);
       return;
     }
     const page = this._credentials.facebook?.pages.find((candidate) => candidate.id === this._facebookPageId);
@@ -567,7 +578,9 @@ export class PlatformChatCoordinator {
       headers: { Authorization: `Bearer ${page.accessToken}`, 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ message: text }),
     });
-    await readJson(response, 'Facebook API');
+    const payload = await readJson(response, 'Facebook API');
+    const sentCommentId = stringValue(payload?.id);
+    if (sentCommentId) this._seenMessageIds.facebook.add(sentCommentId);
   }
 
   private async _pollYouTube(): Promise<void> {
@@ -607,6 +620,12 @@ export class PlatformChatCoordinator {
       const messageId = stringValue(item?.id);
       if (!messageId || this._seenMessageIds.youtube.has(messageId)) continue;
       this._seenMessageIds.youtube.add(messageId);
+      // The API returns messages sent by the authenticated channel too. Never
+      // feed the Idol's own reply back into the reply/TTS pipeline.
+      if (isYouTubeOwnerChatItem(item)) {
+        this._options.onLog?.('debug', `Ignored YouTube owner message ${messageId}`);
+        continue;
+      }
       const normalized = normalizeYouTubeChatItem(item, this._youtubeLiveChatId);
       if (normalized && normalized.timestamp >= this._youtubeJoinedAt - 2_000) {
         this._options.onMessage(normalized);
@@ -684,6 +703,12 @@ export class PlatformChatCoordinator {
       const messageId = stringValue(comment?.id);
       if (!messageId || this._seenMessageIds.facebook.has(messageId)) continue;
       this._seenMessageIds.facebook.add(messageId);
+      // Page replies are included in the live comment stream. Excluding the
+      // active Page prevents a sent AI reply from recursively triggering itself.
+      if (isFacebookPageComment(comment, this._facebookPageId)) {
+        this._options.onLog?.('debug', `Ignored Facebook Page comment ${messageId}`);
+        continue;
+      }
       const normalized = normalizeFacebookComment(comment, this._facebookLiveVideoId);
       if (normalized && normalized.timestamp >= this._facebookJoinedAt - 2_000) {
         this._options.onMessage(normalized);

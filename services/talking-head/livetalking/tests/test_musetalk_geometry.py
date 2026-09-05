@@ -8,6 +8,7 @@ from avatars.musetalk.myutil import (
     LOWER_FACE_OUTER_INSET_RATIO,
     build_mediapipe_mouth_mask,
     get_image_blending_perspective,
+    should_paste_generated_face,
 )
 from avatars.musetalk.utils.face_geometry import (
     ALIGNMENT_SIZE,
@@ -155,6 +156,39 @@ class MuseTalkGeometryTestCase(unittest.TestCase):
         self.assertGreater(len(xs), 0)
         centroid = np.array([xs.mean(), ys.mean()], dtype=np.float32)
         np.testing.assert_allclose(centroid, source_mouth, atol=1.5)
+
+    def test_geometry_quality_gate_rejects_bad_alignment(self):
+        alignment = {
+            "aligned_to_source": np.eye(3, dtype=np.float32),
+            "geometry_quality": {
+                "finite": True,
+                "mouth_visible": True,
+                "confidence": 0.9,
+                "reprojection_error_px": 2.0,
+            },
+        }
+        self.assertTrue(should_paste_generated_face(alignment))
+        alignment["geometry_quality"]["confidence"] = 0.21
+        alignment["geometry_quality"]["reprojection_error_px"] = 12.0
+        self.assertTrue(should_paste_generated_face(alignment))
+        alignment["geometry_quality"]["reprojection_error_px"] = 12.01
+        self.assertFalse(should_paste_generated_face(alignment))
+
+    def test_adaptive_strategy_uses_expanded_mask_for_moderate_pose(self):
+        from avatars.musetalk.myutil import choose_adaptive_mask_strategy
+        alignment = {
+            "geometry_quality": {
+                "finite": True,
+                "mouth_visible": True,
+                "confidence": 0.8,
+                "yaw_proxy_degrees": 32.0,
+                "pitch_proxy_degrees": 4.0,
+                "reprojection_error_px": 2.0,
+            }
+        }
+        decision = choose_adaptive_mask_strategy(alignment)
+        self.assertEqual(decision["strategy"], "mediapipe_expanded")
+        self.assertGreater(decision["expand_px"], 0)
 
 
 if __name__ == "__main__":

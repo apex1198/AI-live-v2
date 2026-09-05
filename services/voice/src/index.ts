@@ -258,6 +258,7 @@ export class VoiceService {
   private _isSpeaking = false;
   private _currentRequestId: string | null = null;
   private _currentTimer: ReturnType<typeof setTimeout> | null = null;
+  private _speakGeneration = 0;
 
   constructor(options: {
     adapter?: TTSAdapter;
@@ -299,6 +300,7 @@ export class VoiceService {
       this.interrupt('New speech requested');
     }
 
+    const generation = ++this._speakGeneration;
     this._isSpeaking = true;
     this._currentRequestId = request.requestId;
 
@@ -309,6 +311,11 @@ export class VoiceService {
     try {
       // 2. Synthesize
       const result = await this._adapter.synthesize(request);
+      // A newer request may have interrupted this synthesis while the adapter
+      // was still working. Do not emit stale lifecycle events or arm a timer.
+      if (generation !== this._speakGeneration || this._currentRequestId !== request.requestId) {
+        throw new Error('Speech request was superseded');
+      }
 
       this._listeners.onGenerationStatus?.('playing', `Playing audio (${Math.round(result.durationMs / 1000)}s)...`);
 
@@ -348,6 +355,7 @@ export class VoiceService {
 
   interrupt(reason: string = 'Interrupted'): void {
     if (!this._isSpeaking || !this._currentRequestId) return;
+    this._speakGeneration++;
 
     if (this._currentTimer) {
       clearTimeout(this._currentTimer);
@@ -384,6 +392,7 @@ export class VoiceService {
   }
 
   destroy(): void {
+    this._speakGeneration++;
     if (this._currentTimer) clearTimeout(this._currentTimer);
     this._duckingController.restore();
   }

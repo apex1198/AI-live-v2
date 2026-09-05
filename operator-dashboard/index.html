@@ -3,9 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#050505" />
   <title>AI IDOL STREAMER</title>
+  <link rel="icon" href="app-icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="app-icon-192.png" />
+  <link rel="manifest" href="manifest.webmanifest" />
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="design-system.css?v=20260831-live-layout-9" />
+  <link rel="stylesheet" href="apple-theme.css?v=20260903-apple-green" />
+  <link rel="stylesheet" href="clean-ui.css?v=20260904-1" />
   <script src="material-icons.js"></script>
   <!-- MediaPipe Face Mesh for 468 Landmark Extraction -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
@@ -15,9 +21,14 @@
 
   <div class="app-startup-overlay" id="app-startup-overlay" aria-live="polite">
     <div class="app-startup-mark"><span class="material-symbols-rounded" aria-hidden="true">graphic_eq</span></div>
-    <strong>Preparing your live avatar</strong>
-    <span id="app-startup-status">Starting live workspace…</span>
+    <strong>Starting AI Livestream</strong>
+    <span id="app-startup-status">Connecting to local runtime…</span>
+    <div class="app-startup-workers" aria-label="Worker startup status">
+      <div><span class="app-startup-worker-dot" id="startup-qwen-dot"></span><span>Qwen Voice</span><small id="startup-qwen-status">Waiting</small></div>
+      <div><span class="app-startup-worker-dot" id="startup-avatar-dot"></span><span>Live Avatar</span><small id="startup-avatar-status">Waiting</small></div>
+    </div>
     <div class="app-startup-progress"><span></span></div>
+    <button type="button" class="app-startup-retry" id="app-startup-retry" hidden>Try again</button>
   </div>
 
   <!-- ══ TOPBAR WITH EMBEDDED SYSTEM STATUS ═════════════════ -->
@@ -155,9 +166,9 @@
 
   <section class="workspace-strip">
     <div>
-      <span class="workspace-eyebrow">AI LIVESTREAM STUDIO</span>
-      <h1>Welcome, Creator</h1>
-      <p>Control avatars, voice, and audience in one workspace.</p>
+      <span class="workspace-eyebrow">LIVE CONTROL</span>
+      <h1>Live session</h1>
+      <p>Monitor, voice, playback, and audience response.</p>
     </div>
     <div class="workspace-actions">
       <button class="workspace-secondary" id="btn-open-library-hero"><span class="material-symbols-rounded" aria-hidden="true">video_library</span>Library</button>
@@ -181,8 +192,6 @@
             <span class="plat-pill-sm"><span class="dot-amber"></span>YT / FB</span>
           </div>
           <div class="panel-hdr-actions">
-            <button class="btn-micro-gift" id="btn-gift-rose" title="Send 10 Roses" aria-label="Send 10 Roses"><span class="material-symbols-rounded" aria-hidden="true">local_florist</span></button>
-            <button class="btn-micro-gift" id="btn-gift-lion" title="Send a premium gift" aria-label="Send a premium gift"><span class="material-symbols-rounded" aria-hidden="true">redeem</span></button>
             <button class="btn-icon-hdr" id="btn-clear-chat" title="Clear all chat messages" aria-label="Clear all chat messages"><span class="material-symbols-rounded" aria-hidden="true">delete_sweep</span></button>
           </div>
         </div>
@@ -193,7 +202,7 @@
 
         <!-- Quick Chat Message Box -->
         <form id="form-chat-send" class="chat-input-form">
-          <label class="chat-user-field" for="input-chat-user"><span>User</span><input type="text" id="input-chat-user" maxlength="40" autocomplete="nickname" /></label>
+          <label class="chat-user-field" for="input-chat-user"><span>Viewer</span><input type="text" id="input-chat-user" maxlength="40" autocomplete="nickname" /></label>
           <label class="sr-only" for="input-chat-msg">Chat message</label>
           <input type="text" id="input-chat-msg" placeholder="Write a message..." autocomplete="off" />
           <button type="submit" class="btn-chat-submit">Send</button>
@@ -445,7 +454,7 @@
             <div class="panel-hdr">
               <div class="panel-title-box">
                 <span class="sec-label">Live Control · Voice</span>
-                <span class="voice-session-tag" title="Key and settings are saved for this session">💾 Key Saved</span>
+                <span class="voice-session-tag" title="Key and settings are saved for this session">Session saved</span>
               </div>
             </div>
 
@@ -516,13 +525,13 @@
           <section class="panel-section game-panel">
             <div class="panel-hdr">
               <span class="sec-label">Game test</span>
-              <button class="btn-xs" id="btn-spin-slot">🎰 Spin Slot</button>
+              <button class="btn-xs" id="btn-spin-slot">Spin slot</button>
             </div>
             <div class="game-actions-grid">
-              <button class="btn-game-act btn-g-win" id="btn-inj-win">🎉 Big Win</button>
-              <button class="btn-game-act btn-g-jp" id="btn-inj-jp">💥 Jackpot</button>
-              <button class="btn-game-act btn-g-lose" id="btn-inj-lose">😢 Loss</button>
-              <button class="btn-game-act btn-g-cta" id="btn-inj-cta">📣 Trigger CTA</button>
+              <button class="btn-game-act btn-g-win" id="btn-inj-win">Big win</button>
+              <button class="btn-game-act btn-g-jp" id="btn-inj-jp">Jackpot</button>
+              <button class="btn-game-act btn-g-lose" id="btn-inj-lose">Loss</button>
+              <button class="btn-game-act btn-g-cta" id="btn-inj-cta">Trigger CTA</button>
             </div>
           </section>
 
@@ -579,7 +588,7 @@
     </div>
     <div class="avatar-page-toolbar">
       <div><strong>Avatar Library</strong><small id="avatar-page-count">0 avatars</small></div>
-      <span class="avatar-session-rule" role="status"><span class="material-symbols-rounded" aria-hidden="true">verified</span>Multi Avatar Pool · Active / Inactive</span>
+      <span class="avatar-session-rule" role="status"><span class="material-symbols-rounded" aria-hidden="true">verified</span>Multi Avatar Pool · Enabled / Disabled · Live now</span>
     </div>
     <div class="avatar-library-grid" id="avatar-library-grid">
       <article class="avatar-empty-card">
@@ -684,7 +693,7 @@
     </div>
     <div class="ai-profile-section-head ai-profile-section-head-profile">
       <span class="material-symbols-rounded" aria-hidden="true">description</span>
-      <div><h2>Live Reply Skill</h2><p>Choose a Markdown reply brief.</p></div>
+      <div><h2>Reply AI Model</h2><p>The selected Markdown model overrides Live Goal when rules conflict.</p></div>
     </div>
     <section class="ai-profile-panel reply-skill-panel" aria-labelledby="reply-skill-title">
       <div class="reply-skill-toolbar">
@@ -700,7 +709,7 @@
       <div class="reply-skill-list" id="reply-skill-list" role="radiogroup" aria-label="Live reply skills">
         <div class="reply-skill-empty">Loading saved skills...</div>
       </div>
-      <div class="reply-skill-status" id="reply-skill-status" aria-live="polite">Skills are stored with this project.</div>
+      <div class="reply-skill-status" id="reply-skill-status" aria-live="polite">The active model is stored with this project and has priority over Live Goal.</div>
     </section>
   </section>
 
@@ -809,15 +818,31 @@
       </section>
       <section class="settings-bento-card settings-engines-pane" data-settings-pane="engines" role="tabpanel" hidden>
         <div class="settings-bento-head"><span class="material-symbols-rounded">deployed_code</span><div><h2>AI Engines</h2><p>Configure and control local engines.</p></div><span class="settings-status" id="local-ai-status-badge">Checking</span></div>
-        <div class="settings-engine-subhead"><div><strong>Director configuration</strong><small>Qwen primary. ChatGPT fallback.</small></div></div>
-        <div class="ai-director-provider-field"><label for="ai-director-provider">Configuration</label><select id="ai-director-provider"><option value="ollama">Qwen 8B - Primary</option><option value="ttm-chatgpt">ChatGPT - Fallback credential</option></select></div>
+        <div class="settings-engine-subhead"><div><strong>Director configuration</strong><small>Gemini via Google account, with Qwen available locally.</small></div></div>
+        <div class="ai-director-provider-field"><label for="ai-director-provider">Configuration</label><select id="ai-director-provider"><option value="gemini">Gemini Pro - Google account</option><option value="ollama">Qwen 8B - Local</option></select></div>
         <div class="ai-director-provider-panel" id="ai-director-ollama-panel">
           <div class="local-ai-model-row"><div><label for="local-ai-model-name">Model</label><input id="local-ai-model-name" type="text" value="qwen3:8b" autocomplete="off" spellcheck="false" /></div><div><span>Runtime</span><strong id="local-ai-runtime-state">Checking Ollama...</strong></div></div>
-          <p class="local-ai-note">Qwen primary. ChatGPT fallback.</p>
+          <p class="local-ai-note">Local-only mode. No cloud account required.</p>
           <div class="ai-director-inline-actions"><span id="local-ai-install-progress" aria-live="polite"></span><button id="install-local-ai-model" type="button" class="btn-secondary"><span class="material-symbols-rounded">download</span>Install model</button></div>
         </div>
-        <div class="ai-director-provider-panel" id="ai-director-ttm-panel" hidden><div class="ai-director-cloud-fields"><label><span>TTM API Key</span><input id="ai-director-api-key" type="password" autocomplete="off" placeholder="Enter API key" /></label><label><span>ChatGPT model</span><select id="ai-director-chatgpt-model"><option value="chat-latest">chat-latest</option></select></label></div><p class="local-ai-note">TTM key stays private.</p><div class="ai-director-inline-actions"><span id="ai-director-ttm-status" aria-live="polite">Enter a key to check models.</span><button id="refresh-ai-director-models" type="button" class="btn-secondary"><span class="material-symbols-rounded">sync</span>Check models</button></div></div>
+        <div class="ai-director-provider-panel" id="ai-director-gemini-panel" hidden><div class="ai-director-cloud-fields"><label><span>Google Cloud project</span><input id="ai-director-gemini-project" type="text" autocomplete="off" placeholder="your-gcp-project-id" /></label><label><span>Location</span><input id="ai-director-gemini-location" type="text" value="us-central1" autocomplete="off" /></label><label><span>Gemini model</span><input id="ai-director-gemini-model" type="text" value="gemini-2.5-pro" autocomplete="off" spellcheck="false" /></label></div><p class="local-ai-note">Connect a Google account once on this machine. The runtime keeps no API key.</p><div class="ai-director-inline-actions"><span id="ai-director-gemini-status" aria-live="polite">Checking Google account…</span><button id="connect-ai-director-gemini" type="button" class="btn-secondary"><span class="material-symbols-rounded">account_circle</span>Connect Google</button></div></div>
         <div class="settings-bento-actions"><span id="ai-director-save-status" aria-live="polite"></span><button id="save-ai-director" type="button" class="btn-primary"><span class="material-symbols-rounded">save</span>Save AI Director</button></div>
+        <div class="settings-engine-subhead"><div><strong>LiveTalking frame rate</strong><small id="livetalking-fps-status" aria-live="polite">Model cadence with fixed 30 FPS output.</small></div></div>
+        <div class="ai-director-provider-field">
+          <label for="lt-model-fps-select">Model FPS</label>
+          <select id="lt-model-fps-select">
+            <option value="15" selected>15 FPS</option>
+            <option value="25">25 FPS</option>
+          </select>
+        </div>
+        <div class="settings-note">Output FPS: 30</div>
+        <div class="settings-engine-subhead"><div><strong>MuseTalk mask test</strong><small id="musetalk-mask-status">Loading active mask…</small></div></div>
+        <div class="musetalk-mask-options" id="musetalk-mask-options" role="radiogroup" aria-label="MuseTalk mask mode">
+          <label><input type="radio" name="musetalk-mask-mode" value="none" /><span><strong>Square</strong><small>No mask · hard edge</small></span></label>
+          <label><input type="radio" name="musetalk-mask-mode" value="repo" /><span><strong>Repo</strong><small>Stored original mask</small></span></label>
+          <label><input type="radio" name="musetalk-mask-mode" value="mediapipe_478" /><span><strong>478</strong><small>MediaPipe landmarks</small></span></label>
+          <label><input type="radio" name="musetalk-mask-mode" value="adaptive" /><span><strong>Adaptive</strong><small>Current improved mask</small></span></label>
+        </div>
         <div class="settings-engine-subhead settings-engine-runtime-head"><div><strong>Engine Health</strong><small id="engine-manager-summary">Checking local engines...</small></div><button type="button" class="btn-icon-hdr" id="refresh-ai-engines" title="Refresh engine status" aria-label="Refresh engine status"><span class="material-symbols-rounded" aria-hidden="true">refresh</span></button></div>
         <div class="engine-card-grid" id="engine-card-grid" aria-busy="true">
           <div class="engine-card-skeleton"></div><div class="engine-card-skeleton"></div>
@@ -1044,6 +1069,6 @@
   <script src="api/livetalking-client.js"></script>
   <script src="state/operator-store.js"></script>
   <script src="webrtc/receiver.js"></script>
-  <script src="dashboard.js"></script>
+  <script src="dashboard.js?v=20260904-media-heal-3"></script>
 </body>
 </html>

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Idol Streamer - Charcoal Comps</title>
+<style>
+  :root { color-scheme: dark; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 900px; color: #f1f2f1; background: #101111; }
+  .app { display: grid; grid-template-columns: 208px 1fr; min-height: 900px; }
+  .side { display: flex; flex-direction: column; padding: 22px 12px; background: #171918; border-right: 1px solid #303332; }
+  .mark { display: flex; align-items: center; gap: 10px; padding: 0 8px 28px; font-size: 13px; font-weight: 700; letter-spacing: .06em; }
+  .mark i { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; color: #151715; background: #d9dcd8; font-style: normal; font-size: 12px; }
+  .nav { display: grid; gap: 4px; }
+  .nav div { display: flex; gap: 11px; align-items: center; height: 38px; padding: 0 10px; color: #a4aaa5; border-radius: 5px; font-size: 12px; }
+  .nav .on { color: #fff; background: #2a2d2b; box-shadow: inset 2px 0 #d8dbd7; }
+  .health { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 12px 8px 0; border-top: 1px solid #303332; color: #a4aaa5; font-size: 11px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #59a776; }
+  .main { min-width: 0; }
+  .top { height: 52px; display: flex; align-items: center; gap: 20px; padding: 0 24px; border-bottom: 1px solid #303332; background: #171918; }
+  .crumb { font-size: 12px; color: #a4aaa5; }
+  .title { font-size: 18px; font-weight: 700; color: #f2f3f2; }
+  .states { margin-left: auto; display: flex; align-items: center; gap: 16px; color: #a4aaa5; font-size: 11px; }
+  .states b { color: #e8ebe8; font-weight: 600; }
+  .run { display: inline-flex; gap: 7px; align-items: center; color: #b8d6bf; }
+  .run .dot { width: 6px; height: 6px; }
+  .body { padding: 24px; }
+  .bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -.02em; }
+  .sub { margin-top: 5px; color: #8f9690; font-size: 12px; }
+  button { height: 34px; padding: 0 12px; color: #e9ece9; border: 1px solid #3d413e; border-radius: 5px; background: #242725; font: inherit; font-size: 12px; }
+  button.primary { border-color: #e0e3df; color: #141514; background: #e0e3df; font-weight: 650; }
+  .label { color: #8f9690; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+  .panel { border: 1px solid #343735; border-radius: 7px; background: #1a1c1b; }
+  .head { height: 40px; display: flex; align-items: center; justify-content: space-between; padding: 0 13px; border-bottom: 1px solid #303332; }
+  .chip { padding: 3px 6px; color: #bed7c4; border: 1px solid #405747; border-radius: 4px; background: #202922; font-size: 10px; }
+  .monitor { display: grid; place-items: center; aspect-ratio: 16/9; margin: 12px; border-radius: 4px; background: #0d0e0e; color: #555a56; font-size: 12px; }
+  .monitor strong { color: #dfe2df; font-weight: 600; }
+  .list { display: grid; gap: 0; }
+  .item { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid #303332; font-size: 12px; }
+  .item:last-child { border-bottom: 0; }
+  .item small { color: #8f9690; }
+  .mini { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid #3d413e; border-radius: 4px; color: #b5bab6; }
+  .timeline { height: 52px; margin-top: 12px; padding: 13px; display: flex; gap: 4px; align-items: center; border: 1px solid #343735; border-radius: 7px; background: #1a1c1b; }
+  .timeline span { height: 5px; border-radius: 2px; background: #343735; }
+  .timeline span:nth-child(1) { width: 18%; background: #d3d6d2; }.timeline span:nth-child(2) { width: 39%; background: #5a825f; }.timeline span:nth-child(3) { width: 22%; }.timeline span:nth-child(4) { width: 13%; }
+  .a .grid { display: grid; grid-template-columns: 260px minmax(480px, 1fr) 260px; gap: 14px; }
+  .a .side-list { min-height: 552px; }.a .monitor-panel { min-height: 552px; }.a .right-list { min-height: 552px; }
+  .b .grid { display: grid; grid-template-columns: minmax(620px, 1fr) 300px; gap: 14px; }
+  .b .monitor-panel { min-height: 596px; }.b .cue-list { min-height: 596px; }.b .timeline { margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+  .c .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }.c .monitor-panel { grid-row: span 2; }.c .monitor { aspect-ratio: 16/10; }.c .panel { min-height: 260px; }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="side"><div class="mark"><i>AI</i> IDOL STREAMER</div><div class="nav"><div class="on">Live Control</div><div>Live Settings</div><div>AI Director</div><div>Library</div><div>Settings</div></div><div class="health"><span class="dot"></span>Local runtime ready</div></aside>
+  <main class="main"><header class="top"><span class="title">LIVE CONTROL</span><span class="crumb">Studio / Main stream</span><div class="states"><span class="run"><i class="dot"></i>On air</span><span><b>OBS</b> Connected</span><span><b>Voice</b> Ready</span><span><b>Avatar</b> Ready</span></div></header><div class="body"><div class="bar"><div><h1>Live session</h1><div class="sub">Monitor, voice, playback, and audience response.</div></div><div><button>Library</button> <button class="primary">Connect OBS</button></div></div><div id="variant"></div></div></main>
+</div>
+<script>
+const panel = (title, body, tag='') => `<section class="panel"><div class="head"><span class="label">${title}</span>${tag ? `<span class="chip">${tag}</span>` : ''}</div>${body}</section>`;
+const items = (rows) => `<div class="list">${rows.map(([a,b,c])=>`<div class="item"><div><div>${a}</div><small>${b}</small></div>${c||'<span class="mini">...</span>'}</div>`).join('')}</div>`;
+const monitor = () => panel('Live monitor', `<div class="monitor"><div><strong>GAMEPLAY_IDLE</strong><br>Live video preview</div></div>`, 'HD · 30');
+const left = () => panel('Audience', items([['Unified chat','No unread messages'],['Auto-reply','Enabled'],['Recent gifts','No activity']]), '0 unread');
+const controls = () => panel('Live control', items([['Voice','Qwen TTS · Vietnamese'],['Current state','Gameplay idle'],['Next action','None queued'],['Auto mix','On']]), 'Ready');
+const library = () => panel('Playback library', items([['Gameplay','0 clips','<span class="mini">+</span>'],['Talking','0 clips','<span class="mini">+</span>'],['CTA','0 clips','<span class="mini">+</span>'],['AFK','0 clips','<span class="mini">+</span>']]));
+const cue = () => panel('Cue stack', items([['Now','Gameplay idle','<span class="chip">Live</span>'],['Next','Audience reply','<span class="mini">2m</span>'],['After','CTA prompt','<span class="mini">8m</span>'],['Closing','Sign-off','<span class="mini">35m</span>']]));
+const engines = () => panel('System', items([['Voice engine','Ready','<span class="dot"></span>'],['Avatar engine','Ready','<span class="dot"></span>'],['OBS bridge','Connected','<span class="dot"></span>']]));
+const q = new URLSearchParams(location.search).get('variant') || 'a';
+const node = document.querySelector('#variant');
+node.className = q;
+node.innerHTML = q === 'a' ? `<div class="grid"><div class="side-list">${left()}<div style="height:14px"></div>${library()}</div><div class="monitor-panel">${monitor()}<div class="timeline"><span></span><span></span><span></span><span></span></div></div><div class="right-list">${controls()}<div style="height:14px"></div>${engines()}</div></div>` : q === 'b' ? `<div class="grid"><div>${monitor()}<div class="timeline"><span></span><span></span><span></span><span></span></div></div><div class="cue-list">${cue()}<div style="height:14px"></div>${controls()}<div style="height:14px"></div>${engines()}</div></div>` : `<div class="grid"><div class="monitor-panel">${monitor()}<div class="timeline"><span></span><span></span><span></span><span></span></div></div><div>${left()}</div><div>${controls()}</div><div>${library()}</div><div>${engines()}</div></div>`;
+</script>
+</body>
+</html>

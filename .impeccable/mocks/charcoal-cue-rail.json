@@ -1,0 +1,5 @@
+{
+  "prompt": "Use case: ui-mockup. Desktop AI livestream operator dashboard in dark charcoal. Large central 16:9 live monitor with a compact cue timeline directly beneath it. A single right-side cue rail contains current, next, and queued actions plus engine status. Navigation is a quiet left rail. Text is compact and highly legible. No gradients, neon, glass, hero copy, or decorative cards.",
+  "approved": true,
+  "approval": "User delegated the direction and asked for a dark charcoal UI with lower information density and smaller text. Cue rail composition selected because it keeps the live monitor and immediate next action visible together."
+}

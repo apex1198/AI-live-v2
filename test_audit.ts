@@ -3,17 +3,19 @@ declare const process: any;
 import http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { IdolRuntimeServer } from './services/runtime-server/dist/index.js';
+import { aggregateUserChatMessages, CHAT_REPLY_COOLDOWN_MS, chatReplyUserKey, IdolRuntimeServer, isChatReplyOnCooldown } from './services/runtime-server/dist/index.js';
 import { RuntimeDatabase } from './services/runtime-server/dist/persistence.js';
 import {
   PlatformChatCoordinator,
+  isFacebookPageComment,
+  isYouTubeOwnerChatItem,
   normalizeFacebookComment,
   normalizeYouTubeChatItem,
   selectActiveYouTubeBroadcast,
 } from './services/runtime-server/dist/platform-chat.js';
 import { AssetRegistry, AssetRouter, DEFAULT_IDOL_ASSETS, type AssetMetadata } from './packages/asset-engine/dist/index.js';
 import { GoalEngine, DEFAULT_GOALS, DEFAULT_STREAM_PHASES, type GoalDefinition } from './packages/goal-engine/dist/index.js';
-import { DirectorAgent } from './services/director/dist/index.js';
+import { DirectorAgent, goalToneToEmotion } from './services/director/dist/index.js';
 import { DialogueAgent, constrainLiveReply, normalizeVietnameseSpokenText } from './services/dialogue-agent/dist/index.js';
 import { VoiceService } from './services/voice/dist/index.js';
 import { OBSController, MockOBSClient } from './services/obs-controller/dist/index.js';
@@ -95,10 +97,10 @@ async function openRuntimeSocket(port: number) {
   return { socket, messages };
 }
 
-async function waitForSocketMessage(messages: any[], type: string, timeoutMs = 1_000): Promise<any | null> {
+async function waitForSocketMessage(messages: any[], type: string, timeoutMs = 1_000, startIndex = 0): Promise<any | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const match = messages.find((message) => message?.type === type);
+    const match = messages.slice(startIndex).find((message) => message?.type === type);
     if (match) return match;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -135,6 +137,19 @@ async function runAudit() {
 
   const allGoals = goalEngine.getAllGoals();
   assert(allGoals.length >= 5, 'GoalEngine registers built-in stream goals', `Count: ${allGoals.length}`);
+  assert(
+    allGoals.every(({ definition }) => [
+      'neutral', 'happy', 'excited', 'surprised', 'sad',
+      'angry', 'playful', 'focused', 'grateful', 'laughing',
+    ].includes(goalToneToEmotion(definition.tone))),
+    'Every descriptive goal tone maps to a valid speech emotion',
+  );
+  assert(
+    goalToneToEmotion(['cheerful']) === 'happy'
+      && goalToneToEmotion(['curious']) === 'playful'
+      && goalToneToEmotion(['unknown-tone']) === 'playful',
+    'Goal tone aliases and unknown custom tones use safe emotions',
+  );
 
   const now = Date.now();
   goalEngine.startStream(now - 300_000);
@@ -194,6 +209,16 @@ async function runAudit() {
   assert(dialogueRes.estimatedDurationMs >= 2000, 'Dialogue Agent calculates estimated speech duration', `${dialogueRes.estimatedDurationMs}ms`);
   assert(normalizeVietnameseSpokenText('AK47 đang lên!') === 'a ca bốn bảy đang lên!', 'Dialogue output converts product codes to Vietnamese phonetics');
   assert(!/[\p{Extended_Pictographic}\p{Symbol}]/u.test(normalizeVietnameseSpokenText('Đỉnh quá 🔥')), 'Dialogue output removes icons before TTS');
+  const splitReplyAgent = new DialogueAgent({
+    providers: [{ name: 'split-test', async generate() { return 'AK47 lên sóng rồi nha 🔥'; } }],
+  });
+  const splitReply = await splitReplyAgent.generateDialogue({
+    type: 'director.intent', action: 'SPEAK', priority: 3, visualState: 'GAMEPLAY_IDLE',
+    intent: 'reply_to_chat_batch', speechText: 'Viewer: AK47 mạnh không?', timestamp: Date.now(),
+  });
+  assert(splitReply.replyText === 'AK47 lên sóng rồi nha 🔥', 'Text reply preserves natural codes and emoji', splitReply.replyText);
+  assert(splitReply.speechText === 'a ca bốn bảy lên sóng rồi nha', 'TTS reply applies independent speech normalization', splitReply.speechText);
+  assert(splitReply.text === splitReply.speechText, 'Legacy dialogue text aliases the TTS reply');
   const customPersonaAgent = new DialogueAgent({
     persona: { ...dialogueAgent.persona, name: 'Bé Lộc Y Tá' },
     providers: [{
@@ -261,7 +286,7 @@ async function runAudit() {
     },
   });
 
-  voiceService.speak({
+  void voiceService.speak({
     type: 'voice.request',
     text: dialogueRes.text,
     emotion: 'excited',
@@ -270,7 +295,7 @@ async function runAudit() {
     interruptible: true,
     requestId: 'test_req_1',
     timestamp: Date.now(),
-  });
+  }).catch(() => {});
 
   assert(Boolean(voiceService.isSpeaking), 'VoiceService marks isSpeaking = true');
   assert(Boolean(duckingStateObserved), 'Audio Ducking triggered (-12dB) when voice starts');
@@ -358,6 +383,16 @@ async function runAudit() {
       && facebookChat?.platform === 'facebook',
     'YouTube and Facebook payloads normalize into one chat event shape',
   );
+  assert(
+    isYouTubeOwnerChatItem({ authorDetails: { isChatOwner: true } })
+      && !isYouTubeOwnerChatItem({ authorDetails: { isChatOwner: false } }),
+    'YouTube owner replies are identifiable before entering the AI reply pipeline',
+  );
+  assert(
+    isFacebookPageComment({ from: { id: 'page-1' } }, 'page-1')
+      && !isFacebookPageComment({ from: { id: 'viewer-1' } }, 'page-1'),
+    'Facebook Page replies are identifiable before entering the AI reply pipeline',
+  );
   const activeYouTubeBroadcast = selectActiveYouTubeBroadcast([
     { id: 'scheduled', status: { lifeCycleStatus: 'ready' }, snippet: { liveChatId: 'scheduled-chat' } },
     { id: 'live', status: { lifeCycleStatus: 'live' }, snippet: { liveChatId: 'live-chat' } },
@@ -374,6 +409,30 @@ async function runAudit() {
   assert(
     unifiedSources.join(',') === 'youtube,facebook',
     'Cross-platform users are filtered independently before entering Unify Chat',
+  );
+  const aggregateFixture = [
+    { platform: 'youtube' as const, viewerId: 'viewer-1', viewerName: 'Mai', message: 'Game gì vậy?', timestamp: Date.now() },
+    { platform: 'youtube' as const, viewerId: 'viewer-1', viewerName: 'Mai', message: '  Game gì vậy?  ', timestamp: Date.now() },
+    { platform: 'youtube' as const, viewerId: 'viewer-1', viewerName: 'Mai', message: 'Cho mình chơi cùng được không?', timestamp: Date.now() },
+  ].map((message) => ({
+    type: 'chat.message' as const,
+    viewerTier: 'regular' as const,
+    isSuperChat: false,
+    isSubscriber: false,
+    priorityScore: 50,
+    isQuestion: true,
+    ...message,
+  }));
+  assert(
+    chatReplyUserKey(aggregateFixture[0]!) === 'youtube:viewer-1'
+      && aggregateUserChatMessages(aggregateFixture).join(' | ') === 'Game gì vậy? | Cho mình chơi cùng được không?',
+    'Same-user comments are deduplicated and aggregated before one reply',
+  );
+  const cooldownNow = Date.now();
+  assert(
+    isChatReplyOnCooldown(cooldownNow - 59_999, cooldownNow)
+      && !isChatReplyOnCooldown(cooldownNow - CHAT_REPLY_COOLDOWN_MS, cooldownNow),
+    'Each platform user receives at most one reply per 60-second window',
   );
   const openedLoginUrls: string[] = [];
   let savedYouTubeCredentials: any = {};
@@ -398,7 +457,7 @@ async function runAudit() {
           access_token: 'youtube-access-token',
           refresh_token: 'youtube-refresh-token',
           expires_in: 3600,
-          scope: 'https://www.googleapis.com/auth/youtube.readonly',
+          scope: 'https://www.googleapis.com/auth/youtube.force-ssl',
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
       if (url.startsWith('https://www.googleapis.com/youtube/v3/channels')) {
@@ -425,7 +484,7 @@ async function runAudit() {
     googleTokenBodies[0]?.includes('client_secret=google-client-secret')
       && googleTokenBodies[0]?.includes('code_verifier=')
       && !youtubeLogin.authUrl.includes('client_secret')
-      && new URL(youtubeLogin.authUrl).searchParams.get('scope') === 'https://www.googleapis.com/auth/youtube.readonly'
+      && new URL(youtubeLogin.authUrl).searchParams.get('scope') === 'https://www.googleapis.com/auth/youtube.force-ssl'
       && new URL(youtubeLogin.authUrl).searchParams.get('prompt') === 'select_account consent'
       && savedYouTubeCredentials.youtube?.accountName === 'AI IDOL Channel',
     'Google login requests only YouTube access and sends the installed-app secret only to the token endpoint',
@@ -469,7 +528,7 @@ async function runAudit() {
   }
   assert(
     missingScopeError.includes('View your YouTube account') && missingScopeYouTubeCalls === 0,
-    'Google token without youtube.readonly stops before any YouTube API request and explains how to grant access',
+    'Google token without youtube.force-ssl stops before any YouTube API request and explains how to grant access',
   );
 
   // ── Step 8 Audit: Realtime LipSync Engine & LiveTalking Provider ──
@@ -608,6 +667,7 @@ async function runAudit() {
   let workerHealthy = true;
   let workerSpeakingPolls = 0;
   let workerStatusFailuresAfterSpeaking = 0;
+  let workerAudioTransportFailures = 0;
   let workerTaskCounter = 0;
   let workerOfferCount = 0;
   let workerSessionSequence: string[] = [];
@@ -645,6 +705,11 @@ async function runAudit() {
       for await (const chunk of request) rawBody += chunk.toString('latin1');
       const sessionid = rawBody.includes('stale_session') ? 'stale_session' : 'session_test';
       workerAudioSessions.push(sessionid);
+      if (workerAudioTransportFailures > 0) {
+        workerAudioTransportFailures -= 1;
+        response.statusCode = 503;
+        return response.end(JSON.stringify({ code: 503, msg: 'temporary media upload outage' }));
+      }
       if (sessionid === 'stale_session') {
         return response.end(JSON.stringify({ code: 404, msg: 'session not found' }));
       }
@@ -726,9 +791,11 @@ async function runAudit() {
   qwenTestAudio.write('RIFF', 0);
   qwenTestAudio.write('WAVEfmt ', 8);
   qwenTestAudio.write('data', 36);
+  let qwenSynthesisFailures = 0;
+  let qwenSynthesisRequests = 0;
   const fakeQwen = http.createServer(async (request, response) => {
     const pathname = new URL(request.url || '/', 'http://127.0.0.1:9881').pathname;
-    if (pathname === '/api/health') return response.end(JSON.stringify({ ready: true, provider: 'qwentts', backend: 'mlx' }));
+    if (pathname === '/api/health') return response.end(JSON.stringify({ ready: true, model_loaded: true, provider: 'qwentts', backend: 'mlx' }));
     if (pathname === '/api/voices') return response.end(JSON.stringify([{ id: 'qwen-default', voice_id: 'qwen-default', name: 'Yến Nhi', kind: 'preset', provider: 'qwentts' }]));
     if (pathname === '/api/voices/clone' && request.method === 'POST') {
       for await (const _chunk of request) { /* consume multipart input */ }
@@ -738,6 +805,12 @@ async function runAudit() {
     }
     if (pathname === '/api/synthesize' && request.method === 'POST') {
       for await (const _chunk of request) { /* consume JSON input */ }
+      qwenSynthesisRequests += 1;
+      if (qwenSynthesisFailures > 0) {
+        qwenSynthesisFailures -= 1;
+        response.statusCode = 503;
+        return response.end(JSON.stringify({ detail: 'temporary synthesis outage' }));
+      }
       response.setHeader('Content-Type', 'audio/wav');
       response.setHeader('X-Audio-Duration-Ms', '1200');
       response.setHeader('X-Generation-Ms', '100');
@@ -770,6 +843,15 @@ async function runAudit() {
   assert(
     workerAudioSessions.join(' -> ') === 'stale_session -> session_test',
     'LiveTalkingProvider recovers when WebRTC session changes during TTS upload',
+  );
+
+  workerSessionSequence = ['session_test'];
+  workerAudioSessions.length = 0;
+  workerAudioTransportFailures = 1;
+  await liveTalkingProvider.sendAudio(new Blob([qwenTestAudio], { type: 'audio/wav' }));
+  assert(
+    workerAudioSessions.join(' -> ') === 'session_test -> session_test',
+    'LiveTalkingProvider retries a transient audio upload without regenerating TTS',
   );
 
   const mockTalkingProvider = new MockTalkingProvider();
@@ -968,6 +1050,22 @@ async function runAudit() {
 
     const routeSessionId = 'obs_route_test';
     const runtimeInternals = server as any;
+    const qwenRequestsBeforeRetry = qwenSynthesisRequests;
+    qwenSynthesisFailures = 1;
+    const recoveredQwenAudio = await runtimeInternals._synthesizeQwenTtsAudio({
+      commandId: 'qwen_retry_test',
+      text: 'Kiểm tra tự phục hồi giọng nói.',
+      emotion: 'neutral',
+      speed: 1,
+      provider: 'qwentts',
+      voiceId: 'qwen-default',
+      modelId: 'gwen-tts-0.6B-vi-8bit',
+    });
+    assert(
+      recoveredQwenAudio.audioBase64
+        && qwenSynthesisRequests === qwenRequestsBeforeRetry + 2,
+      'Qwen TTS retries once after a transient HTTP 5xx synthesis failure',
+    );
     runtimeInternals._activeObsOutputSessionId = routeSessionId;
     runtimeInternals._obsOutputRoutes.set(routeSessionId, {
       sessionId: routeSessionId,
@@ -1041,10 +1139,13 @@ async function runAudit() {
       'AI Director defaults to local Qwen 8B',
     );
     assert(
-      defaultSettings.talkingEngine === undefined
+      defaultSettings.talkingEngine?.modelFps === 15
+        && defaultSettings.talkingEngine?.outputFps === 30
         && defaultSettings.realtimeStatus?.alwaysOn === true
-        && defaultSettings.realtimeStatus?.videoQuality === 'hd',
-      'Public settings hide core realtime details and fix live output to HD 720p',
+        && defaultSettings.realtimeStatus?.videoQuality === 'hd'
+        && defaultSettings.realtimeStatus?.modelFps === 15
+        && defaultSettings.realtimeStatus?.outputFps === 30,
+      'Public settings expose the configured 15 FPS model clock and fixed HD 720p30 output',
     );
     const engineHub = await fetch('http://localhost:9876/api/engines').then((response) => response.json()) as any;
     assert(
@@ -1134,7 +1235,7 @@ async function runAudit() {
     assert(
       multiAvatarSessionRes.status === 200
         && multiAvatarSession.session?.selectedAvatarIds?.join(',') === 'avatar_test,avatar_happy',
-      'Avatar session stores multiple active Avatar states in one Pool',
+      'Avatar session stores multiple enabled Avatar states in one Pool',
     );
     const activeAvatarSessionRes = await fetch('http://localhost:9876/api/avatars/session', {
       method: 'POST',
@@ -1147,6 +1248,37 @@ async function runAudit() {
         && activeAvatarSession.session?.selectedAvatarIds?.length === 2,
       'Avatar session tracks one current Avatar inside a multi-Avatar Pool',
     );
+    runtimeInternals._db.upsertAvatar('avatar_test', {
+      id: 'avatar_test', avatarId: 'avatar_test', status: 'ready', avatarState: 'normal',
+    });
+    runtimeInternals._db.upsertAvatar('avatar_happy', {
+      id: 'avatar_happy', avatarId: 'avatar_happy', status: 'ready', avatarState: 'happy',
+    });
+    runtimeInternals._db.upsertAvatar('avatar_happy_alt', {
+      id: 'avatar_happy_alt', avatarId: 'avatar_happy_alt', status: 'ready', avatarState: 'happy',
+    });
+    runtimeInternals._db.setAvatarSession(
+      'avatar_test',
+      ['avatar_test', 'avatar_happy', 'avatar_happy_alt'],
+    );
+    const firstHappyAvatar = runtimeInternals._resolveAvatarState({ emotion: 'happy' });
+    runtimeInternals._db.setAvatarSession(
+      firstHappyAvatar.avatarId,
+      ['avatar_test', 'avatar_happy', 'avatar_happy_alt'],
+    );
+    const secondHappyAvatar = runtimeInternals._resolveAvatarState({ emotion: 'happy' });
+    const neutralAvatar = runtimeInternals._resolveAvatarState({ emotion: 'neutral' });
+    assert(
+      firstHappyAvatar.state === 'happy'
+        && secondHappyAvatar.state === 'happy'
+        && firstHappyAvatar.avatarId !== secondHappyAvatar.avatarId
+        && new Set(['avatar_happy', 'avatar_happy_alt']).has(firstHappyAvatar.avatarId)
+        && new Set(['avatar_happy', 'avatar_happy_alt']).has(secondHappyAvatar.avatarId)
+        && neutralAvatar.avatarId === 'avatar_test'
+        && neutralAvatar.state === 'normal',
+      'Automatic Avatar selection prefers the speech emotion, round-robins eligible datasets, and falls back to normal',
+    );
+    runtimeInternals._db.deleteAvatar('avatar_happy_alt');
     const excludedAvatarSessionRes = await fetch('http://localhost:9876/api/avatars/session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1272,7 +1404,7 @@ async function runAudit() {
       'A chat batch creates at most one AI-generated SpeechCommand',
     );
     if (generatedChatSpeech) {
-      assert(chatDialogueProvider === 'qwen' || chatDialogueProvider === 'ttm-chatgpt', 'Chat SpeechCommand records only a real AI provider', chatDialogueProvider);
+      assert(chatDialogueProvider === 'qwen' || chatDialogueProvider === 'gemini-google', 'Chat SpeechCommand records only a real AI provider', chatDialogueProvider);
       const chatSpeechWordCount = chatSpeechText.split(/\s+/).filter(Boolean).length;
       assert(chatSpeechWordCount > 0 && chatSpeechWordCount <= 40, 'Batched AI reply stays within the maximum spoken word budget', `${chatSpeechWordCount} words / ${chatSpeechDurationMs}ms fixture audio`);
       assert(
@@ -1290,6 +1422,7 @@ async function runAudit() {
     // Dashboard must remain standby and must never replace the worker session.
     const mediaPrimary = await openRuntimeSocket(9876);
     const mediaStandby = await openRuntimeSocket(9876);
+    let mediaAvatarReconnectPromise = Promise.resolve();
     mediaPrimary.socket.send(JSON.stringify({
       type: 'LIVETALKING_MEDIA_REGISTER', clientId: 'monitor_primary', priority: 100,
     }));
@@ -1303,12 +1436,61 @@ async function runAudit() {
         && mediaStandbyAssigned?.ownerClientId === 'monitor_primary',
       'Exactly one Dashboard owns the Live Monitor while other tabs stay in standby',
     );
+    const standbyForegroundStart = mediaStandby.messages.length;
+    mediaStandby.socket.send(JSON.stringify({
+      type: 'LIVETALKING_MEDIA_REGISTER', clientId: 'monitor_standby', priority: 100,
+    }));
+    const standbyForegroundOwner = await waitForSocketMessage(
+      mediaStandby.messages,
+      'LIVETALKING_MEDIA_OWNER_GRANTED',
+      1_000,
+      standbyForegroundStart,
+    );
+    const primaryForegroundStart = mediaPrimary.messages.length;
+    mediaPrimary.socket.send(JSON.stringify({
+      type: 'LIVETALKING_MEDIA_REGISTER', clientId: 'monitor_primary', priority: 100,
+    }));
+    const primaryForegroundOwner = await waitForSocketMessage(
+      mediaPrimary.messages,
+      'LIVETALKING_MEDIA_OWNER_GRANTED',
+      1_000,
+      primaryForegroundStart,
+    );
+    assert(
+      standbyForegroundOwner?.clientId === 'monitor_standby'
+        && primaryForegroundOwner?.clientId === 'monitor_primary',
+      'The newest focused Dashboard takes Live Monitor ownership from a stale foreground tab',
+    );
     mediaPrimary.socket.addEventListener('message', (event) => {
       try {
         const payload = JSON.parse(String(event.data));
         if (payload?.type === 'SPEECH_PLAYBACK_PENDING' && payload.commandId) {
           void fetch(`http://localhost:9876/api/speech/${encodeURIComponent(payload.commandId)}/playback-ready`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+          });
+        } else if (payload?.type === 'LIVETALKING_MEDIA_RESET_REQUIRED'
+          && payload.reason === 'AVATAR_DATASET_CHANGED') {
+          mediaAvatarReconnectPromise = mediaAvatarReconnectPromise.then(async () => {
+            const avatarSession = await fetch('http://localhost:9876/api/avatars/session').then((response) => response.json()) as any;
+            const avatarId = avatarSession.session?.activeAvatarId;
+            const reconnectOffer = await fetch('http://localhost:9876/api/talking-head/offer', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sdp: 'v=0\r\n', type: 'offer', avatarId, clientId: 'monitor_primary' }),
+            });
+            if (!reconnectOffer.ok) throw new Error(`Avatar reconnect offer failed: HTTP ${reconnectOffer.status}`);
+            mediaPrimary.socket.send(JSON.stringify({
+              type: 'LIVETALKING_MEDIA_STATE',
+              clientId: 'monitor_primary',
+              sessionId: 'session_test',
+              connectionState: 'CONNECTED',
+              audioTrack: true,
+              videoTrack: true,
+              audioPlayable: true,
+              audioPackets: 10,
+              videoFrames: 10,
+              reason: 'avatar-dataset-reconnected',
+            }));
           });
         }
       } catch {}
@@ -1357,17 +1539,35 @@ async function runAudit() {
       body: JSON.stringify({ avatarId: 'avatar_happy' }),
     });
     const activateHappy = await activateHappyRes.json() as any;
+    const happyDatasetReset = await waitForSocketMessage(mediaPrimary.messages, 'LIVETALKING_MEDIA_RESET_REQUIRED');
+    await mediaAvatarReconnectPromise;
     assert(
       activateHappyRes.status === 200
         && activateHappy.session?.activeAvatarId === 'avatar_happy'
-        && workerAvatarSwitches.at(-1)?.avatar_id === 'avatar_happy',
-      'Manual Avatar switching reuses the current WebRTC session',
+        && happyDatasetReset?.reason === 'AVATAR_DATASET_CHANGED',
+      'Manual Avatar switching persists the new live Avatar before reconnecting its dataset',
+    );
+    const offerCountAfterHappyReconnect = workerOfferCount;
+    const resetCountAfterHappyReconnect = mediaPrimary.messages
+      .filter(message => message?.type === 'LIVETALKING_MEDIA_RESET_REQUIRED').length;
+    const keepHappyRes = await fetch('http://localhost:9876/api/avatars/session/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ avatarId: 'avatar_happy' }),
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert(
+      keepHappyRes.status === 200
+        && workerOfferCount === offerCountAfterHappyReconnect
+        && mediaPrimary.messages.filter(message => message?.type === 'LIVETALKING_MEDIA_RESET_REQUIRED').length === resetCountAfterHappyReconnect,
+      'Selecting the current live Avatar keeps the existing WebRTC session',
     );
     await fetch('http://localhost:9876/api/avatars/session/activate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ avatarId: 'avatar_test' }),
     });
+    await mediaAvatarReconnectPromise;
     let integrationAudioPackets = 10;
     let integrationVideoFrames = 10;
     const mediaHeartbeat = setInterval(() => {
@@ -1407,6 +1607,7 @@ async function runAudit() {
     const omniFallbackJson = await omniFallbackRes.json() as any;
     const omniFallbackStates = new Set<string>([omniFallbackJson.state]);
     let omniFallbackProvider = '';
+    let omniFallbackError = '';
     const omniFallbackDeadline = Date.now() + 3000;
     while (Date.now() < omniFallbackDeadline) {
       const statusRes = await fetch('http://localhost:9876/api/speech/status');
@@ -1414,16 +1615,18 @@ async function runAudit() {
       if (statusJson.speech?.commandId === omniFallbackJson.commandId) {
         omniFallbackStates.add(statusJson.speech.state);
         omniFallbackProvider = statusJson.speech.provider || omniFallbackProvider;
-        if (omniFallbackStates.has('SPEAKING') && statusJson.speech.state === 'IDLE') break;
+        omniFallbackError = statusJson.speech.error || omniFallbackError;
+        if (statusJson.speech.state === 'ERROR') break;
       }
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert(
-      omniFallbackProvider === 'system-tts-fallback'
-        && omniFallbackStates.has('SPEAKING')
-        && omniFallbackStates.has('IDLE'),
-      'Offline OmniVoice falls back to operating-system audio without breaking LiveTalking speech',
-      `${omniFallbackProvider} / ${[...omniFallbackStates].join(',')}`,
+      omniFallbackProvider === 'qwentts'
+        && omniFallbackStates.has('GENERATING')
+        && omniFallbackStates.has('ERROR')
+        && /automatic startup is disabled/i.test(omniFallbackError),
+      'Disabled Qwen TTS fails clearly without an operating-system voice fallback',
+      `${omniFallbackProvider} / ${[...omniFallbackStates].join(',')} / ${omniFallbackError}`,
     );
     process.env.QWEN_TTS_ENDPOINT = 'http://127.0.0.1:9881';
     delete process.env.QWEN_TTS_AUTOSTART;
@@ -1510,13 +1713,16 @@ async function runAudit() {
       reason: 'autoplay-blocked-test',
     }));
     await new Promise(resolve => setTimeout(resolve, 30));
-    let blockedMediaRejected = false;
+    let blockedMediaAccepted = true;
     try {
       await runtimeInternals._waitForReadyLiveTalkingMedia(100);
-    } catch (error) {
-      blockedMediaRejected = String(error).includes('audio is blocked');
+    } catch {
+      blockedMediaAccepted = false;
     }
-    assert(blockedMediaRejected, 'Speech fails clearly when browser autoplay blocks the WebRTC audio track');
+    assert(
+      blockedMediaAccepted,
+      'Speech keeps avatar video and OBS audio running when local Monitor playback is blocked',
+    );
 
     mediaPrimary.socket.send(JSON.stringify({
       type: 'LIVETALKING_MEDIA_STATE',
@@ -1531,8 +1737,14 @@ async function runAudit() {
       reason: 'integration-restored',
     }));
     await new Promise(resolve => setTimeout(resolve, 30));
+    const resetCountBeforeWorkerRestart = mediaPrimary.messages.length;
     runtimeInternals._invalidateLiveTalkingMediaSession('INTEGRATION_WORKER_RESTART');
-    const resetRequired = await waitForSocketMessage(mediaPrimary.messages, 'LIVETALKING_MEDIA_RESET_REQUIRED');
+    const resetRequired = await waitForSocketMessage(
+      mediaPrimary.messages,
+      'LIVETALKING_MEDIA_RESET_REQUIRED',
+      1_000,
+      resetCountBeforeWorkerRestart,
+    );
     assert(
       resetRequired?.reason === 'INTEGRATION_WORKER_RESTART',
       'Worker restart invalidates stale browser media instead of reporting a false healthy session',
@@ -1604,29 +1816,16 @@ async function runAudit() {
     const settingsJson = await settingsRes.json() as any;
     assert(settingsJson.voice !== undefined && settingsJson.avatar !== undefined, 'REST /api/settings/all returns complete system settings');
 
-    const ttmConfigRes = await fetch('http://localhost:9876/api/ai/director/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: 'ttm-chatgpt', model: 'chat-latest', apiKey: 'ttm_test_secret' }),
-    });
-    const ttmConfig = await ttmConfigRes.json() as any;
-    const ttmStatus = await fetch('http://localhost:9876/api/ai/director/status').then((response) => response.json()) as any;
+    const geminiAuth = await fetch('http://localhost:9876/api/ai/director/gemini/auth/status').then((response) => response.json()) as any;
+    const geminiStatus = await fetch('http://localhost:9876/api/ai/director/status').then((response) => response.json()) as any;
     assert(
-      ttmConfigRes.status === 200
-        && ttmConfig.settings?.llmProvider === 'ollama'
-        && ttmConfig.settings?.llmModel === 'qwen3:8b'
-        && ttmConfig.settings?.llmApiKey === undefined
-        && ttmStatus.apiKeyConfigured === true
-        && ttmStatus.fallbackProvider === 'ttm-chatgpt'
-        && ttmStatus.fallbackBaseUrl === 'https://ttmapi.site/v1'
-        && JSON.stringify(ttmStatus).includes('ttm_test_secret') === false,
-      'ChatGPT TTM fallback is configurable without replacing Qwen or exposing its API key',
+      geminiAuth.success === true
+        && typeof geminiAuth.auth?.connected === 'boolean'
+        && geminiStatus.fallbackProvider === 'ollama'
+        && geminiStatus.fallbackModel === 'qwen3:8b'
+        && JSON.stringify(geminiAuth).includes('access_token') === false,
+      'Gemini Google-account status never exposes an access token and retains Qwen fallback',
     );
-    await fetch('http://localhost:9876/api/ai/director/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: 'ollama', model: 'qwen3:8b', clearApiKey: true }),
-    });
 
     const voiceProfilesRes = await fetch('http://localhost:9876/api/voice/profiles');
     const voiceProfilesJson = await voiceProfilesRes.json() as any;
@@ -1644,11 +1843,14 @@ async function runAudit() {
     const obsOutputHtml = fs.readFileSync('./operator-dashboard/overlay/obs-output.html', 'utf8');
     const nativeShellSource = fs.readFileSync('./src-tauri/src/lib.rs', 'utf8');
     const desktopPrepareSource = fs.readFileSync('./scripts/prepare-desktop-runtime.mjs', 'utf8');
+    const launchWebappSource = fs.readFileSync('./scripts/launch-webapp.sh', 'utf8');
     const nativeCapabilitySource = fs.readFileSync('./src-tauri/capabilities/default.json', 'utf8');
     const qwenServerSource = fs.readFileSync('./services/qwen-tts/server.py', 'utf8');
     const runtimeServerSource = fs.readFileSync('./services/runtime-server/src/index.ts', 'utf8');
+    const talkingHeadSource = fs.readFileSync('./services/talking-head/src/index.ts', 'utf8');
     const obsControllerSource = fs.readFileSync('./services/obs-controller/src/index.ts', 'utf8');
     const liveTalkingLauncherSource = fs.readFileSync('./services/talking-head/livetalking/run_worker.sh', 'utf8');
+    const liveTalkingAppSource = fs.readFileSync('./services/talking-head/livetalking/app.py', 'utf8');
     const platformChatSource = fs.readFileSync('./services/runtime-server/src/platform-chat.ts', 'utf8');
     const avatarTaskManagerSource = fs.readFileSync('./services/talking-head/livetalking/server/task_manager.py', 'utf8');
     const faceDetectorSetupSource = fs.readFileSync('./services/talking-head/livetalking/scripts/prefetch_s3fd.py', 'utf8');
@@ -1657,9 +1859,10 @@ async function runAudit() {
         && runtimeServerSource.includes("model: 'qwen3:8b'")
         && !runtimeServerSource.includes('new SafeDialogueProvider()')
         && !runtimeServerSource.includes('new MockDialogueProvider()')
-        && dashboardHtml.indexOf('value="ollama"') < dashboardHtml.indexOf('value="ttm-chatgpt"')
-        && dashboardHtml.includes('Qwen 8B - Primary'),
-      'Production defaults AI Director to Qwen 8B with ChatGPT fallback and no mock dialogue provider',
+        && dashboardHtml.includes('value="gemini"')
+        && dashboardHtml.includes('Gemini Pro - Google account')
+        && runtimeServerSource.includes('new GeminiDialogueProvider('),
+      'AI Director supports Gemini Google-account auth with local Qwen fallback and no mock dialogue provider',
     );
     assert(
       runtimeServerSource.includes("!/^mimi$/i.test(this._settings.persona.name)")
@@ -1680,9 +1883,9 @@ async function runAudit() {
       runtimeServerSource.includes('_liveTalkingWorkerStartPromise')
         && runtimeServerSource.includes('AI IDOL is already running at')
         && liveTalkingLauncherSource.includes('acquire_worker_lock')
-        && dashboardHtml.includes('id="cfg-livetalking-always-on"')
-        && dashboardHtml.includes('id="start-livetalking-engine"')
-        && dashboardHtml.includes('id="stop-livetalking-engine"'),
+        && dashboardScript.includes("$('cfg-livetalking-always-on')")
+        && dashboardScript.includes("$('start-livetalking-engine')")
+        && dashboardScript.includes("$('stop-livetalking-engine')"),
       'Runtime, launcher, and Settings enforce one worker with Manual Start/Stop and Always On status controls',
     );
     assert(
@@ -1738,7 +1941,7 @@ async function runAudit() {
         && platformChatSource.includes("pages_read_engagement")
         && platformChatSource.includes("normalized.timestamp >= this._youtubeJoinedAt")
         && runtimeServerSource.includes("this._chatManager.ingest(message)")
-        && runtimeServerSource.includes("message.platform === 'facebook' ? '[FB]'")
+        && runtimeServerSource.includes("firstMessage.platform === 'facebook' ? '[FB]'")
         && runtimeServerSource.includes("this._platformChat.publicState()")
         && (platformChatSource.match(/client_secret:/g)?.length || 0) >= 2
         && nativeShellSource.includes('"GOOGLE_OAUTH_CLIENT_SECRET"')
@@ -1784,7 +1987,7 @@ async function runAudit() {
         && dashboardScript.includes('function setupNativeHeaderDrag()')
         && dashboardScript.includes('getCurrentWindow().startDragging()')
         && nativeCapabilitySource.includes('core:window:allow-start-dragging')
-        && nativeCapabilitySource.includes('http://127.0.0.1:11111/*')
+        && nativeCapabilitySource.includes('http://127.0.0.1:6767/*')
         && dashboardStyles.includes('--svg-toolbar: 72px;')
         && dashboardStyles.includes('padding: 24px 12px 8px;'),
       'Native header provides a safe drag region with reserved bottom padding',
@@ -1812,14 +2015,13 @@ async function runAudit() {
         && dashboardScript.includes('ensureSilentAudioTrack()')
         && dashboardScript.includes("type: 'OBS_OUTPUT_REGISTER'")
         && dashboardScript.includes('this.audioSender.replaceTrack(audioTrack)')
-        && dashboardScript.includes('Math.max(target.width / sourceWidth, target.height / sourceHeight)')
         && !dashboardScript.includes("if (!stream.getVideoTracks().length || !stream.getAudioTracks().length) return;")
         && obsOutputHtml.includes("type: 'OBS_OUTPUT_ANSWER'")
         && obsOutputHtml.includes("role: 'receiver'")
         && obsOutputHtml.includes('payload.negotiationId !== negotiationId')
         && obsOutputHtml.includes('id="output-audio"')
         && obsOutputHtml.includes("event.track.kind === 'video'")
-        && obsControllerSource.includes("boundsType: 'OBS_BOUNDS_STRETCH'"),
+        && obsControllerSource.includes("boundsType: 'OBS_BOUNDS_NONE'"),
       'Magic Connect provisions an OBS-only Browser Source and forwards the existing Monitor video + voice stream',
     );
     assert(
@@ -1847,7 +2049,8 @@ async function runAudit() {
     assert(
       dashboardScript.includes('await unlockAudio(true);')
         && runtimeServerSource.includes('await this._waitForReadyLiveTalkingMedia();')
-        && runtimeServerSource.includes("LIVETALKING_FPS: '15'")
+        && runtimeServerSource.includes('LIVETALKING_FPS: String(this._settings.talkingEngine.modelFps)')
+        && runtimeServerSource.includes("LIVETALKING_OUTPUT_FPS: '30'")
         && liveTalkingLauncherSource.includes('LIVETALKING_FPS:-15')
         && dashboardHtml.includes('HD · 30'),
       'OBS preflight unlocks audio, waits for ready media, and publishes HD30 from a 15 FPS model clock',
@@ -1870,11 +2073,12 @@ async function runAudit() {
     );
     assert(
       qwenServerSource.includes('"model_loaded": engine.model is not None')
-        && !qwenServerSource.includes('engine.load()\n    uvicorn.run')
+        && qwenServerSource.includes('engine.load()\n    uvicorn.run')
         && nativeShellSource.includes('tauri_plugin_single_instance::init')
         && nativeShellSource.includes('.env("QWEN_TTS_RUNTIME_DIR", &paths.qwen_runtime)')
-        && !nativeShellSource.includes('start_qwen_tts(&paths)'),
-      'Native startup is single-instance and keeps Qwen TTS lazy-loaded inside its sandbox',
+        && !nativeShellSource.includes('start_qwen_tts(&paths)')
+        && runtimeServerSource.includes('this._autoStartQwenTtsWorker();'),
+      'Native startup is single-instance and keeps Qwen TTS ready inside its sandbox',
     );
     assert(
       runtimeServerSource.includes("AI_IDOL_ENGINE_LOCK_PORT")
@@ -1897,8 +2101,39 @@ async function runAudit() {
         && webRtcReceiverScript.indexOf('this.audioEl.remove();') < webRtcReceiverScript.indexOf('await global.LiveTalkingApi.closeSession(sessionId);')
         && dashboardScript.includes("payload.type === 'LIVETALKING_MEDIA_OWNER_GRANTED'")
         && dashboardScript.includes("payload.type === 'LIVETALKING_MEDIA_STANDBY'")
+        && dashboardScript.includes("type: 'LIVETALKING_MEDIA_RELEASE'")
+        && dashboardScript.includes("window.addEventListener('pagehide', releaseRuntimeRealtime")
         && dashboardScript.includes('await waitForLiveMediaOwnership();'),
-      'Dashboard verifies media packets, cleans stale tracks, and enforces one Live Monitor owner',
+      'Dashboard verifies media packets, releases stale page ownership, and enforces one Live Monitor owner',
+    );
+    assert(
+      dashboardScript.includes("payload.type === 'LIVETALKING_MEDIA_RECOVERY_REQUIRED'")
+        && dashboardScript.includes("scheduleLiveMediaRecovery('WebRTC negotiation still pending', 2500)")
+        && dashboardScript.includes('await ensureLiveMediaReadyForSpeech();')
+        && dashboardScript.includes('await reconnectLiveTalkingAvatar(avatarId);')
+        && runtimeServerSource.includes("this._requestLiveTalkingMediaRecovery('MEDIA_OWNER_REQUIRED')")
+        && runtimeServerSource.includes("this._requestLiveTalkingMediaRecovery('AUDIO_UPLOAD_FAILED')")
+        && runtimeServerSource.includes('this._uploadLiveTalkingAudioWithRecovery(bytes, mediaType, runId)')
+        && talkingHeadSource.includes("this._request('/humanaudio', { method: 'POST', body: form }, true"),
+      'Live Monitor self-heal reconnects before speech and replays cached audio after upload failure',
+    );
+    assert(
+      runtimeServerSource.includes('this._startWorkerWatchdog();')
+        && runtimeServerSource.includes("this._restartQwenTtsWorker('health watchdog')")
+        && runtimeServerSource.includes("this._restartLiveTalkingWorker('health watchdog', true)"),
+      'Runtime health watchdog automatically restarts stalled Qwen TTS and MuseTalk workers',
+    );
+    assert(
+      liveTalkingAppSource.includes('avatar_this = get_or_load_avatar(avatar_id)')
+        && liveTalkingAppSource.includes('if loaded_avatar is None:')
+        && liveTalkingAppSource.includes('avatar_cache_lock = RLock()'),
+      'MuseTalk reconnects reload an evicted default Avatar and reject empty cache payloads before WebRTC starts',
+    );
+    assert(
+      launchWebappSource.includes('<key>KeepAlive</key><true/>')
+        && launchWebappSource.includes('launchctl bootstrap')
+        && launchWebappSource.includes('launchctl kickstart -k'),
+      'macOS web runtime is installed as a KeepAlive LaunchAgent instead of a one-shot process',
     );
     assert(
       desktopPrepareSource.includes("createHash('sha256')")
@@ -1924,6 +2159,21 @@ async function runAudit() {
       'Quick voice tests reuse a viable avatar session instead of replacing it',
     );
     assert(
+      dashboardHtml.includes('Multi Avatar Pool · Enabled / Disabled · Live now')
+        && dashboardScript.includes("status.textContent = selected ? 'Enabled' : 'Disabled';")
+        && dashboardScript.includes("liveStatus.textContent = 'Live now';")
+        && dashboardScript.includes('Included in automatic rotation')
+        && dashboardStyles.includes('.avatar-library-card.live-now .avatar-card-preview'),
+      'Avatar Pool UI separates enabled rotation membership from the Avatar currently live on WebRTC',
+    );
+    assert(
+      runtimeServerSource.includes('private _avatarRotationCursor = 0;')
+        && runtimeServerSource.includes('const emotionMatches = available.filter')
+        && runtimeServerSource.includes("this._requestLiveTalkingMediaRecovery('AVATAR_DATASET_CHANGED')")
+        && !runtimeServerSource.includes('Automatic avatar rotation is disabled while live'),
+      'Runtime automatically selects emotion-matched Avatars and reconnects only when the dataset ID changes',
+    );
+    assert(
       dashboardScript.includes("item.status = 'failed';\n      item.error = error.message;"),
       'Avatar training surfaces startup and submission failures in the create modal',
     );
@@ -1938,7 +2188,7 @@ async function runAudit() {
       dashboardScript.includes('function resolveRuntimeClip(state, serverAsset = null, forceRandom = false)')
         && dashboardScript.includes('serverAsset.fileName')
         && dashboardScript.includes('if (matchingClip) return matchingClip;')
-        && dashboardScript.includes('const clipToPlay = resolveRuntimeClip(state, serverAsset, forceRandom);'),
+        && dashboardScript.includes(': resolveRuntimeClip(state, serverAsset, forceRandom);'),
       'Runtime state assets resolve to a playable local library clip after speech ends',
     );
 
@@ -1968,9 +2218,8 @@ async function runAudit() {
     assert(
       avatarDeleteRes.status === 200
         && sessionAfterAvatarDelete.session?.activeAvatarId === 'avatar_happy'
-        && sessionAfterAvatarDelete.session?.selectedAvatarIds?.join(',') === 'avatar_happy'
-        && workerAvatarSwitches.some((entry) => entry.avatar_id === 'avatar_happy'),
-      'Deleting the current Avatar switches the same WebRTC session to an active Pool replacement first',
+        && sessionAfterAvatarDelete.session?.selectedAvatarIds?.join(',') === 'avatar_happy',
+      'Deleting the current Avatar preserves an enabled Pool replacement as the next live Avatar',
     );
 
     await fetch('http://localhost:9876/api/talking-head/session/session_test', { method: 'DELETE' });

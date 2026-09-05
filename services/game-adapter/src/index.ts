@@ -113,6 +113,12 @@ export class SlotSimulatorEngine {
    */
   spin(customBet?: number, forcedOutcome?: 'JACKPOT' | 'MEGA_WIN' | 'BIG_WIN' | 'NEAR_MISS' | 'BONUS' | 'LOSS'): GameEvent {
     const bet = customBet ?? this._config.defaultBet;
+    if (!Number.isFinite(bet) || bet <= 0) {
+      throw new Error('Bet must be a finite positive number');
+    }
+    if (bet > 1_000_000_000) {
+      throw new Error('Bet exceeds the simulator maximum');
+    }
     this._totalSpins++;
     this._totalBet += bet;
 

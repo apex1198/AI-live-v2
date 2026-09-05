@@ -50,8 +50,7 @@ const __dirname = path.dirname(__filename);
 
 import { GameAdapter, SlotSimulatorEngine } from '@idol/game-adapter';
 import { ChatManager, MockChatGenerator, SmartChatFilter } from '@idol/chat-adapter';
-import { WebSpeechTTSAdapter } from '@idol/voice';
-import { OpenAIDialogueProvider, OllamaDialogueProvider } from '@idol/dialogue-agent';
+import { GeminiDialogueProvider, OllamaDialogueProvider } from '@idol/dialogue-agent';
 import { MockTalkingProvider, LiveTalkingProvider, TalkingVideoPipeline, MuseTalkBatchPipeline, type VideoFrame } from '@idol/talking-head';
 import { RuntimeDatabase } from './persistence.js';
 import {
@@ -71,7 +70,32 @@ export interface ServerConfig {
   databasePath: string;
 }
 
+export function chatReplyUserKey(message: Pick<ChatMessage, 'platform' | 'viewerId'>): string {
+  return `${message.platform}:${message.viewerId}`;
+}
+
+export const CHAT_REPLY_COOLDOWN_MS = 60_000;
+
+export function isChatReplyOnCooldown(lastReplyAt: number, now = Date.now()): boolean {
+  return lastReplyAt > 0 && now - lastReplyAt < CHAT_REPLY_COOLDOWN_MS;
+}
+
+export function aggregateUserChatMessages(messages: ChatMessage[], maxMessages = 10): string[] {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const message of messages) {
+    const text = message.message.replace(/\s+/g, ' ').trim();
+    const fingerprint = text.toLocaleLowerCase('vi-VN');
+    if (!text || seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    unique.push(text);
+    if (unique.length >= maxMessages) break;
+  }
+  return unique;
+}
+
 type LiveVideoQuality = 'hd';
+type LiveTalkingModelFps = 15 | 25;
 const LIVE_VIDEO_PRESETS: Record<LiveVideoQuality, { width: number; height: number; fps: number }> = {
   hd: { width: 1280, height: 720, fps: 30 },
 };
@@ -171,6 +195,7 @@ const TalkingSettingsSchema = z.object({
   provider: z.enum(['livetalking', 'mock', 'off']).optional(),
   endpoint: z.string().url().max(500).optional(),
   model: z.enum(['musetalk', 'wav2lip', 'wav2lip_gan']).optional(),
+  modelFps: z.union([z.literal(15), z.literal(25)]).optional(),
   restartIntervalMinutes: z.union([z.literal(5), z.literal(10), z.literal(15), z.literal(20)]).optional(),
   alwaysOn: z.boolean().optional(),
 }).strict();
@@ -215,6 +240,7 @@ const WebRtcOfferSchema = z.object({
   avatarId: SafeIdSchema.optional(),
   avatar: SafeIdSchema.optional(),
   clientId: SafeIdSchema.optional(),
+  connectionId: SafeIdSchema.optional(),
 }).strict();
 const AvatarTrainSchema = z.object({
   video_path: z.string().trim().min(1).max(1024).optional(),
@@ -225,6 +251,7 @@ const AvatarTrainSchema = z.object({
 }).strict().refine((value) => Boolean(value.video_path || value.videoPath || value.avatarPath), {
   message: 'A project video path is required',
 });
+const MuseTalkMaskModeSchema = z.enum(['none', 'repo', 'mediapipe_478', 'adaptive']);
 const AvatarBatchItemSchema = z.object({
   video_path: z.string().trim().min(1).max(1024).optional(),
   videoPath: z.string().trim().min(1).max(1024).optional(),
@@ -298,18 +325,17 @@ const PersonaSettingsSchema = z.object({
   systemPrompt: z.string().trim().min(1).max(32_000).optional(),
   llmProvider: z.enum(['mock', 'openai', 'gemini', 'ollama', 'ttm-chatgpt']).optional(),
   llmModel: OllamaModelSchema.optional(),
+  geminiProject: z.string().trim().max(200).optional(),
+  geminiLocation: z.string().trim().max(80).optional(),
 }).strict();
 const PersonaBriefImportSchema = z.object({
   url: z.string().url().max(1000),
 }).strict();
 const AiDirectorConfigSchema = z.object({
-  provider: z.enum(['ollama', 'ttm-chatgpt']),
+  provider: z.enum(['ollama', 'gemini']),
   model: OllamaModelSchema,
-  apiKey: z.string().trim().max(500).optional(),
-  clearApiKey: z.boolean().default(false),
-}).strict();
-const TtmModelsSchema = z.object({
-  apiKey: z.string().trim().max(500).optional(),
+  projectId: z.string().trim().max(200).optional(),
+  location: z.string().trim().max(80).optional(),
 }).strict();
 const VoiceDesignProfileSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -388,6 +414,7 @@ const LiveTalkingMediaSignalSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('LIVETALKING_MEDIA_STATE'),
     clientId: SafeIdSchema,
+    connectionId: SafeIdSchema.nullable().optional(),
     sessionId: SafeIdSchema.nullable(),
     connectionState: z.enum(['NEW', 'CONNECTING', 'CONNECTED', 'DISCONNECTED', 'FAILED', 'CLOSED']),
     audioTrack: z.boolean(),
@@ -411,7 +438,9 @@ type LiveTalkingMediaRegistration = {
 
 type LiveTalkingMediaOwner = LiveTalkingMediaRegistration & {
   ws: WebSocket;
+  connectionId: string | null;
   sessionId: string | null;
+  acceptingMediaState: boolean;
   avatarId: string;
   connectionState: 'NEW' | 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'FAILED' | 'CLOSED';
   audioTrack: boolean;
@@ -422,6 +451,28 @@ type LiveTalkingMediaOwner = LiveTalkingMediaRegistration & {
   lastAudioProgressAt: number;
   lastVideoProgressAt: number;
   lastHeartbeatAt: number;
+};
+
+type SpeechExecutionResult = {
+  success: boolean;
+  started: boolean;
+  retryable: boolean;
+  error: string | null;
+};
+
+type ChatReplyContext = {
+  userKey: string;
+  messages: ChatMessage[];
+  retryKey: string;
+  platformReplyTargets: Array<'youtube' | 'facebook'>;
+};
+
+type QueuedSpeechCommand = {
+  command: z.infer<typeof SpeechCommandSchema>;
+  dialogueProvider: string;
+  source: 'operator' | 'director';
+  attempt: number;
+  resolve: (result: SpeechExecutionResult) => void;
 };
 
 const GENERATED_REPLY_SKILL_ID = 'generated-live-session';
@@ -488,7 +539,7 @@ export class IdolRuntimeServer {
   private readonly _platformChat: PlatformChatCoordinator;
   private readonly _liveTalkingProvider: LiveTalkingProvider;
   private readonly _talkingPipeline: TalkingVideoPipeline;
-  private readonly _museTalkBatchPipeline: MuseTalkBatchPipeline;
+  private readonly _museTalkBatchPipeline: InstanceType<typeof MuseTalkBatchPipeline>;
   private readonly _db: RuntimeDatabase;
 
   private _settings = {
@@ -545,12 +596,15 @@ export class IdolRuntimeServer {
       systemPrompt: 'Bạn là Mimi, AI Idol streamer người Việt Nam vui tính, năng động và thân thiện. Luôn trả lời bằng tiếng Việt tự nhiên, ngắn gọn trong 1-2 câu. Không tự chuyển sang tiếng Anh.',
       llmProvider: 'ollama' as 'mock' | 'openai' | 'gemini' | 'ollama' | 'ttm-chatgpt',
       llmModel: 'qwen3:8b',
-      llmApiKey: process.env['TTM_API_KEY'] || process.env['OPENAI_API_KEY'] || '',
+      llmApiKey: '',
+      geminiProject: process.env['GOOGLE_CLOUD_PROJECT'] || process.env['GCP_PROJECT'] || '',
+      geminiLocation: process.env['GEMINI_LOCATION'] || 'us-central1',
     },
     talkingEngine: {
       provider: 'livetalking' as 'livetalking' | 'mock' | 'off',
       endpoint: process.env['LIVETALKING_ENDPOINT'] || 'http://127.0.0.1:2222',
       model: 'musetalk' as 'musetalk' | 'wav2lip' | 'wav2lip_gan',
+      modelFps: 15 as LiveTalkingModelFps,
       restartIntervalMinutes: 15 as 5 | 10 | 15 | 20,
       alwaysOn: true,
       videoQuality: 'hd' as LiveVideoQuality,
@@ -575,34 +629,45 @@ export class IdolRuntimeServer {
   private _liveTalkingMediaClients = new Map<WebSocket, LiveTalkingMediaRegistration>();
   private _liveTalkingMediaOwner: LiveTalkingMediaOwner | null = null;
   private _lastLiveTalkingMediaWatchdogAt = 0;
+  private _workerWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private _workerWatchdogRunning = false;
+  private _qwenTtsHealthFailures = 0;
+  private _liveTalkingHealthFailures = 0;
   private _obsPublishers = new Map<WebSocket, ObsPublisherRegistration>();
   private _obsOutputRoutes = new Map<string, ObsOutputRoute>();
   private _activeObsOutputSessionId: string | null = null;
   private _obsMagicConnectPromise: Promise<OBSMagicConnectResult> | null = null;
   private _recentLogs: Array<{ level: string; message: string; timestamp: number }> = [];
+  private _recentChatMessages: ChatMessage[] = [];
   private _speechRun = 0;
   private _speechIdleSince = 0;
-  private _directorSpeechQueue: Array<{
-    command: z.infer<typeof SpeechCommandSchema>;
-    dialogueProvider: string;
-    source: 'operator' | 'director';
-  }> = [];
+  private _directorSpeechQueue: QueuedSpeechCommand[] = [];
   private _directorSpeechDrainRunning = false;
   private _avatarStateSwitch: Promise<unknown> = Promise.resolve();
+  private _avatarRotationCursor = 0;
   private _directorGenerationRun = 0;
-  private _pendingPlatformReplyTargets: Array<'youtube' | 'facebook'> = [];
   private _executedShowCueIds = new Set<string>();
   private _speechPlaybackGates = new Map<string, { release: () => void; timer: ReturnType<typeof setTimeout> }>();
   private _chatBatchBuffer: ChatMessage[] = [];
   private _chatBatchTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly _chatBatchWindowMs = 2_500;
-  private readonly _chatBatchMaxMessages = 2;
+  private readonly _chatAggregateMaxMessages = 10;
+  private readonly _chatReplyCooldownMs = CHAT_REPLY_COOLDOWN_MS;
+  private readonly _chatLastReplyAt = new Map<string, number>();
+  private readonly _chatReplyRetryAttempts = new Map<string, number>();
+  private _chatReplyGenerationRunning = false;
   private _localModelInstall = { state: 'IDLE' as 'IDLE' | 'INSTALLING' | 'READY' | 'ERROR', progress: '', error: '' };
   private _localModelProcess: ReturnType<typeof spawn> | null = null;
+  private _geminiAuthProcess: ReturnType<typeof spawn> | null = null;
+  private _geminiAccessToken = { value: '', expiresAt: 0 };
   private _qwenTtsProcess: ReturnType<typeof spawn> | null = null;
   private _qwenTtsStartPromise: Promise<void> | null = null;
+  private _qwenTtsRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  private _qwenTtsRestartAttempt = 0;
+  private readonly _commandVersionCache = new Map<string, { value: string; expiresAt: number }>();
+  private readonly _commandVersionInFlight = new Map<string, Promise<string>>();
   private _qwenTtsState = {
-    state: 'OFFLINE' as 'OFFLINE' | 'STARTING' | 'READY' | 'ERROR',
+    state: 'OFFLINE' as 'OFFLINE' | 'STARTING' | 'READY' | 'STOPPING' | 'ERROR',
     owned: false,
     pid: null as number | null,
     error: '',
@@ -644,11 +709,11 @@ export class IdolRuntimeServer {
 
   constructor(config: Partial<ServerConfig> = {}) {
     this._config = {
-      port: config.port ?? parseInt(process.env['PORT'] || '11111', 10),
+      port: config.port ?? parseInt(process.env['PORT'] || '6767', 10),
       host: config.host ?? process.env['HOST'] ?? '127.0.0.1',
       enableSimulation: config.enableSimulation ?? process.env['ENABLE_SIMULATION'] === 'true',
       authToken: config.authToken ?? process.env['RUNTIME_AUTH_TOKEN'] ?? '',
-      allowedOrigins: config.allowedOrigins ?? (process.env['CORS_ALLOWED_ORIGINS'] || 'http://127.0.0.1:11111,http://localhost:11111')
+      allowedOrigins: config.allowedOrigins ?? (process.env['CORS_ALLOWED_ORIGINS'] || 'http://127.0.0.1:6767,http://localhost:6767')
         .split(',').map((origin) => origin.trim()).filter(Boolean),
       maxJsonBodyBytes: config.maxJsonBodyBytes ?? parseInt(process.env['MAX_JSON_BODY_BYTES'] || '1048576', 10),
       maxUploadBytes: config.maxUploadBytes ?? parseInt(process.env['MAX_UPLOAD_BYTES'] || '524288000', 10),
@@ -709,7 +774,7 @@ export class IdolRuntimeServer {
     this._liveTalkingProvider = new LiveTalkingProvider({
       endpointUrl: this._settings.talkingEngine.endpoint,
       model: this._settings.talkingEngine.model,
-      fps: Math.max(1, parseInt(process.env['LIVETALKING_FPS'] || '15', 10) || 15),
+      fps: this._settings.talkingEngine.modelFps,
       authToken: process.env['LIVETALKING_AUTH_TOKEN'] || '',
     });
     this._talkingPipeline = new TalkingVideoPipeline(this._liveTalkingProvider, new MockTalkingProvider());
@@ -739,6 +804,8 @@ export class IdolRuntimeServer {
 
     this._chatManager.onProcessedMessage((msg) => {
       this._queueChatForReply(msg);
+      this._recentChatMessages.push(msg);
+      if (this._recentChatMessages.length > 100) this._recentChatMessages.splice(0, this._recentChatMessages.length - 100);
       this._broadcast({ type: 'CHAT_MESSAGE', message: msg });
     });
 
@@ -958,6 +1025,16 @@ export class IdolRuntimeServer {
       },
       avatar: { ...this._settings.avatar },
       persona: { ...persona, apiKeyConfigured: Boolean(this._settings.persona.llmApiKey) },
+      talkingEngine: {
+        provider: this._settings.talkingEngine.provider,
+        endpoint: this._settings.talkingEngine.endpoint,
+        model: this._settings.talkingEngine.model,
+        modelFps: this._settings.talkingEngine.modelFps,
+        outputFps: 30,
+        restartIntervalMinutes: this._settings.talkingEngine.restartIntervalMinutes,
+        alwaysOn: this._settings.talkingEngine.alwaysOn,
+        videoQuality: this._settings.talkingEngine.videoQuality,
+      },
       liveSession: { ...this._settings.liveSession },
       platformReply: { ...this._settings.platformReply },
       showSchedule: { cues: this._settings.showSchedule.cues.map((cue) => ({ ...cue })) },
@@ -979,6 +1056,8 @@ export class IdolRuntimeServer {
         state: this._liveTalkingWorker.state,
         alwaysOn: this._settings.talkingEngine.alwaysOn,
         videoQuality: this._settings.talkingEngine.videoQuality,
+        modelFps: this._settings.talkingEngine.modelFps,
+        outputFps: 30,
       },
       obs: {
         ...obs,
@@ -1047,8 +1126,21 @@ export class IdolRuntimeServer {
   private _activeReplySkillMarkdown(): string {
     const library = this._replySkillLibrary();
     if (library.activeSkillId === GENERATED_REPLY_SKILL_ID) return this._settings.liveSession.skillMarkdown;
-    return library.items.find((item) => item.id === library.activeSkillId)?.markdown
-      || this._settings.liveSession.skillMarkdown;
+    const activeModel = library.items.find((item) => item.id === library.activeSkillId)?.markdown;
+    if (!activeModel) return this._settings.liveSession.skillMarkdown;
+
+    // A selected Markdown file is a reply model, not another session brief.
+    // Keep the session goal available as context, but make conflicts explicit
+    // so the model's rules consistently win over a transient live objective.
+    return [
+      '# Live Goal (secondary context)',
+      'Use this only when it does not conflict with the Reply AI Model below.',
+      this._settings.liveSession.skillMarkdown,
+      '',
+      '# Reply AI Model (highest reply priority)',
+      'Apply this model before the Live Goal. If they conflict, follow this model. System safety and platform policies remain higher priority.',
+      activeModel,
+    ].join('\n');
   }
 
   private _applyActiveReplySkill(): void {
@@ -1135,7 +1227,7 @@ export class IdolRuntimeServer {
       const response = await fetch(`${this._qwenTtsEndpoint()}/api/health`, { signal: controller.signal });
       if (!response.ok) return false;
       const payload = await response.json().catch(() => ({})) as any;
-      return payload.ready === true && payload.provider === 'qwentts';
+      return payload.ready === true && payload.model_loaded === true && payload.provider === 'qwentts';
     } catch {
       return false;
     } finally {
@@ -1144,27 +1236,56 @@ export class IdolRuntimeServer {
   }
 
   private async _commandVersion(command: string, args: string[]): Promise<string> {
+    const cacheKey = `${command}\u0000${args.join('\u0000')}`;
+    const cached = this._commandVersionCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const existingProbe = this._commandVersionInFlight.get(cacheKey);
+    if (existingProbe) return existingProbe;
+
     const configuredPath = process.env[`${command.toUpperCase()}_PATH`];
     const candidates = [
       configuredPath,
-      command,
       ...(process.platform === 'darwin'
         ? [`/opt/homebrew/bin/${command}`, `/usr/local/bin/${command}`]
         : process.platform === 'win32'
           ? [path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'ffmpeg', 'bin', `${command}.exe`)]
           : [`/usr/bin/${command}`, `/usr/local/bin/${command}`]),
+      command,
     ].filter((candidate, index, values): candidate is string => Boolean(candidate) && values.indexOf(candidate) === index);
 
-    for (const candidate of candidates) {
-      const version = await new Promise<string | null>((resolve) => {
-        execFile(candidate, args, { timeout: 3_000 }, (error, stdout, stderr) => {
-          if (error) return resolve(null);
-          resolve(String(stdout || stderr || '').trim().split(/\r?\n/)[0] || 'Installed');
+    const probe = (async (): Promise<string> => {
+      let executableFound = false;
+      for (const candidate of candidates) {
+        if (path.isAbsolute(candidate)) {
+          try {
+            fs.accessSync(candidate, fs.constants.X_OK);
+            executableFound = true;
+          } catch {
+            continue;
+          }
+        }
+        const version = await new Promise<string | null>((resolve) => {
+          execFile(candidate, args, { timeout: 10_000, maxBuffer: 256 * 1024 }, (error, stdout, stderr) => {
+            if (error) return resolve(null);
+            resolve(String(stdout || stderr || '').trim().split(/\r?\n/)[0] || 'Installed');
+          });
         });
-      });
-      if (version) return version;
+        if (version) return version;
+      }
+      // Model startup can temporarily make a version subprocess exceed its
+      // timeout. An executable binary is still installed and usable by the
+      // longer-running media conversion path.
+      return executableFound ? 'Installed' : 'Not installed';
+    })();
+
+    this._commandVersionInFlight.set(cacheKey, probe);
+    try {
+      const value = await probe;
+      this._commandVersionCache.set(cacheKey, { value, expiresAt: Date.now() + 5 * 60_000 });
+      return value;
+    } finally {
+      this._commandVersionInFlight.delete(cacheKey);
     }
-    return 'Not installed';
   }
 
   private async _engineStatus(): Promise<{ updatedAt: number; engines: Array<Record<string, unknown>> }> {
@@ -1216,10 +1337,14 @@ export class IdolRuntimeServer {
           actions: ollama.reachable && ollama.installed ? ['stop'] : ['start'],
         },
         {
-          id: 'chatgpt-fallback', category: 'AI DIRECTOR', title: 'ChatGPT Fallback', model: process.env['TTM_MODEL'] || 'chat-latest',
-          state: this._settings.persona.llmApiKey ? 'CONFIGURED' : 'SETUP',
-          detail: this._settings.persona.llmApiKey ? 'TTM API credential configured · used only if Qwen fails' : 'Add a TTM API key in AI Director settings',
-          metrics: ['Cloud', 'Fallback'], actions: [],
+          id: 'gemini-director', category: 'AI DIRECTOR', title: 'Gemini Director', model: this._settings.persona.llmProvider === 'gemini'
+            ? this._settings.persona.llmModel
+            : (process.env['GEMINI_MODEL'] || 'gemini-2.5-pro'),
+          state: this._settings.persona.llmProvider === 'gemini' && this._settings.persona.geminiProject ? 'CONFIGURED' : 'SETUP',
+          detail: this._settings.persona.llmProvider === 'gemini' && this._settings.persona.geminiProject
+            ? 'Google account provider selected · Qwen remains available locally'
+            : 'Connect a Google account and add a Cloud project to use Gemini',
+          metrics: ['Google', 'Cloud'], actions: [],
         },
         {
           id: 'qwen-tts', category: 'VOICE', title: 'Qwen TTS Vietnamese', model: 'Qwen TTS 0.6B',
@@ -1232,7 +1357,12 @@ export class IdolRuntimeServer {
           id: 'live-avatar', category: 'LIPSYNC', title: 'Lipsync Engine', model: 'MuseTalk',
           state: stateFromWorker,
           detail: liveWorker['ready'] ? 'Lipsync ready' : (liveWorker['error'] || 'Lipsync inactive'),
-          metrics: ['15 model FPS', '30 output FPS', 'HD 720p', `${runtimeMemoryMb} MB runtime`],
+          metrics: [
+            `${this._settings.talkingEngine.modelFps} model FPS`,
+            '30 output FPS',
+            '1280 × 720',
+            `${runtimeMemoryMb} MB runtime`,
+          ],
           actions: liveWorker['ready'] ? ['restart', 'stop'] : ['start'],
         },
         {
@@ -1286,7 +1416,13 @@ export class IdolRuntimeServer {
     if (engineId === 'qwen-tts') {
       if (action === 'stop') {
         if (!this._qwenTtsProcess) throw new Error('Qwen TTS is external or already stopped');
+        this._qwenTtsState.state = 'STOPPING';
+        this._qwenTtsState.updatedAt = Date.now();
         this._qwenTtsProcess.kill('SIGTERM');
+        return;
+      }
+      if (action === 'restart') {
+        await this._restartQwenTtsWorker('operator restart');
         return;
       }
       await this._ensureQwenTtsReady();
@@ -1294,17 +1430,8 @@ export class IdolRuntimeServer {
     }
     if (engineId === 'live-avatar') {
       if (action === 'stop') await this._stopLiveTalkingWorker(true);
-      else if (action === 'restart') {
-        if (this._liveTalkingWorkerProcess) await this._stopLiveTalkingWorker(false);
-        await new Promise<void>((resolve) => {
-          if (process.platform === 'win32') return resolve();
-          execFile('/usr/bin/pkill', ['-KILL', '-f', 'app.py --transport webrtc'], () => resolve());
-        });
-        for (let attempt = 0; attempt < 30 && this._liveTalkingWorkerProcess; attempt += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-        await this._startLiveTalkingWorker();
-      } else await this._startLiveTalkingWorker();
+      else if (action === 'restart') await this._restartLiveTalkingWorker('operator restart');
+      else await this._startLiveTalkingWorker();
       return;
     }
     if (engineId === 'obs-bridge') {
@@ -1380,24 +1507,28 @@ export class IdolRuntimeServer {
     });
     child.once('exit', (code, signal) => {
       if (this._qwenTtsProcess !== child) return;
+      const intentionallyStopped = this._qwenTtsState.state === 'STOPPING' || !this._isRunning;
       this._qwenTtsProcess = null;
       this._qwenTtsState.pid = null;
       this._qwenTtsState.owned = false;
-      if (this._qwenTtsState.state !== 'READY') {
+      if (!intentionallyStopped) {
         this._qwenTtsState.state = 'ERROR';
-        this._qwenTtsState.error = this._qwenTtsState.error
-          || `Qwen TTS exited (${signal || `code ${code ?? 'unknown'}`})`;
+        this._qwenTtsState.error = `Qwen TTS exited (${signal || `code ${code ?? 'unknown'}`})`;
       } else {
         this._qwenTtsState.state = 'OFFLINE';
         this._qwenTtsState.error = '';
       }
       this._qwenTtsState.updatedAt = Date.now();
+      if (this._isRunning && this._settings.talkingEngine.alwaysOn && this._qwenTtsState.state === 'ERROR') {
+        this._scheduleQwenTtsRestart();
+      }
     });
 
     for (let attempt = 0; attempt < 120; attempt += 1) {
       if (await this._qwenTtsHealth(1_000)) {
         this._qwenTtsState.state = 'READY';
         this._qwenTtsState.error = '';
+        this._qwenTtsRestartAttempt = 0;
         this._qwenTtsState.updatedAt = Date.now();
         this._addLog('info', `Qwen TTS ready at ${this._qwenTtsEndpoint()}`);
         return;
@@ -1424,6 +1555,61 @@ export class IdolRuntimeServer {
     } finally {
       if (this._qwenTtsStartPromise === operation) this._qwenTtsStartPromise = null;
     }
+  }
+
+  private async _autoStartQwenTtsWorker(): Promise<void> {
+    if (!this._settings.talkingEngine.alwaysOn
+      || process.env['NODE_ENV'] === 'test'
+      || process.env['QWEN_TTS_AUTOSTART'] === 'false') return;
+    try {
+      const endpoint = new URL(this._qwenTtsEndpoint());
+      if (!isLoopbackHost(endpoint.hostname)) return;
+    } catch {
+      return;
+    }
+    await this._ensureQwenTtsReady().catch((error) => {
+      this._qwenTtsState.state = 'ERROR';
+      this._qwenTtsState.error = error instanceof Error ? error.message : String(error);
+      this._qwenTtsState.updatedAt = Date.now();
+      this._addLog('error', `Qwen TTS autostart failed: ${this._qwenTtsState.error}`);
+      this._scheduleQwenTtsRestart();
+    });
+  }
+
+  private _scheduleQwenTtsRestart(): void {
+    if (!this._isRunning || !this._settings.talkingEngine.alwaysOn || this._qwenTtsProcess || this._qwenTtsRestartTimer) return;
+    const delay = Math.min(30_000, 1_000 * (2 ** Math.min(this._qwenTtsRestartAttempt, 5)));
+    this._qwenTtsRestartAttempt += 1;
+    this._qwenTtsRestartTimer = setTimeout(() => {
+      this._qwenTtsRestartTimer = null;
+      void this._ensureQwenTtsReady().catch((error) => {
+        this._addLog('error', `Qwen TTS restart failed: ${error instanceof Error ? error.message : String(error)}`);
+        this._scheduleQwenTtsRestart();
+      });
+    }, delay);
+    this._addLog('warn', `Qwen TTS crashed; retrying in ${Math.round(delay / 1000)}s`);
+  }
+
+  private async _restartQwenTtsWorker(reason: string): Promise<void> {
+    const child = this._qwenTtsProcess;
+    if (!child) {
+      await this._ensureQwenTtsReady();
+      return;
+    }
+    this._addLog('warn', `Restarting Qwen TTS (${reason})`);
+    this._qwenTtsState.state = 'STOPPING';
+    this._qwenTtsState.updatedAt = Date.now();
+    child.kill('SIGKILL');
+    for (let attempt = 0; attempt < 30 && this._qwenTtsProcess === child; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (this._qwenTtsProcess === child) {
+      this._qwenTtsProcess = null;
+      this._qwenTtsState = {
+        state: 'OFFLINE', owned: false, pid: null, error: '', output: [], updatedAt: Date.now(),
+      };
+    }
+    await this._ensureQwenTtsReady();
   }
 
   private async _qwenTtsJson(pathname: string, init: RequestInit = {}): Promise<any> {
@@ -1526,6 +1712,8 @@ export class IdolRuntimeServer {
       error: this._liveTalkingWorker.error || null,
       endpoint: this._settings.talkingEngine.endpoint,
       model: this._settings.talkingEngine.model,
+      modelFps: this._settings.talkingEngine.modelFps,
+      outputFps: 30,
       videoQuality: this._settings.talkingEngine.videoQuality,
       alwaysOn: this._settings.talkingEngine.alwaysOn,
       trainingWorkers: Math.max(1, Math.min(4, parseInt(process.env['LIVETALKING_TRAIN_WORKERS'] || '1', 10) || 1)),
@@ -1542,6 +1730,14 @@ export class IdolRuntimeServer {
         this._liveTalkingWorker.state = 'READY';
         this._liveTalkingWorker.error = '';
         this._liveTalkingWorker.updatedAt = Date.now();
+        const savedMaskMode = MuseTalkMaskModeSchema.safeParse(
+          this._db.getSetting<string>('museTalkMaskMode') || 'adaptive',
+        );
+        if (savedMaskMode.success) {
+          await this._liveTalkingProvider.setMuseTalkMaskMode(savedMaskMode.data).catch((error) => {
+            this._addLog('warn', `Could not restore MuseTalk mask mode: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
         this._addLog('info', `LiveTalking worker ready at ${this._settings.talkingEngine.endpoint}`);
         this._broadcast({ type: 'LIVETALKING_WORKER_STATE', worker: await this._liveTalkingWorkerStatus() });
         return;
@@ -1626,12 +1822,16 @@ export class IdolRuntimeServer {
     ].map((entry) => path.resolve(entry)))].join(',');
     const workerProcess = spawn(workerCommand, workerArgs, {
       cwd: repositoryRoot,
+      // Keep the launcher and Python worker in their own process group. If the
+      // launcher is killed abruptly, the runtime can remove the orphaned
+      // Python process before starting a replacement on the same port.
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
         LIVETALKING_HOST: endpointUrl.hostname === 'localhost' ? '127.0.0.1' : endpointUrl.hostname,
         LIVETALKING_PORT: endpointUrl.port || (endpointUrl.protocol === 'https:' ? '443' : '80'),
         LIVETALKING_MODEL: workerModel,
-        LIVETALKING_FPS: '15',
+        LIVETALKING_FPS: String(this._settings.talkingEngine.modelFps),
         LIVETALKING_OUTPUT_FPS: '30',
         LIVETALKING_VIDEO_QUALITY: this._settings.talkingEngine.videoQuality,
         LIVETALKING_PREPROCESS_QUALITY: 'hd',
@@ -1666,6 +1866,13 @@ export class IdolRuntimeServer {
       if (this._liveTalkingWorkerProcess !== workerProcess) return;
       this._invalidateLiveTalkingMediaSession('WORKER_EXITED');
       const stoppedByRuntime = this._liveTalkingWorker.state === 'STOPPING';
+      if (!stoppedByRuntime && process.platform !== 'win32' && workerProcess.pid) {
+        try {
+          process.kill(-workerProcess.pid, 'SIGKILL');
+        } catch {
+          // The process group is already gone when the Python child exited first.
+        }
+      }
       this._liveTalkingWorkerProcess = null;
       this._liveTalkingWorker.pid = null;
       this._liveTalkingWorker.owned = false;
@@ -1725,7 +1932,7 @@ export class IdolRuntimeServer {
     }, 1000);
   }
 
-  private _autoStartLiveTalkingWorker(): void {
+  private async _autoStartLiveTalkingWorker(): Promise<void> {
     if (!this._settings.talkingEngine.alwaysOn
       || process.env['NODE_ENV'] === 'test'
       || process.env['LIVETALKING_AUTOSTART'] === 'false') return;
@@ -1735,10 +1942,99 @@ export class IdolRuntimeServer {
     } catch {
       return;
     }
-    void this._startLiveTalkingWorker().catch((error) => {
+    await this._startLiveTalkingWorker().catch((error) => {
       this._addLog('error', `LiveTalking autostart failed: ${error instanceof Error ? error.message : String(error)}`);
       this._scheduleLiveTalkingWorkerRestart();
     });
+  }
+
+  private _autoStartRealtimeWorkers(): void {
+    // Load the smaller voice model first. Starting both ML runtimes at the same
+    // instant creates a large temporary memory and disk-I/O spike on macOS.
+    void (async () => {
+      await this._autoStartQwenTtsWorker();
+      await this._autoStartLiveTalkingWorker();
+    })();
+  }
+
+  private async _restartLiveTalkingWorker(reason: string, force = false): Promise<void> {
+    if (!force) {
+      const activeTasks = await this._activeLiveTalkingTrainingTasks();
+      if (activeTasks.length > 0) throw new Error('Cannot restart the Live Avatar worker while avatar training is active');
+    }
+    const workerProcess = this._liveTalkingWorkerProcess;
+    this._addLog('warn', `Restarting LiveTalking worker (${reason})`);
+    this._invalidateLiveTalkingMediaSession('WORKER_RESTARTING');
+    if (workerProcess) {
+      this._liveTalkingWorker.state = 'STOPPING';
+      this._liveTalkingWorker.updatedAt = Date.now();
+      await this._liveTalkingProvider.closeSession().catch(() => {});
+      await new Promise<void>((resolve) => {
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(forceTimer);
+          resolve();
+        };
+        const forceTimer = setTimeout(() => {
+          try {
+            if (process.platform !== 'win32' && workerProcess.pid) process.kill(-workerProcess.pid, 'SIGKILL');
+            else workerProcess.kill('SIGKILL');
+          } catch {}
+          finish();
+        }, 10_000);
+        workerProcess.once('exit', finish);
+        if (!workerProcess.kill('SIGTERM')) finish();
+      });
+      if (this._liveTalkingWorkerProcess === workerProcess) {
+        this._liveTalkingWorkerProcess = null;
+        this._liveTalkingWorker.pid = null;
+        this._liveTalkingWorker.owned = false;
+        this._liveTalkingWorker.state = 'OFFLINE';
+      }
+    }
+    await this._startLiveTalkingWorker();
+  }
+
+  private _startWorkerWatchdog(): void {
+    if (this._workerWatchdogTimer || process.env['NODE_ENV'] === 'test') return;
+    this._workerWatchdogTimer = setInterval(() => void this._runWorkerWatchdog(), 5_000);
+  }
+
+  private async _runWorkerWatchdog(): Promise<void> {
+    if (this._workerWatchdogRunning || !this._isRunning || !this._settings.talkingEngine.alwaysOn) return;
+    this._workerWatchdogRunning = true;
+    try {
+      const qwenReady = await this._qwenTtsHealth();
+      this._qwenTtsHealthFailures = qwenReady ? 0 : this._qwenTtsHealthFailures + 1;
+      if (!qwenReady
+        && this._qwenTtsHealthFailures >= 3
+        && !['STARTING', 'STOPPING'].includes(this._qwenTtsState.state)) {
+        this._qwenTtsHealthFailures = 0;
+        await this._restartQwenTtsWorker('health watchdog');
+      }
+
+      const previousLiveState = this._liveTalkingWorker.state;
+      const liveStatus = await this._liveTalkingWorkerStatus();
+      if (liveStatus['ready']) {
+        this._liveTalkingHealthFailures = 0;
+      } else {
+        const startupAgeMs = Date.now() - (this._liveTalkingWorker.startedAt || Date.now());
+        const stillStarting = previousLiveState === 'STARTING'
+          && this._liveTalkingHealthFailures === 0
+          && startupAgeMs < 180_000;
+        if (!stillStarting && previousLiveState !== 'STOPPING') this._liveTalkingHealthFailures += 1;
+      }
+      if (this._liveTalkingHealthFailures >= 3) {
+        this._liveTalkingHealthFailures = 0;
+        await this._restartLiveTalkingWorker('health watchdog', true);
+      }
+    } catch (error) {
+      this._addLog('error', `Realtime worker watchdog failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this._workerWatchdogRunning = false;
+    }
   }
 
   private _scheduleLiveTalkingMaintenance(): void {
@@ -2036,6 +2332,9 @@ export class IdolRuntimeServer {
     if (typeof this._settings.talkingEngine.alwaysOn !== 'boolean') {
       this._settings.talkingEngine.alwaysOn = true;
     }
+    if (![15, 25].includes(this._settings.talkingEngine.modelFps)) {
+      this._settings.talkingEngine.modelFps = 15;
+    }
     this._settings.talkingEngine.videoQuality = 'hd';
     if (obs) this._settings.obs = { ...this._settings.obs, ...obs, password: this._settings.obs.password } as typeof this._settings.obs;
     if (platformReply) this._settings.platformReply = PlatformReplySettingsSchema.parse({ ...this._settings.platformReply, ...platformReply });
@@ -2048,6 +2347,15 @@ export class IdolRuntimeServer {
       const { llmApiKey: _secret, ...persistedPersona } = this._settings.persona;
       this._db.setSetting('persona', persistedPersona);
       this._db.setSetting('directorDefaultsVersion', 3);
+    }
+
+    const directorProviderMigration = Number(this._db.getSetting<number>('directorProviderMigrationVersion') || 0);
+    if (directorProviderMigration < 1 && this._settings.persona.llmProvider === 'ttm-chatgpt') {
+      this._settings.persona.llmProvider = 'ollama';
+      this._settings.persona.llmModel = 'qwen3:8b';
+      const { llmApiKey: _secret, ...persistedPersona } = this._settings.persona;
+      this._db.setSetting('persona', persistedPersona);
+      this._db.setSetting('directorProviderMigrationVersion', 1);
     }
 
     const voiceDefaultsVersion = Number(this._db.getSetting<number>('voiceDefaultsVersion') || 0);
@@ -2122,7 +2430,7 @@ export class IdolRuntimeServer {
     return this._talkingPipeline;
   }
 
-  get museTalkBatchPipeline(): MuseTalkBatchPipeline {
+  get museTalkBatchPipeline(): InstanceType<typeof MuseTalkBatchPipeline> {
     return this._museTalkBatchPipeline;
   }
 
@@ -2187,7 +2495,8 @@ export class IdolRuntimeServer {
         this._httpServer.off('error', onError);
         this._addLog('info', `Idol Runtime Server listening at http://${this._config.host}:${this._config.port}`);
         this._startMainLoop();
-        this._autoStartLiveTalkingWorker();
+        this._autoStartRealtimeWorkers();
+        this._startWorkerWatchdog();
         this._scheduleLiveTalkingMaintenance();
         this._platformChat.start();
         if (this._config.enableSimulation) {
@@ -2206,10 +2515,14 @@ export class IdolRuntimeServer {
   async stop(): Promise<void> {
     this._isRunning = false;
     this._directorGenerationRun += 1;
-    this._directorSpeechQueue.length = 0;
+    for (const queued of this._directorSpeechQueue.splice(0)) {
+      queued.resolve({ success: false, started: false, retryable: false, error: 'Runtime stopped' });
+    }
     if (this._chatBatchTimer) clearTimeout(this._chatBatchTimer);
     this._chatBatchTimer = null;
     this._chatBatchBuffer.length = 0;
+    this._chatLastReplyAt.clear();
+    this._chatReplyGenerationRunning = false;
     if (this._liveTalkingWorkerRestartTimer) {
       clearTimeout(this._liveTalkingWorkerRestartTimer);
       this._liveTalkingWorkerRestartTimer = null;
@@ -2220,6 +2533,9 @@ export class IdolRuntimeServer {
     }
     if (this._tickTimer) clearInterval(this._tickTimer);
     if (this._simTimer) clearInterval(this._simTimer);
+    if (this._workerWatchdogTimer) clearInterval(this._workerWatchdogTimer);
+    this._workerWatchdogTimer = null;
+    this._workerWatchdogRunning = false;
     this._platformChat.stop();
 
     await this._interruptSpeech();
@@ -2231,6 +2547,8 @@ export class IdolRuntimeServer {
     if (qwenTtsProcess && !qwenTtsProcess.killed) qwenTtsProcess.kill('SIGTERM');
     this._qwenTtsProcess = null;
     this._qwenTtsStartPromise = null;
+    if (this._qwenTtsRestartTimer) clearTimeout(this._qwenTtsRestartTimer);
+    this._qwenTtsRestartTimer = null;
     const liveTalkingWorker = this._liveTalkingWorkerProcess;
     if (liveTalkingWorker && !liveTalkingWorker.killed) {
       this._liveTalkingWorker.state = 'STOPPING';
@@ -2391,8 +2709,28 @@ export class IdolRuntimeServer {
   // ─────────────────────────────────────────────────────────
 
   private _queueChatForReply(message: ChatMessage): void {
+    const userKey = chatReplyUserKey(message);
+    const lastReplyAt = this._chatLastReplyAt.get(userKey) || 0;
+    const now = Date.now();
+    const remainingMs = this._chatReplyCooldownMs - (now - lastReplyAt);
+    if (isChatReplyOnCooldown(lastReplyAt, now)) {
+      this._addLog('debug', `Skipped ${message.platform} comment from ${message.viewerName}: reply cooldown ${Math.ceil(remainingMs / 1000)}s`);
+      return;
+    }
+
+    const fingerprint = message.message.replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+    const isPendingDuplicate = this._chatBatchBuffer.some((pending) => (
+      chatReplyUserKey(pending) === userKey
+      && pending.message.replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN') === fingerprint
+    ));
+    if (isPendingDuplicate) {
+      this._addLog('debug', `Collapsed duplicate comment from ${message.viewerName}`);
+      return;
+    }
+
     this._chatBatchBuffer.push(message);
-    if (this._chatBatchBuffer.length >= this._chatBatchMaxMessages) {
+    const pendingForUser = this._chatBatchBuffer.filter((pending) => chatReplyUserKey(pending) === userKey).length;
+    if (pendingForUser >= this._chatAggregateMaxMessages) {
       this._flushChatBatch();
       return;
     }
@@ -2411,20 +2749,36 @@ export class IdolRuntimeServer {
     if (!this._chatBatchBuffer.length) return;
     // Never interrupt the current short reply. New messages remain buffered until
     // the current audio/video command returns to IDLE.
-    if (this._speechRuntime.state !== 'IDLE' || this._directorSpeechDrainRunning || this._director.state.isSpeaking) {
+    if (this._speechRuntime.state !== 'IDLE' || this._directorSpeechDrainRunning || this._director.state.isSpeaking || this._chatReplyGenerationRunning) {
       this._scheduleChatBatchFlush(750);
       return;
     }
 
-    const messages = this._chatBatchBuffer.splice(0, this._chatBatchMaxMessages);
-    this._pendingPlatformReplyTargets = [...new Set(messages
-      .map((message) => message.platform)
-      .filter((platform): platform is 'youtube' | 'facebook' => platform === 'youtube' || platform === 'facebook'))];
+    const firstMessage = this._chatBatchBuffer[0]!;
+    const userKey = chatReplyUserKey(firstMessage);
+    const messages = this._chatBatchBuffer.filter((message) => chatReplyUserKey(message) === userKey);
+    this._chatBatchBuffer = this._chatBatchBuffer.filter((message) => chatReplyUserKey(message) !== userKey);
+    const aggregatedComments = aggregateUserChatMessages(messages, this._chatAggregateMaxMessages);
+    if (!aggregatedComments.length) {
+      if (this._chatBatchBuffer.length) this._scheduleChatBatchFlush(250);
+      return;
+    }
+
+    for (const [key, repliedAt] of this._chatLastReplyAt) {
+      if (Date.now() - repliedAt > this._chatReplyCooldownMs * 2) this._chatLastReplyAt.delete(key);
+    }
+    const retryKey = `${userKey}:${messages
+      .map((message) => `${message.timestamp}:${message.message.replace(/\s+/g, ' ').trim()}`)
+      .join('|')}`;
+    const platformReplyTargets = firstMessage.platform === 'youtube' || firstMessage.platform === 'facebook'
+      ? [firstMessage.platform]
+      : [];
     const highestPriority = Math.max(...messages.map((message) => message.priorityScore || (message.isSuperChat ? 100 : 40)));
     const emotion = messages.some((message) => message.isSuperChat) ? 'excited' : 'playful';
-    const speechText = messages
-      .map((message) => `${message.platform === 'facebook' ? '[FB]' : message.platform === 'youtube' ? '[YT]' : '[TEST]'} ${message.viewerName}: ${message.message}`)
-      .join('\n');
+    const platformLabel = firstMessage.platform === 'facebook' ? '[FB]' : firstMessage.platform === 'youtube' ? '[YT]' : '[TEST]';
+    const speechText = `${platformLabel} ${firstMessage.viewerName} — Tổng hợp ${aggregatedComments.length} bình luận: ${aggregatedComments
+      .map((comment, index) => `${index + 1}. ${comment}`)
+      .join(' | ')}`;
     const intent: DirectorIntent = {
       type: 'director.intent',
       action: 'SPEAK',
@@ -2436,19 +2790,53 @@ export class IdolRuntimeServer {
       timestamp: Date.now(),
       maxSpeechSeconds: 12,
     };
-    void this._handleDirectorIntent(intent);
-    if (this._chatBatchBuffer.length) this._scheduleChatBatchFlush(250);
+    this._chatReplyGenerationRunning = true;
+    const chatContext: ChatReplyContext = { userKey, messages, retryKey, platformReplyTargets };
+    void this._handleDirectorIntent(intent, chatContext).then((succeeded) => {
+      if (succeeded) {
+        this._chatReplyRetryAttempts.delete(retryKey);
+        this._chatLastReplyAt.set(userKey, Date.now());
+        return;
+      }
+
+      const attempt = (this._chatReplyRetryAttempts.get(retryKey) || 0) + 1;
+      if (attempt >= 3 || !this._isRunning) {
+        this._chatReplyRetryAttempts.delete(retryKey);
+        this._addLog('error', `Chat reply dropped after ${attempt} failed attempts for ${firstMessage.viewerName}`);
+        return;
+      }
+      this._chatReplyRetryAttempts.set(retryKey, attempt);
+      const existingFingerprints = new Set(this._chatBatchBuffer.map((message) => (
+        `${chatReplyUserKey(message)}:${message.timestamp}:${message.message.replace(/\s+/g, ' ').trim()}`
+      )));
+      const requeued = messages.filter((message) => !existingFingerprints.has(
+        `${chatReplyUserKey(message)}:${message.timestamp}:${message.message.replace(/\s+/g, ' ').trim()}`,
+      ));
+      this._chatBatchBuffer.unshift(...requeued);
+      this._addLog('warn', `Retrying chat reply ${attempt}/2 for ${firstMessage.viewerName}`);
+      this._scheduleChatBatchFlush(Math.min(4_000, 500 * (2 ** attempt)));
+    }).finally(() => {
+      this._chatReplyGenerationRunning = false;
+      if (this._chatBatchBuffer.length && !this._chatBatchTimer) this._scheduleChatBatchFlush(250);
+    });
   }
 
-  private async _handleDirectorIntent(intent: DirectorIntent): Promise<void> {
+  private async _handleDirectorIntent(intent: DirectorIntent, chatContext?: ChatReplyContext): Promise<boolean> {
     this._addLog('info', `Intent generated: [${intent.action}] ${intent.intent || ''}`);
 
     if (intent.action === 'SPEAK' || intent.action === 'REACT' || intent.action === 'TRIGGER_GOAL') {
       const generationRun = ++this._directorGenerationRun;
+      // Treat dialogue and TTS preparation as part of the speaking lifecycle.
+      // Otherwise the idle goal scheduler can start another intent while the
+      // current reply is still generating and invalidate it before playback.
+      this._director.setSpeaking(true);
       try {
         // 1. Generate Natural Dialogue text via Dialogue Agent
-        const dialogue = await this._dialogueAgent.generateDialogue(intent);
-        if (!this._isRunning || generationRun !== this._directorGenerationRun) return;
+        const dialogue = await this._dialogueAgent.generateDialogue(intent) as typeof this._dialogueAgent extends { generateDialogue: (...args: any[]) => Promise<infer T> } ? T & {
+          replyText: string;
+          speechText: string;
+        } : never;
+        if (!this._isRunning || generationRun !== this._directorGenerationRun) return false;
         if (!dialogue.text.trim()) {
           throw new Error('AI Director returned an empty reply; no TTS command was created');
         }
@@ -2459,53 +2847,60 @@ export class IdolRuntimeServer {
           voiceProvider: this._settings.voice.provider,
         };
         this._broadcast({ type: 'DIRECTOR_INTENT', intent: enrichedIntent, timestamp: Date.now() });
-        this._addLog('info', `[Dialogue:${dialogue.provider}][Voice:${this._settings.voice.provider}] ${this._settings.persona.name} says: "${dialogue.text}" (duration ~${dialogue.estimatedDurationMs}ms)`);
-        await this._obsController.setSubtitles(dialogue.text);
-        if (intent.intent === 'reply_to_chat_batch') {
-          const targets = this._pendingPlatformReplyTargets.splice(0);
-          const enabledTargets = targets.filter((platform) => this._settings.platformReply[platform]);
-          const results = await Promise.allSettled(enabledTargets.map((platform) => this._platformChat.sendReply(platform, dialogue.text)));
-          results.forEach((result, index) => {
-            if (result.status === 'rejected') this._addLog('warn', `Platform AI reply failed: ${String(result.reason)}`);
-            else this._addLog('info', `AI reply sent to ${enabledTargets[index] || 'platform chat'}`);
-          });
-        }
-
+        this._addLog('info', `[Dialogue:${dialogue.provider}][Voice:${this._settings.voice.provider}] reply="${dialogue.replyText}" speech="${dialogue.speechText}" (duration ~${dialogue.estimatedDurationMs}ms)`);
         // 2. One production path: server TTS -> LiveTalking -> WebRTC A/V.
-        this._enqueueDirectorSpeechCommand(SpeechCommandSchema.parse({
+        const speechResult = await this._enqueueDirectorSpeechCommand(SpeechCommandSchema.parse({
           commandId: `director_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-          text: dialogue.text,
+          text: dialogue.speechText,
           emotion: dialogue.emotion,
           speed: 1,
           ...(intent.intent === 'reply_to_chat_batch'
             ? { durationMs: Math.min(12_000, dialogue.estimatedDurationMs) }
             : {}),
         }), dialogue.provider);
+        if (!speechResult.success) {
+          throw new Error(speechResult.error || 'Speech playback failed');
+        }
+
+        if (intent.intent === 'reply_to_chat_batch' && chatContext) {
+          const enabledTargets = chatContext.platformReplyTargets.filter((platform) => this._settings.platformReply[platform]);
+          const results = await Promise.allSettled(enabledTargets.map((platform) => this._platformChat.sendReply(platform, dialogue.replyText)));
+          results.forEach((result, index) => {
+            if (result.status === 'rejected') this._addLog('warn', `Platform AI reply failed: ${String(result.reason)}`);
+            else this._addLog('info', `AI reply sent to ${enabledTargets[index] || 'platform chat'}`);
+          });
+        }
+        return true;
       } catch (err) {
         this._addLog('warn', `Failed to generate or play voice: ${err}`);
-      this._director.setSpeaking(false);
+        if (generationRun === this._directorGenerationRun) this._director.setSpeaking(false);
+        return false;
       }
-      return;
     }
 
     this._broadcast({ type: 'DIRECTOR_INTENT', intent, timestamp: Date.now() });
+    return true;
   }
 
   private _enqueueDirectorSpeechCommand(
     command: z.infer<typeof SpeechCommandSchema>,
     dialogueProvider: string,
-  ): void {
-    this._enqueueSpeechCommand(command, 'director', dialogueProvider);
+  ): Promise<SpeechExecutionResult> {
+    return this._enqueueSpeechCommand(command, 'director', dialogueProvider);
   }
 
   private _enqueueSpeechCommand(
     command: z.infer<typeof SpeechCommandSchema>,
     source: 'operator' | 'director' = 'operator',
     dialogueProvider = source === 'operator' ? 'operator' : 'unknown',
-  ): void {
-    if (!this._isRunning) return;
-    this._directorSpeechQueue.push({ command, dialogueProvider, source });
-    void this._drainDirectorSpeechQueue();
+  ): Promise<SpeechExecutionResult> {
+    if (!this._isRunning) {
+      return Promise.resolve({ success: false, started: false, retryable: false, error: 'Runtime is not running' });
+    }
+    return new Promise((resolve) => {
+      this._directorSpeechQueue.push({ command, dialogueProvider, source, attempt: 0, resolve });
+      void this._drainDirectorSpeechQueue();
+    });
   }
 
   private async _drainDirectorSpeechQueue(): Promise<void> {
@@ -2515,7 +2910,15 @@ export class IdolRuntimeServer {
       while (this._directorSpeechQueue.length > 0) {
         const next = this._directorSpeechQueue.shift();
         if (!next) continue;
-        await this._executeSpeechCommand(next.command, next.source, next.dialogueProvider);
+        const result = await this._executeSpeechCommand(next.command, next.source, next.dialogueProvider);
+        if (!result.success && result.retryable && next.attempt < 1 && this._isRunning) {
+          next.attempt += 1;
+          this._addLog('warn', `Retrying speech ${next.command.commandId || 'command'} after recoverable failure`);
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          this._directorSpeechQueue.unshift(next);
+          continue;
+        }
+        next.resolve(result);
       }
     } finally {
       this._directorSpeechDrainRunning = false;
@@ -2574,15 +2977,15 @@ export class IdolRuntimeServer {
     reason: 'emotion' | 'manual' | 'delete-replacement' = 'emotion',
   ): Promise<{ sessionid: string; avatar_id: string; state: string; changed: boolean }> {
     const operation = this._avatarStateSwitch.then(async () => {
-      const sessionId = this._liveTalkingProvider.sessionId;
-      if (!sessionId) throw new Error('No active Live Avatar session is available for switching');
-      const result = await this._liveTalkingProvider.switchAvatarState(avatarId, state, sessionId);
       const session = this._db.getAvatarSession();
+      const sessionId = this._liveTalkingProvider.sessionId || this._liveTalkingMediaOwner?.sessionId || '';
+      const previousAvatarId = session?.activeAvatarId || this._liveTalkingMediaOwner?.avatarId || '';
+      const changed = previousAvatarId !== avatarId;
       const selectedAvatarIds = session?.selectedAvatarIds?.length
         ? session.selectedAvatarIds
         : [avatarId];
       this._db.setAvatarSession(avatarId, selectedAvatarIds, session?.excludedAvatarIds || []);
-      if (this._liveTalkingMediaOwner?.sessionId === sessionId) {
+      if (!changed && this._liveTalkingMediaOwner?.sessionId === sessionId) {
         this._liveTalkingMediaOwner.avatarId = avatarId;
         this._broadcastLiveTalkingMediaState();
       }
@@ -2594,7 +2997,17 @@ export class IdolRuntimeServer {
         selectedAvatarIds,
         timestamp: Date.now(),
       });
-      return result;
+
+      // Each trained Avatar owns a different set of landmarks, masks and frame
+      // indices. Keep the current peer connection when the chosen ID is stable;
+      // when it changes, rebuild media only after the new active ID is visible
+      // to the Dashboard so recovery cannot reconnect the previous dataset.
+      if (changed) {
+        if (sessionId) await this._liveTalkingProvider.closeSession(sessionId).catch(() => {});
+        this._liveTalkingProvider.setSession(null);
+        this._requestLiveTalkingMediaRecovery('AVATAR_DATASET_CHANGED');
+      }
+      return { sessionid: sessionId, avatar_id: avatarId, state, changed };
     });
     this._avatarStateSwitch = operation.catch(() => {});
     return operation;
@@ -2613,30 +3026,37 @@ export class IdolRuntimeServer {
     command: z.infer<typeof SpeechCommandSchema>,
     source: 'operator' | 'director' = 'operator',
     dialogueProvider = source === 'operator' ? 'operator' : 'unknown',
-  ): Promise<void> {
+  ): Promise<SpeechExecutionResult> {
     const runId = ++this._speechRun;
     const commandId = command.commandId || `speech_${crypto.randomBytes(8).toString('hex')}`;
-    this._director.setSpeaking(false);
+    // Keep autonomous goals and lower-priority replies from overlapping the
+    // generation/upload phase before LiveTalking reports SPEAKING.
+    this._director.setSpeaking(true);
     this._setSpeechRuntime({ commandId, state: 'GENERATING', text: command.text, provider: this._settings.voice.provider, dialogueProvider, durationMs: command.durationMs || null, error: null });
     this._addLog('info', `Speech ${commandId}: dialogue=${dialogueProvider}, voice=${this._settings.voice.provider}`);
     await this._liveTalkingProvider.interrupt().catch(() => {});
-    if (runId !== this._speechRun) return;
+    if (runId !== this._speechRun) {
+      return { success: false, started: false, retryable: false, error: 'Speech interrupted' };
+    }
     const selectedAvatarState = this._resolveAvatarState(command);
-    const avatarStateSwitch = selectedAvatarState && this._liveTalkingProvider.sessionId
+    const avatarStateSwitch = selectedAvatarState
       ? this._switchLiveAvatarState(
         selectedAvatarState.avatarId,
         selectedAvatarState.state,
         'emotion',
       ).catch((error) => {
-        this._addLog('warn', `Avatar state unavailable; keeping current state (${error instanceof Error ? error.message : String(error)})`);
+        this._addLog('warn', `Avatar selection unavailable; keeping the current live Avatar (${error instanceof Error ? error.message : String(error)})`);
         return null;
       })
       : Promise.resolve(null);
 
     try {
       let uploadedAudio: { bytes: Uint8Array; mediaType: string; sessionId: string } | null = null;
+      await avatarStateSwitch;
       await this._waitForReadyLiveTalkingMedia();
-      if (runId !== this._speechRun) return;
+      if (runId !== this._speechRun) {
+        return { success: false, started: false, retryable: false, error: 'Speech interrupted' };
+      }
       let playbackBoundaryReleased = false;
       const waitForPlaybackBoundary = async (): Promise<void> => {
         if (playbackBoundaryReleased) return;
@@ -2646,87 +3066,116 @@ export class IdolRuntimeServer {
       const uploadAudio = async (bytes: Uint8Array, mediaType: string): Promise<void> => {
         await avatarStateSwitch;
         await waitForPlaybackBoundary();
-        if (runId !== this._speechRun) return;
-        const sessionId = await this._liveTalkingProvider.sendAudio(bytes, null, mediaType);
+        if (runId !== this._speechRun) throw new Error('Speech interrupted');
+        const sessionId = await this._uploadLiveTalkingAudioWithRecovery(bytes, mediaType, runId);
         uploadedAudio = { bytes, mediaType, sessionId };
       };
-      {
-        const provider = this._settings.voice.provider;
+      const provider = this._settings.voice.provider;
+      let audio: { audioBase64: string; mediaType: string; durationMs: number };
+      try {
+        audio = await this._synthesizeProviderAudio({
+          commandId,
+          provider,
+          text: command.text,
+          emotion: command.emotion,
+          speed: command.speed,
+          voiceId: this._settings.voice.voiceId || 'nova',
+          modelId: provider === 'qwentts'
+            ? 'gwen-tts-0.6B-vi-8bit'
+            : 'omnivoice',
+        });
+      } catch (error) {
+        const primaryReason = error instanceof Error ? error.message : String(error);
+        if (provider !== 'qwentts') throw new Error(`${provider} TTS unavailable: ${primaryReason}`);
         try {
-          let audio = await this._synthesizeProviderAudio({
+          this._addLog('warn', `Qwen TTS unavailable; using OmniVoice fallback (${primaryReason})`);
+          audio = await this._synthesizeProviderAudio({
             commandId,
-            provider,
+            provider: 'omnivoice',
             text: command.text,
             emotion: command.emotion,
             speed: command.speed,
-            voiceId: this._settings.voice.voiceId || 'nova',
-            modelId: provider === 'qwentts'
-              ? 'gwen-tts-0.6B-vi-8bit'
-              : 'omnivoice',
+            voiceId: 'vi-female',
+            modelId: 'omnivoice',
           });
-          audio = await this._fitSpeechAudioDuration(audio, command.durationMs);
-          this._setSpeechRuntime({ durationMs: audio.durationMs });
-          if (runId !== this._speechRun) return;
-          const audioBytes = Uint8Array.from(Buffer.from(audio.audioBase64, 'base64'));
-          await uploadAudio(audioBytes, audio.mediaType);
-        } catch (error) {
-          const primaryReason = error instanceof Error ? error.message : String(error);
-          if (provider === 'qwentts') {
-            try {
-              this._addLog('warn', `Qwen TTS unavailable; using OmniVoice fallback (${primaryReason})`);
-              let fallbackAudio = await this._synthesizeProviderAudio({
-                commandId,
-                provider: 'omnivoice',
-                text: command.text,
-                emotion: command.emotion,
-                speed: command.speed,
-                voiceId: 'vi-female',
-                modelId: 'omnivoice',
-              });
-              fallbackAudio = await this._fitSpeechAudioDuration(fallbackAudio, command.durationMs);
-              this._setSpeechRuntime({
-                provider: 'omnivoice-fallback',
-                durationMs: fallbackAudio.durationMs,
-              });
-              const fallbackBytes = Uint8Array.from(Buffer.from(fallbackAudio.audioBase64, 'base64'));
-              await uploadAudio(fallbackBytes, fallbackAudio.mediaType);
-              await this._waitForLiveTalkingSpeech(runId, command, uploadedAudio);
-              return;
-            } catch (fallbackError) {
-              this._addLog('warn', `OmniVoice fallback unavailable (${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)})`);
-            }
-          }
-          this._addLog('warn', `${provider} unavailable; using operating-system TTS (${primaryReason})`);
-          this._setSpeechRuntime({ provider: 'system-tts-fallback' });
-          const systemAudio = await this._synthesizeSystemAudio(command.text, command.speed);
-          await uploadAudio(systemAudio.bytes, systemAudio.mediaType);
+          this._setSpeechRuntime({ provider: 'omnivoice-fallback' });
+        } catch (fallbackError) {
+          this._addLog('warn', `OmniVoice fallback unavailable (${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)})`);
+          throw new Error(`${provider} TTS unavailable: ${primaryReason}`);
         }
       }
 
+      audio = await this._fitSpeechAudioDuration(audio, command.durationMs);
+      this._setSpeechRuntime({ durationMs: audio.durationMs });
+      if (runId !== this._speechRun) {
+        return { success: false, started: false, retryable: false, error: 'Speech interrupted' };
+      }
+      const audioBytes = Uint8Array.from(Buffer.from(audio.audioBase64, 'base64'));
+      await uploadAudio(audioBytes, audio.mediaType);
+
       await this._waitForLiveTalkingSpeech(runId, command, uploadedAudio);
+      if (runId !== this._speechRun) {
+        return { success: false, started: true, retryable: false, error: 'Speech interrupted' };
+      }
+      return { success: true, started: true, retryable: false, error: null };
     } catch (error) {
-      if (runId !== this._speechRun) return;
+      if (runId !== this._speechRun) {
+        return { success: false, started: false, retryable: false, error: 'Speech interrupted' };
+      }
       const message = error instanceof Error ? error.message : String(error);
+      const playbackStarted = this._speechRuntime.state === 'SPEAKING';
       this._director.setSpeaking(false);
       await this._obsController.setSubtitles('');
       this._director.forceState('GAMEPLAY_IDLE', 'LiveTalking speech failed');
       this._setSpeechRuntime({ state: 'ERROR', error: message });
       this._addLog('error', `Speech ${commandId} failed: ${message}`);
+      return {
+        success: false,
+        started: playbackStarted,
+        retryable: !playbackStarted && this._isRetryableSpeechFailure(message),
+        error: message,
+      };
     }
+  }
+
+  private _isRetryableSpeechFailure(message: string): boolean {
+    return /(?:fetch failed|network|socket|econn|timed?\s*out|timeout|aborted|http\s+(?:429|5\d\d)|session\s+not\s+found|no active|media.*not ready|webrtc|live monitor recovery)/i.test(message);
+  }
+
+  private async _uploadLiveTalkingAudioWithRecovery(
+    bytes: Uint8Array,
+    mediaType: string,
+    runId: number,
+  ): Promise<string> {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (runId !== this._speechRun) throw new Error('Speech interrupted');
+      await this._waitForReadyLiveTalkingMedia();
+      const expectedSessionId = this._liveTalkingMediaOwner?.sessionId || this._liveTalkingProvider.sessionId;
+      try {
+        const uploadedSessionId = await this._liveTalkingProvider.sendAudio(bytes, expectedSessionId, mediaType);
+        const currentSessionId = this._liveTalkingMediaOwner?.sessionId || this._liveTalkingProvider.sessionId;
+        if (currentSessionId && uploadedSessionId !== currentSessionId) {
+          throw new Error(`LiveTalking session changed during audio upload (${uploadedSessionId} -> ${currentSessionId})`);
+        }
+        return uploadedSessionId;
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (!this._isRetryableSpeechFailure(message) || attempt >= 2) throw error;
+        this._addLog('warn', `Live avatar audio upload interrupted; recovering media and replaying cached audio (${message})`);
+        this._liveTalkingProvider.setSession(null);
+        this._requestLiveTalkingMediaRecovery('AUDIO_UPLOAD_FAILED');
+        await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, 500 * (2 ** attempt))));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('Live avatar audio upload failed');
   }
 
   private _resolveAvatarState(command: z.infer<typeof SpeechCommandSchema>): { avatarId: string; state: z.infer<typeof AvatarStateSchema> } | null {
     const emotionState: Record<string, z.infer<typeof AvatarStateSchema>> = {
-      neutral: 'normal',
-      happy: 'happy',
-      excited: 'excited',
-      surprised: 'surprised',
-      sad: 'sad',
-      angry: 'angry',
-      playful: 'playful',
-      focused: 'focused',
-      grateful: 'grateful',
-      laughing: 'laughing',
+      neutral: 'normal', happy: 'happy', excited: 'excited', surprised: 'surprised', sad: 'sad', angry: 'angry',
+      playful: 'playful', focused: 'focused', grateful: 'grateful', laughing: 'laughing',
     };
     const session = this._db.getAvatarSession();
     const selectedAvatarIds = [...new Set(
@@ -2735,8 +3184,7 @@ export class IdolRuntimeServer {
         : (session?.activeAvatarId ? [session.activeAvatarId] : []))
         .filter((id) => id && !session?.excludedAvatarIds?.includes(id)),
     )];
-    const sessionAvatarId = command.avatarId || session?.activeAvatarId || selectedAvatarIds[0] || '';
-    if (!sessionAvatarId && selectedAvatarIds.length === 0) return null;
+    if (!command.avatarId && selectedAvatarIds.length === 0) return null;
     const requestedState = emotionState[command.emotion] || 'normal';
     const recordsById = new Map<string, any>();
     for (const record of [...this._readProjectAvatarArtifacts(), ...this._db.listAvatars()]) {
@@ -2744,24 +3192,45 @@ export class IdolRuntimeServer {
       if (id) recordsById.set(id, record);
     }
     const records = this._normalizeAvatarRecords([...recordsById.values()]);
-    const selectedIdSet = new Set(command.avatarId ? [command.avatarId] : selectedAvatarIds);
-    const available = records.filter((record) => selectedIdSet.has(String(record.id || record.avatarId || '')));
-    const selected = available.find((record) => record.avatarState === requestedState)
-      || available.find((record) => record.avatarState === 'normal')
-      || available.find((record) => String(record.id || record.avatarId) === sessionAvatarId)
-      || available[0];
-    if (!selected) {
-      const fallbackId = command.avatarId || selectedAvatarIds[0] || sessionAvatarId;
-      return fallbackId ? { avatarId: fallbackId, state: requestedState } : null;
+    const recordById = new Map(records.map((record) => [String(record.id || record.avatarId || ''), record]));
+
+    if (command.avatarId) {
+      const explicit = recordById.get(command.avatarId);
+      return {
+        avatarId: command.avatarId,
+        state: AvatarStateSchema.parse(explicit?.avatarState || requestedState),
+      };
     }
+
+    const available = selectedAvatarIds.map((id) => recordById.get(id) || {
+      id,
+      avatarId: id,
+      avatarState: 'normal',
+    });
+    const emotionMatches = available.filter((record) => record.avatarState === requestedState);
+    const normalFallbacks = available.filter((record) => record.avatarState === 'normal');
+    const eligible = emotionMatches.length
+      ? emotionMatches
+      : (normalFallbacks.length ? normalFallbacks : available);
+    if (!eligible.length) return null;
+
+    const eligibleIds = eligible.map((record) => String(record.id || record.avatarId || '')).filter(Boolean);
+    const currentIndex = eligibleIds.indexOf(session?.activeAvatarId || '');
+    const selectedIndex = currentIndex >= 0
+      ? (currentIndex + 1) % eligibleIds.length
+      : this._avatarRotationCursor % eligibleIds.length;
+    const avatarId = eligibleIds[selectedIndex]!;
+    this._avatarRotationCursor = (selectedIndex + 1) % Math.max(1, eligibleIds.length);
+    const selected = recordById.get(avatarId);
     return {
-      avatarId: String(selected.id || selected.avatarId),
-      state: AvatarStateSchema.parse(selected.avatarState || 'normal'),
+      avatarId,
+      state: AvatarStateSchema.parse(selected?.avatarState || requestedState),
     };
   }
 
   private async _waitForSpeechPlaybackBoundary(commandId: string, runId: number): Promise<void> {
-    if (this._connectedClients.size === 0 || runId !== this._speechRun) return;
+    const owner = this._liveTalkingMediaOwner;
+    if (!owner || owner.ws.readyState !== WebSocket.OPEN || runId !== this._speechRun) return;
 
     await new Promise<void>((resolve) => {
       const finish = () => {
@@ -2773,9 +3242,9 @@ export class IdolRuntimeServer {
       const timer = setTimeout(() => {
         this._addLog('warn', `Speech ${commandId}: visual boundary timed out; continuing playback`);
         finish();
-      }, 8_000);
+      }, 1_500);
       this._speechPlaybackGates.set(commandId, { release: finish, timer });
-      this._broadcast({
+      this._sendLiveTalkingMediaSignal(owner.ws, {
         type: 'SPEECH_PLAYBACK_PENDING',
         commandId,
         targetState: 'TALKING',
@@ -2789,66 +3258,6 @@ export class IdolRuntimeServer {
     if (!gate) return false;
     gate.release();
     return true;
-  }
-
-  private async _synthesizeSystemAudio(
-    text: string,
-    speed = 1,
-  ): Promise<{ bytes: Uint8Array; mediaType: string }> {
-    if (process.env['NODE_ENV'] === 'test') {
-      const header = Buffer.alloc(44);
-      header.write('RIFF', 0);
-      header.writeUInt32LE(36, 4);
-      header.write('WAVEfmt ', 8);
-      header.writeUInt32LE(16, 16);
-      header.writeUInt16LE(1, 20);
-      header.writeUInt16LE(1, 22);
-      header.writeUInt32LE(16_000, 24);
-      header.writeUInt32LE(32_000, 28);
-      header.writeUInt16LE(2, 32);
-      header.writeUInt16LE(16, 34);
-      header.write('data', 36);
-      header.writeUInt32LE(0, 40);
-      return { bytes: Uint8Array.from(header), mediaType: 'audio/wav' };
-    }
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'idol-system-tts-'));
-    const outputPath = path.join(tempDir, process.platform === 'darwin' ? 'speech.aiff' : 'speech.wav');
-    const run = (command: string, args: string[]): Promise<void> => new Promise((resolve, reject) => {
-      execFile(command, args, { timeout: 30_000, maxBuffer: 1024 * 1024 }, (error) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
-
-    try {
-      if (process.platform === 'darwin') {
-        const rate = String(Math.max(120, Math.min(300, Math.round(185 * speed))));
-        await run('say', ['-v', process.env['MACOS_TTS_VOICE'] || 'Linh', '-r', rate, '-o', outputPath, text]);
-      } else if (process.platform === 'win32') {
-        const rate = Math.max(-5, Math.min(5, Math.round((speed - 1) * 5)));
-        const script = [
-          'Add-Type -AssemblyName System.Speech;',
-          '$voice = New-Object System.Speech.Synthesis.SpeechSynthesizer;',
-          `$voice.Rate = ${rate};`,
-          '$voice.SetOutputToWaveFile($args[1]);',
-          '$voice.Speak($args[0]);',
-          '$voice.Dispose();',
-        ].join(' ');
-        await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script, text, outputPath]);
-      } else {
-        const wordsPerMinute = String(Math.max(100, Math.min(320, Math.round(175 * speed))));
-        await run('espeak-ng', ['-v', 'vi', '-s', wordsPerMinute, '-w', outputPath, text]);
-      }
-
-      const bytes = fs.readFileSync(outputPath);
-      if (!bytes.length) throw new Error('System TTS returned empty audio');
-      return {
-        bytes: Uint8Array.from(bytes),
-        mediaType: process.platform === 'darwin' ? 'audio/aiff' : 'audio/wav',
-      };
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
   }
 
   private async _fitSpeechAudioDuration(
@@ -2916,10 +3325,8 @@ export class IdolRuntimeServer {
     const markFinished = async (): Promise<void> => {
       this._director.setSpeaking(false);
       await this._obsController.setSubtitles('');
-      this._director.forceState(
-        'GAMEPLAY_IDLE',
-        'LiveTalking speech completed',
-        idleClipBeforeTalking,
+      (this._director.forceState as unknown as (state: VisualState, reason: string, clip?: unknown) => void)(
+        'GAMEPLAY_IDLE', 'LiveTalking speech completed', idleClipBeforeTalking ?? undefined,
       );
       this._setSpeechRuntime({ state: 'IDLE' });
     };
@@ -3045,7 +3452,9 @@ export class IdolRuntimeServer {
     this._speechRun += 1;
     for (const gate of this._speechPlaybackGates.values()) gate.release();
     this._speechPlaybackGates.clear();
-    this._directorSpeechQueue.length = 0;
+    for (const queued of this._directorSpeechQueue.splice(0)) {
+      queued.resolve({ success: false, started: false, retryable: false, error: 'Speech interrupted by operator' });
+    }
     this._voiceService.interrupt('Operator interrupt');
     await this._liveTalkingProvider.interrupt().catch(() => {});
     this._director.setSpeaking(false);
@@ -3086,6 +3495,7 @@ export class IdolRuntimeServer {
     );
     return {
       ownerClientId: owner?.clientId || null,
+      connectionId: owner?.connectionId || null,
       sessionId: owner?.sessionId || null,
       avatarId: owner?.avatarId || null,
       connectionState: owner?.connectionState || 'CLOSED',
@@ -3115,7 +3525,7 @@ export class IdolRuntimeServer {
     this._liveTalkingMediaOwner = null;
     const candidate = [...this._liveTalkingMediaClients.entries()]
       .filter(([ws]) => ws.readyState === WebSocket.OPEN)
-      .sort((a, b) => b[1].priority - a[1].priority || a[1].registeredAt - b[1].registeredAt)[0];
+      .sort((a, b) => b[1].priority - a[1].priority || b[1].registeredAt - a[1].registeredAt)[0];
     if (!candidate) {
       this._liveTalkingProvider.setSession(null);
       this._broadcastLiveTalkingMediaState();
@@ -3125,7 +3535,9 @@ export class IdolRuntimeServer {
     this._liveTalkingMediaOwner = {
       ...registration,
       ws,
+      connectionId: null,
       sessionId: null,
+      acceptingMediaState: false,
       avatarId: '',
       connectionState: 'NEW',
       audioTrack: false,
@@ -3158,11 +3570,10 @@ export class IdolRuntimeServer {
     payload: Extract<z.infer<typeof LiveTalkingMediaSignalSchema>, { type: 'LIVETALKING_MEDIA_REGISTER' }>,
     ws: WebSocket,
   ): void {
-    const previous = this._liveTalkingMediaClients.get(ws);
     this._liveTalkingMediaClients.set(ws, {
       clientId: payload.clientId,
       priority: payload.priority,
-      registeredAt: previous?.registeredAt || Date.now(),
+      registeredAt: Date.now(),
     });
 
     const owner = this._liveTalkingMediaOwner;
@@ -3175,6 +3586,8 @@ export class IdolRuntimeServer {
           reason: 'SOCKET_REPLACED',
         });
         owner.sessionId = null;
+        owner.connectionId = null;
+        owner.acceptingMediaState = false;
         owner.avatarId = '';
         owner.connectionState = 'NEW';
         owner.audioTrack = false;
@@ -3202,6 +3615,24 @@ export class IdolRuntimeServer {
       this._promoteLiveTalkingMediaOwner();
       return;
     }
+    const registration = this._liveTalkingMediaClients.get(ws)!;
+    const shouldTakeForeground = payload.priority > owner.priority
+      || (payload.priority === owner.priority
+        && payload.priority >= 100
+        && registration.registeredAt > owner.registeredAt);
+    if (shouldTakeForeground) {
+      const staleSessionId = owner.sessionId;
+      this._sendLiveTalkingMediaSignal(owner.ws, {
+        type: 'LIVETALKING_MEDIA_REVOKED',
+        clientId: owner.clientId,
+        reason: 'FOREGROUND_CLIENT_CHANGED',
+      });
+      this._liveTalkingMediaOwner = null;
+      this._liveTalkingProvider.setSession(null);
+      if (staleSessionId) void this._liveTalkingProvider.closeSession(staleSessionId).catch(() => {});
+      this._promoteLiveTalkingMediaOwner();
+      return;
+    }
     this._sendLiveTalkingMediaSignal(ws, {
       type: 'LIVETALKING_MEDIA_STANDBY',
       clientId: payload.clientId,
@@ -3215,6 +3646,11 @@ export class IdolRuntimeServer {
   ): void {
     const owner = this._liveTalkingMediaOwner;
     if (!owner || owner.ws !== ws || owner.clientId !== payload.clientId) return;
+    // Media callbacks can arrive after a PeerConnection has been replaced.
+    // A connection generation prevents a late old callback from reviving the
+    // invalidated session or marking the new session as unhealthy.
+    if (owner.connectionId && payload.connectionId !== owner.connectionId) return;
+    if (!owner.acceptingMediaState && payload.sessionId) return;
     if (owner.sessionId && payload.sessionId && owner.sessionId !== payload.sessionId) {
       this._sendLiveTalkingMediaSignal(ws, {
         type: 'LIVETALKING_MEDIA_RESET_REQUIRED',
@@ -3226,7 +3662,8 @@ export class IdolRuntimeServer {
     const now = Date.now();
     if (payload.audioPackets > owner.audioPackets) owner.lastAudioProgressAt = now;
     if (payload.videoFrames > owner.videoFrames) owner.lastVideoProgressAt = now;
-    owner.sessionId = payload.sessionId || owner.sessionId;
+    owner.sessionId = payload.sessionId;
+    if (payload.connectionId) owner.connectionId = payload.connectionId;
     owner.connectionState = payload.connectionState;
     owner.audioTrack = payload.audioTrack;
     owner.videoTrack = payload.videoTrack;
@@ -3234,7 +3671,13 @@ export class IdolRuntimeServer {
     owner.audioPackets = payload.audioPackets;
     owner.videoFrames = payload.videoFrames;
     owner.lastHeartbeatAt = now;
-    this._broadcastLiveTalkingMediaState();
+    const publicState = this._publicLiveTalkingMediaState();
+    const connectionSettled = ['DISCONNECTED', 'FAILED', 'CLOSED'].includes(owner.connectionState);
+    // Older dashboards treated every intermediate CONNECTING snapshot as a
+    // failed session and immediately replaced the PeerConnection. Keep the
+    // negotiation private until the first decoded frame proves readiness, or
+    // until the connection reaches a terminal state that really needs repair.
+    if (publicState['ready'] || connectionSettled) this._broadcastLiveTalkingMediaState();
   }
 
   private _reconcileLiveTalkingMediaOwnership(now = Date.now()): void {
@@ -3243,9 +3686,7 @@ export class IdolRuntimeServer {
     const owner = this._liveTalkingMediaOwner;
     if (!owner) return;
 
-    const standbyAvailable = [...this._liveTalkingMediaClients.entries()]
-      .some(([ws]) => ws !== owner.ws && ws.readyState === WebSocket.OPEN);
-    if (now - owner.lastHeartbeatAt > 10_000 && standbyAvailable) {
+    if (now - owner.lastHeartbeatAt > 12_000) {
       const staleSessionId = owner.sessionId;
       this._sendLiveTalkingMediaSignal(owner.ws, {
         type: 'LIVETALKING_MEDIA_REVOKED',
@@ -3256,8 +3697,9 @@ export class IdolRuntimeServer {
       this._liveTalkingMediaOwner = null;
       this._liveTalkingProvider.setSession(null);
       if (staleSessionId) void this._liveTalkingProvider.closeSession(staleSessionId).catch(() => {});
-      this._addLog('warn', `Live Monitor ${owner.clientId} timed out; promoting standby`);
+      this._addLog('warn', `Live Monitor ${owner.clientId} timed out; requesting a healthy owner`);
       this._promoteLiveTalkingMediaOwner();
+      if (!this._liveTalkingMediaOwner) this._requestLiveTalkingMediaRecovery('HEARTBEAT_TIMEOUT');
       return;
     }
 
@@ -3291,6 +3733,7 @@ export class IdolRuntimeServer {
     const owner = this._liveTalkingMediaOwner;
     if (!owner) return;
     owner.sessionId = null;
+    owner.acceptingMediaState = false;
     owner.connectionState = 'DISCONNECTED';
     owner.audioTrack = false;
     owner.videoTrack = false;
@@ -3308,20 +3751,63 @@ export class IdolRuntimeServer {
     this._broadcastLiveTalkingMediaState();
   }
 
+  private _requestLiveTalkingMediaRecovery(reason: string): void {
+    if (!this._liveTalkingMediaOwner) this._promoteLiveTalkingMediaOwner();
+    if (this._liveTalkingMediaOwner) {
+      this._invalidateLiveTalkingMediaSession(reason);
+      return;
+    }
+    this._broadcast({
+      type: 'LIVETALKING_MEDIA_RECOVERY_REQUIRED',
+      reason,
+      media: this._publicLiveTalkingMediaState(),
+      timestamp: Date.now(),
+    });
+  }
+
   private _hasReadyLiveTalkingMedia(): boolean {
     return Boolean(this._publicLiveTalkingMediaState()['ready']);
   }
 
-  private async _waitForReadyLiveTalkingMedia(timeoutMs = 12_000): Promise<void> {
+  private async _waitForReadyLiveTalkingMedia(timeoutMs = 15_000): Promise<void> {
     if (process.env['NODE_ENV'] === 'test' && !this._liveTalkingMediaOwner) return;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (this._hasReadyLiveTalkingMedia()) return;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+    // A browser PeerConnection can take several seconds to tear down and
+    // recreate after a worker restart, a stale session, or an autoplay/media
+    // failure. Give the owner multiple recovery windows before failing the
+    // speech command. The reset signal below causes the dashboard to create a
+    // fresh connection generation; the extra windows prevent a transient gap
+    // from becoming a user-visible "media is not ready" error.
+    const worker = await this._liveTalkingWorkerStatus();
+    if (!worker['ready'] && this._settings.talkingEngine.alwaysOn) {
+      await this._startLiveTalkingWorker();
     }
-    const media = this._publicLiveTalkingMediaState();
-    if (!media['ownerClientId']) throw new Error('No active Live Monitor owns the avatar session');
-    throw new Error('Live Monitor WebRTC media is not ready; reconnecting the avatar is required');
+    if (!this._liveTalkingMediaOwner) this._requestLiveTalkingMediaRecovery('MEDIA_OWNER_REQUIRED');
+
+    const maxRecoveryAttempts = 4;
+    for (let recoveryAttempt = 0; recoveryAttempt <= maxRecoveryAttempts; recoveryAttempt += 1) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        // A reconnect can register the monitor socket just before this wait,
+        // while ownership promotion is still pending. Reconcile here so a
+        // speech request cannot fail solely because of that ordering race.
+        if (!this._liveTalkingMediaOwner) this._promoteLiveTalkingMediaOwner();
+        if (this._hasReadyLiveTalkingMedia()) {
+          if (!this._liveTalkingMediaOwner?.audioPlayable) {
+            this._addLog('warn', 'Live Monitor audio playback is blocked; continuing avatar video and OBS audio');
+          }
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      const media = this._publicLiveTalkingMediaState();
+      if (recoveryAttempt < maxRecoveryAttempts) {
+        this._requestLiveTalkingMediaRecovery(media['ownerClientId'] ? 'MEDIA_NOT_READY' : 'MEDIA_OWNER_REQUIRED');
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        continue;
+      }
+    }
+    throw new Error('Live Monitor recovery timed out; the runtime will keep the avatar workers online for the next retry');
   }
 
   // ─────────────────────────────────────────────────────────
@@ -3341,6 +3827,7 @@ export class IdolRuntimeServer {
       speech: this._speechRuntime,
       settings: this._publicSettings(),
       media: this._publicLiveTalkingMediaState(),
+      chatMessages: this._recentChatMessages.slice(-50),
       recentLogs: this._recentLogs.slice(-25),
       timestamp: Date.now(),
     }));
@@ -3642,8 +4129,6 @@ export class IdolRuntimeServer {
     const { apiKey: _secret, ...persistedVoice } = this._settings.voice;
     this._db.setSetting('voice', persistedVoice);
 
-    this._voiceService.setAdapter(new WebSpeechTTSAdapter());
-
     this._addLog('info', `Voice provider updated: ${this._settings.voice.provider}`);
     this._broadcast({ type: 'SETTINGS_UPDATED', settings: this._publicSettings() });
   }
@@ -3749,20 +4234,21 @@ export class IdolRuntimeServer {
   }
 
   private _configureDialogueProvider(): void {
-    const providers: Array<OllamaDialogueProvider | OpenAIDialogueProvider> = [
-      new OllamaDialogueProvider({
-        endpoint: process.env['OLLAMA_ENDPOINT'] || 'http://127.0.0.1:11434',
-        model: 'qwen3:8b',
-      }),
-    ];
-    if (this._settings.persona.llmApiKey) {
-      providers.push(new OpenAIDialogueProvider({
-        apiKey: this._settings.persona.llmApiKey,
-        baseUrl: this._ttmApiBaseUrl(),
-        model: process.env['TTM_MODEL'] || 'chat-latest',
-        providerName: 'ttm-chatgpt',
-      }));
-    }
+    const localFallback = new OllamaDialogueProvider({
+      endpoint: process.env['OLLAMA_ENDPOINT'] || 'http://127.0.0.1:11434',
+      model: 'qwen3:8b',
+    });
+    const providers = this._settings.persona.llmProvider === 'gemini'
+      ? [
+        new GeminiDialogueProvider({
+          accessToken: () => this._getGoogleAccessToken(),
+          projectId: this._settings.persona.geminiProject,
+          location: this._settings.persona.geminiLocation,
+          model: this._settings.persona.llmModel || process.env['GEMINI_MODEL'] || 'gemini-2.5-pro',
+        }),
+        localFallback,
+      ]
+      : [localFallback];
     this._dialogueAgent.setProviders(providers);
   }
 
@@ -3787,34 +4273,74 @@ export class IdolRuntimeServer {
       })));
       if (models.length) this._addLog('info', `Released ${models.length} local AI Director model${models.length === 1 ? '' : 's'} from memory`);
     } catch {
-      // Ollama is optional when TTM is active.
+      // Ollama is optional when Gemini is active.
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  private _ttmApiBaseUrl(): string {
-    return (process.env['TTM_API_BASE_URL'] || 'https://ttmapi.site/v1').replace(/\/+$/, '');
-  }
-
-  private async _fetchTtmModels(apiKey: string): Promise<string[]> {
-    if (!apiKey) throw new Error('TTM API key is required');
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15_000);
-    try {
-      const response = await fetch(`${this._ttmApiBaseUrl()}/models`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal: controller.signal,
+  private async _runGcloud(args: string[], timeout = 12_000): Promise<string> {
+    return new Promise((resolve, reject) => {
+      execFile(process.env['GCLOUD_BIN'] || 'gcloud', args, {
+        timeout,
+        maxBuffer: 256 * 1024,
+      }, (error, stdout, stderr) => {
+        if (error) {
+          const detail = String(stderr || error.message || '').trim();
+          reject(new Error(detail.includes('not found') || (error as NodeJS.ErrnoException).code === 'ENOENT'
+            ? 'Google Cloud CLI is not installed. Install gcloud, then connect your Google account.'
+            : detail || 'Google account authentication is unavailable.'));
+          return;
+        }
+        resolve(String(stdout || '').trim());
       });
-      const payload = await response.json().catch(() => ({})) as any;
-      if (!response.ok) throw new Error(payload.error?.message || payload.message || `TTM API HTTP ${response.status}`);
-      const models = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload.models) ? payload.models : []);
-      return [...new Set(models
-        .map((item: any) => String(typeof item === 'string' ? item : item?.id || '').trim())
-        .filter((id: string) => OllamaModelSchema.safeParse(id).success))].slice(0, 200) as string[];
-    } finally {
-      clearTimeout(timeout);
+    });
+  }
+
+  private async _getGoogleAccessToken(): Promise<string> {
+    if (this._geminiAccessToken.value && this._geminiAccessToken.expiresAt > Date.now() + 30_000) {
+      return this._geminiAccessToken.value;
     }
+    const token = await this._runGcloud(['auth', 'application-default', 'print-access-token']);
+    if (!token) throw new Error('Google account is not connected for Gemini');
+    this._geminiAccessToken = { value: token, expiresAt: Date.now() + 45 * 60_000 };
+    return token;
+  }
+
+  private async _geminiAuthStatus(): Promise<{ connected: boolean; projectId: string; cliAvailable: boolean; message: string }> {
+    const configuredProject = this._settings.persona.geminiProject || process.env['GOOGLE_CLOUD_PROJECT'] || process.env['GCP_PROJECT'] || '';
+    try {
+      await this._getGoogleAccessToken();
+      const detectedProject = await this._runGcloud(['config', 'get-value', 'project'], 5_000).catch(() => '');
+      return {
+        connected: true,
+        projectId: configuredProject || (detectedProject === '(unset)' ? '' : detectedProject),
+        cliAvailable: true,
+        message: configuredProject ? 'Google account connected.' : 'Google account connected. Add a Google Cloud project ID.',
+      };
+    } catch (error) {
+      return {
+        connected: false,
+        projectId: configuredProject,
+        cliAvailable: !/not installed/i.test(error instanceof Error ? error.message : String(error)),
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private async _startGeminiGoogleLogin(): Promise<void> {
+    if (this._geminiAuthProcess && this._geminiAuthProcess.exitCode === null) return;
+    await this._runGcloud(['--version'], 5_000);
+    this._geminiAuthProcess = spawn(process.env['GCLOUD_BIN'] || 'gcloud', [
+      'auth', 'application-default', 'login',
+      '--scopes=https://www.googleapis.com/auth/cloud-platform',
+    ], { stdio: 'ignore', detached: true });
+    this._geminiAuthProcess.once('error', () => { this._geminiAuthProcess = null; });
+    this._geminiAuthProcess.once('close', () => {
+      this._geminiAuthProcess = null;
+      this._geminiAccessToken = { value: '', expiresAt: 0 };
+    });
+    this._geminiAuthProcess.unref();
   }
 
   private async _updateObsSettings(newSettings: Partial<typeof this._settings.obs>): Promise<void> {
@@ -3885,7 +4411,7 @@ export class IdolRuntimeServer {
         height: videoPreset.height,
         fps: videoPreset.fps,
         applyVideoSettings: Boolean(this._obsOutputPreset()),
-      });
+      } as Parameters<typeof this._obsController.magicConnect>[0] & { applyVideoSettings?: boolean });
       this._addLog('info', `OBS Magic Connect ready in scene ${result.sceneName}`);
       this._broadcast({
         type: 'OBS_STATUS',
@@ -3943,36 +4469,45 @@ export class IdolRuntimeServer {
   }
 
   private async _synthesizeQwenTtsAudio(input: z.infer<typeof SpeechSynthesisSchema>): Promise<{ audioBase64: string; mediaType: string; durationMs: number }> {
-    await this._ensureQwenTtsReady();
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60_000);
-    try {
-      const response = await fetch(`${this._qwenTtsEndpoint()}/api/synthesize`, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: input.text,
-          voice_id: input.voiceId || this._settings.voice.voiceId || 'qwen-default',
-          speed: input.speed,
-        }),
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(`Qwen TTS HTTP ${response.status}${payload.detail ? `: ${payload.detail}` : ''}`);
+    const synthesizeOnce = async (timeoutMs: number) => {
+      await this._ensureQwenTtsReady();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(`${this._qwenTtsEndpoint()}/api/synthesize`, {
+          method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: input.text,
+            voice_id: input.voiceId || this._settings.voice.voiceId || 'qwen-default',
+            speed: input.speed,
+          }),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(`Qwen TTS HTTP ${response.status}${payload.detail ? `: ${payload.detail}` : ''}`);
+        }
+        const audio = Buffer.from(await response.arrayBuffer());
+        const durationMs = Number(response.headers.get('x-audio-duration-ms'))
+          || Math.max(1800, Math.round((input.text.split(/\s+/).filter(Boolean).length / 3.2 / input.speed) * 1000));
+        const generationMs = Number(response.headers.get('x-generation-ms'));
+        if (generationMs > 0) this._addLog('debug', `Qwen TTS generated ${durationMs}ms audio in ${generationMs}ms`);
+        return { audioBase64: audio.toString('base64'), mediaType: response.headers.get('content-type') || 'audio/wav', durationMs };
+      } finally {
+        clearTimeout(timeout);
       }
-      const audio = Buffer.from(await response.arrayBuffer());
-      const durationMs = Number(response.headers.get('x-audio-duration-ms'))
-        || Math.max(1800, Math.round((input.text.split(/\s+/).filter(Boolean).length / 3.2 / input.speed) * 1000));
-      const generationMs = Number(response.headers.get('x-generation-ms'));
-      if (generationMs > 0) this._addLog('debug', `Qwen TTS generated ${durationMs}ms audio in ${generationMs}ms`);
-      return {
-        audioBase64: audio.toString('base64'),
-        mediaType: response.headers.get('content-type') || 'audio/wav',
-        durationMs,
-      };
-    } finally {
-      clearTimeout(timeout);
+    };
+
+    try {
+      return await synthesizeOnce(20_000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const aborted = (error as { name?: string } | null)?.name === 'AbortError' || /operation was aborted|aborted/i.test(message);
+      const transient = aborted
+        || /fetch failed|network|socket|econn|http\s+(?:429|5\d\d)/i.test(message);
+      if (!transient) throw error;
+      this._addLog('warn', `Qwen TTS request failed transiently; restarting the local voice worker and retrying once (${message})`);
+      await this._restartQwenTtsWorker(aborted ? 'synthesis timeout' : 'transient synthesis failure');
+      return synthesizeOnce(45_000);
     }
   }
 
@@ -4043,7 +4578,9 @@ export class IdolRuntimeServer {
     (req as http.IncomingMessage & { __runtimeResponse?: http.ServerResponse }).__runtimeResponse = res;
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    const isChatEmbedDocument = pathname === '/chat-embed.html' || pathname === '/chat-embed';
+    res.setHeader('Cross-Origin-Resource-Policy', isChatEmbedDocument ? 'cross-origin' : 'same-origin');
+    if (isChatEmbedDocument) res.setHeader('Content-Security-Policy', 'frame-ancestors *');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 
@@ -4568,7 +5105,7 @@ export class IdolRuntimeServer {
         const session = this._db.getAvatarSession();
         if (!session?.selectedAvatarIds.includes(input.avatarId)) {
           res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Activate this Avatar in the Pool before switching to it' }));
+          res.end(JSON.stringify({ success: false, error: 'Enable this Avatar in the Pool before switching to it' }));
           return;
         }
         try {
@@ -4648,27 +5185,29 @@ export class IdolRuntimeServer {
         success: true,
         provider: persona.llmProvider,
         model: persona.llmModel,
-        apiKeyConfigured: Boolean(persona.llmApiKey),
-        fallbackProvider: 'ttm-chatgpt',
-        fallbackModel: process.env['TTM_MODEL'] || 'chat-latest',
-        fallbackBaseUrl: this._ttmApiBaseUrl(),
+        geminiProject: persona.geminiProject,
+        geminiLocation: persona.geminiLocation,
+        fallbackProvider: 'ollama',
+        fallbackModel: 'qwen3:8b',
       }));
       return;
     }
 
-    if (pathname === '/api/ai/director/models' && method === 'POST') {
-      this._readJsonBody(req, async (body) => {
-        const input = this._parseBody(TtmModelsSchema, body, res);
-        if (!input) return;
-        const apiKey = input.apiKey || this._settings.persona.llmApiKey;
-        try {
-          const models = await this._fetchTtmModels(apiKey);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, models, apiKeyConfigured: Boolean(apiKey) }));
-        } catch (error) {
-          res.writeHead(502, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }));
-        }
+    if (pathname === '/api/ai/director/gemini/auth/status' && method === 'GET') {
+      this._geminiAuthStatus().then((auth) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, auth }));
+      });
+      return;
+    }
+
+    if (pathname === '/api/ai/director/gemini/auth/start' && method === 'POST') {
+      this._startGeminiGoogleLogin().then(() => {
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: 'Google sign-in started in your browser.' }));
+      }).catch((error) => {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }));
       });
       return;
     }
@@ -4703,24 +5242,34 @@ export class IdolRuntimeServer {
     }
 
     if (pathname === '/api/ai/director/config' && method === 'POST') {
-      this._readJsonBody(req, (body) => {
+      this._readJsonBody(req, async (body) => {
         const input = this._parseBody(AiDirectorConfigSchema, body, res);
         if (!input) return;
-        const nextApiKey = input.clearApiKey ? '' : (input.apiKey || this._settings.persona.llmApiKey);
-        if (input.provider === 'ttm-chatgpt' && !nextApiKey) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'TTM API key is required for ChatGPT' }));
-          return;
+        const nextProject = input.projectId || this._settings.persona.geminiProject;
+        const nextLocation = input.location || this._settings.persona.geminiLocation || 'us-central1';
+        if (input.provider === 'gemini') {
+          const auth = await this._geminiAuthStatus();
+          if (!auth.connected) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Connect your Google account before using Gemini.' }));
+            return;
+          }
+          if (!nextProject) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Google Cloud project ID is required for Gemini.' }));
+            return;
+          }
         }
         this._settings.persona = {
           ...this._settings.persona,
-          llmProvider: 'ollama',
-          llmModel: 'qwen3:8b',
-          llmApiKey: nextApiKey,
+          llmProvider: input.provider,
+          llmModel: input.model,
+          geminiProject: nextProject,
+          geminiLocation: nextLocation,
         };
         this._db.setSetting('persona', this._settings.persona);
         this._configureDialogueProvider();
-        this._addLog('info', `AI Director updated: qwen3:8b primary${nextApiKey ? ', ChatGPT fallback ready' : ''}`);
+        this._addLog('info', `AI Director updated: ${input.provider} · ${input.model}`);
         this._broadcast({ type: 'SETTINGS_UPDATED', settings: this._publicSettings() });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, settings: this._publicSettings().persona }));
@@ -4918,8 +5467,21 @@ export class IdolRuntimeServer {
           const requestedAvatarId = offer.avatarId || offer.avatar;
           const currentAvatarId = this._db.getAvatarSession()?.activeAvatarId || null;
           const avatarId = requestedAvatarId || currentAvatarId || undefined;
+          if (mediaOwner
+            && offer.clientId === mediaOwner.clientId
+            && mediaOwner.acceptingMediaState
+            && mediaOwner.sessionId
+            && offer.connectionId
+            && mediaOwner.connectionId
+            && offer.connectionId !== mediaOwner.connectionId) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'A newer Live Monitor WebRTC connection is active' }));
+            return;
+          }
           const answer = await this._liveTalkingProvider.createOffer(offer.sdp, offer.type, avatarId);
           if (mediaOwner && offer.clientId === mediaOwner.clientId) {
+            mediaOwner.connectionId = offer.connectionId || null;
+            mediaOwner.acceptingMediaState = true;
             mediaOwner.sessionId = answer.sessionid;
             mediaOwner.avatarId = avatarId || '';
             mediaOwner.connectionState = 'CONNECTING';
@@ -4931,7 +5493,6 @@ export class IdolRuntimeServer {
             mediaOwner.lastAudioProgressAt = Date.now();
             mediaOwner.lastVideoProgressAt = Date.now();
             mediaOwner.lastHeartbeatAt = Date.now();
-            this._broadcastLiveTalkingMediaState();
           }
           if (requestedAvatarId && requestedAvatarId !== currentAvatarId) {
             const session = this._db.getAvatarSession();
@@ -5065,6 +5626,34 @@ export class IdolRuntimeServer {
           health,
           engine: 'lipku/livetalking (Realtime Digital Human)',
         }));
+      });
+      return;
+    }
+
+    if (pathname === '/api/talking-head/musetalk/mask-mode' && method === 'GET') {
+      this._liveTalkingProvider.getMuseTalkMaskMode().then((mode) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, mode }));
+      }).catch((error: any) => {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: error.message }));
+      });
+      return;
+    }
+
+    if (pathname === '/api/talking-head/musetalk/mask-mode' && method === 'POST') {
+      this._readJsonBody(req, async (body) => {
+        const input = this._parseBody(z.object({ mode: MuseTalkMaskModeSchema }).strict(), body, res);
+        if (!input) return;
+        try {
+          const mode = await this._liveTalkingProvider.setMuseTalkMaskMode(input.mode);
+          this._db.setSetting('museTalkMaskMode', mode);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, mode }));
+        } catch (error: any) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: error.message }));
+        }
       });
       return;
     }
@@ -5315,7 +5904,7 @@ export class IdolRuntimeServer {
     }
 
     if (url === '/api/settings/talking' && method === 'POST') {
-      this._readJsonBody(req, (body) => {
+      this._readJsonBody(req, async (body) => {
         const input = this._parseBody(TalkingSettingsSchema, body, res);
         if (!input) return;
         if (input.endpoint) {
@@ -5328,20 +5917,60 @@ export class IdolRuntimeServer {
             return;
           }
         }
+
+        const previousModelFps = this._settings.talkingEngine.modelFps;
+        const modelFpsChanged = input.modelFps !== undefined && input.modelFps !== previousModelFps;
+        let workerRestarted = false;
+        let workerRestartRequired = false;
+        if (modelFpsChanged) {
+          const currentWorker = await this._liveTalkingWorkerStatus();
+          if (this._liveTalkingWorkerProcess) {
+            try {
+              await this._waitForAvatarMutationBoundary();
+              const activeTasks = await this._activeLiveTalkingTrainingTasks();
+              if (activeTasks.length > 0) throw new Error('Model FPS cannot change while avatar training is active');
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              res.writeHead(409, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: message }));
+              return;
+            }
+          } else if (currentWorker['ready']) {
+            workerRestartRequired = true;
+          }
+        }
+
         this._settings.talkingEngine = { ...this._settings.talkingEngine, ...this._withoutUndefined(input) };
         this._db.setSetting('talkingEngine', this._settings.talkingEngine);
         if (input.model) this._liveTalkingProvider.setModel(input.model);
+        if (modelFpsChanged) this._liveTalkingProvider.setFps(this._settings.talkingEngine.modelFps);
         if (input.alwaysOn === false) this._cancelLiveTalkingAutomation();
         if (input.alwaysOn === true) this._autoStartLiveTalkingWorker();
         if (input.restartIntervalMinutes || input.alwaysOn === true) this._scheduleLiveTalkingMaintenance();
+        if (modelFpsChanged && this._liveTalkingWorkerProcess) {
+          try {
+            await this._restartLiveTalkingWorker(`model FPS changed to ${this._settings.talkingEngine.modelFps}`);
+            workerRestarted = true;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this._addLog('error', `LiveTalking model FPS restart failed: ${message}`);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: message }));
+            return;
+          }
+        }
         this._broadcast({ type: 'SETTINGS_UPDATED', settings: this._publicSettings() });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           success: true,
           settings: {
             alwaysOn: this._settings.talkingEngine.alwaysOn,
+            modelFps: this._settings.talkingEngine.modelFps,
+            outputFps: 30,
             restartIntervalMinutes: this._settings.talkingEngine.restartIntervalMinutes,
           },
+          workerRestarted,
+          workerRestartRequired,
         }));
       });
       return;
@@ -5765,7 +6394,11 @@ export class IdolRuntimeServer {
 
     // ── Static Files (Serve operator-dashboard) ──
     const parsedPath = new URL(url, `http://${this._config.host}:${this._config.port}`).pathname;
-    const cleanPath = parsedPath === '/' ? 'index.html' : parsedPath.replace(/^\//, '');
+    const cleanPath = parsedPath === '/'
+      ? 'index.html'
+      : parsedPath === '/chat-embed'
+        ? 'chat-embed.html'
+        : parsedPath.replace(/^\//, '');
 
     const candidateDirs = [
       ...(process.env['AI_IDOL_DASHBOARD_DIR'] ? [path.resolve(process.env['AI_IDOL_DASHBOARD_DIR'])] : []),
@@ -5797,7 +6430,12 @@ export class IdolRuntimeServer {
         '.mp4': 'video/mp4',
         '.webm': 'video/webm',
       };
-      res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'text/plain' });
+      res.writeHead(200, {
+        'Content-Type': mimeTypes[ext] || 'text/plain',
+        // The operator dashboard is served from the local runtime while it is
+        // actively edited. Never let a stale HTML or script bundle mask an UI update.
+        'Cache-Control': 'no-store',
+      });
       fs.createReadStream(filePath).pipe(res);
       return;
     }
@@ -5862,7 +6500,7 @@ if (isDirectRun) {
     process.exit(exitCode);
   };
   server.start().then(() => {
-    console.log(`Idol Runtime Server active on port ${process.env['PORT'] || '11111'}`);
+    console.log(`Idol Runtime Server active on port ${process.env['PORT'] || '6767'}`);
     setInterval(() => {}, 1000 * 3600);
   }).catch((err) => {
     console.error('Fatal runtime server error:', err);

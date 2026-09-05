@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="vi" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Unify Chat</title>
+  <link rel="stylesheet" href="chat-embed.css?v=20260903-2" />
+</head>
+<body>
+  <main class="unify-chat" id="unify-chat" aria-label="Unify Chat">
+    <header class="unify-header" id="chat-header">
+      <div class="unify-heading">
+        <strong>Unify Chat</strong>
+        <span class="platform-pill"><span class="live-dot" aria-hidden="true"></span>YT / FB</span>
+      </div>
+      <div class="unify-actions">
+        <span class="connection-status" id="connection-status" role="status">Đang kết nối</span>
+        <button class="icon-button" id="btn-gift-rose" type="button" title="Gửi 10 hoa hồng" aria-label="Gửi 10 hoa hồng"><span class="material-symbols-rounded" aria-hidden="true">local_florist</span></button>
+        <button class="icon-button" id="btn-gift-lion" type="button" title="Gửi quà cao cấp" aria-label="Gửi quà cao cấp"><span class="material-symbols-rounded" aria-hidden="true">redeem</span></button>
+        <button class="icon-button clear-button" id="btn-clear-chat" type="button" title="Xóa chat trên khung này" aria-label="Xóa chat trên khung này"><span class="material-symbols-rounded" aria-hidden="true">delete_sweep</span></button>
+      </div>
+    </header>
+
+    <ol class="chat-stream" id="chat-list" aria-live="polite" aria-relevant="additions">
+      <li class="chat-empty" id="chat-empty">Chưa có tin nhắn</li>
+    </ol>
+
+    <form class="chat-form" id="form-chat-send">
+      <label class="user-field" for="input-chat-user">
+        <span>User</span>
+        <input id="input-chat-user" type="text" maxlength="40" value="Viewer" autocomplete="nickname" />
+      </label>
+      <label class="sr-only" for="input-chat-msg">Nội dung tin nhắn</label>
+      <input class="message-field" id="input-chat-msg" type="text" placeholder="Write a message..." autocomplete="off" />
+      <button class="send-button" id="btn-chat-submit" type="submit">Send</button>
+    </form>
+  </main>
+
+  <script src="api/runtime-client.js"></script>
+  <script src="chat-embed.js?v=20260903-2"></script>
+</body>
+</html>

@@ -1,6 +1,8 @@
 import numpy as np
 import cv2
 
+from avatars.musetalk.utils.face_geometry import GEOMETRY_MAX_REPROJECTION_ERROR_PX
+
 
 def _build_lip_color_mask(generated_lab, source_lab):
     height, width = generated_lab.shape[:2]
@@ -163,6 +165,8 @@ LOWER_FACE_EDGE_PADDING_RATIO = 0.05
 # Pull the face outline inward toward the mouth, rather than shrinking a
 # rectangular mask. This keeps every edge in the mouth-to-face gap.
 LOWER_FACE_OUTER_INSET_RATIO = 0.20
+EXPANDED_FACE_OUTER_INSET_RATIO = 0.10
+ADAPTIVE_MASK_FORMAT = "hybrid_adaptive_v11"
 LIP_DETAIL_SHARPEN_STRENGTH = 0.45
 LIP_DETAIL_PAD_PX = 0
 # Paste-back is 1:1 with the tracked source geometry.  Do not enlarge the
@@ -201,6 +205,8 @@ def build_mediapipe_mouth_mask(
     pad_y=MOUTH_MASK_PAD_Y_PX,
     feather_px=LOWER_FACE_FEATHER_PX,
     edge_padding_ratio=LOWER_FACE_EDGE_PADDING_RATIO,
+    inset_ratio=None,
+    expand_px=0,
 ):
     """Build the lower-face compositing mask in aligned landmark space.
 
@@ -231,7 +237,9 @@ def build_mediapipe_mouth_mask(
     mouth_center = np.mean(aligned[list(MEDIAPIPE_LIP_LANDMARK_INDICES)], axis=0)
     # A 20% face-relative inset is stable at profile angles. Unlike scaling a
     # mask bounding box, it pulls the chin and cheeks toward the real mouth.
-    inset_ratio = max(float(edge_padding_ratio), LOWER_FACE_OUTER_INSET_RATIO)
+    inset_ratio = max(float(edge_padding_ratio), float(
+        LOWER_FACE_OUTER_INSET_RATIO if inset_ratio is None else inset_ratio
+    ))
     inset_oval = mouth_center + (oval - mouth_center) * (1.0 - inset_ratio)
     inset_oval[:, 0] = np.clip(inset_oval[:, 0], 0, width - 1)
     inset_oval[:, 1] = np.clip(inset_oval[:, 1], 0, height - 1)
@@ -253,7 +261,77 @@ def build_mediapipe_mouth_mask(
     top_curve = nose_bottom + (np.abs(xx - center_x) / half_width) ** 1.7 * face_height * 0.12
     yy = np.arange(height, dtype=np.float32)[:, None]
     binary[yy < top_curve[None, :]] = 0
+    if expand_px:
+        binary = cv2.dilate(
+            binary,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(expand_px) * 2 + 1, int(expand_px) * 2 + 1)),
+            iterations=1,
+        )
     return np.round(_inward_feather(binary, feather_px) * 255.0).astype(np.uint8)
+
+
+def choose_adaptive_mask_strategy(alignment, previous_strategy=None):
+    """Select a stable mask mode with hysteresis from stored geometry metrics."""
+    quality = alignment.get("geometry_quality", {}) if alignment else {}
+    yaw = abs(float(quality.get("yaw_proxy_degrees", 0.0)))
+    pitch = abs(float(quality.get("pitch_proxy_degrees", 0.0)))
+    confidence = float(quality.get("confidence", 0.0))
+    reprojection = float(quality.get("reprojection_error_px", 999.0))
+    if not quality.get("finite", False) or not quality.get("mouth_visible", False) or confidence < 0.35:
+        target = "face_parsing"
+    elif yaw > 42.0 or pitch > 28.0 or reprojection > 8.0:
+        target = "face_parsing"
+    elif yaw > 24.0 or pitch > 18.0:
+        target = "mediapipe_expanded"
+    else:
+        target = "mediapipe_compact"
+    if previous_strategy == "face_parsing" and target == "mediapipe_compact" and (yaw > 30.0 or confidence < 0.75):
+        target = "face_parsing"
+    if previous_strategy == "mediapipe_expanded" and target == "mediapipe_compact" and yaw > 18.0:
+        target = "mediapipe_expanded"
+    return {
+        "strategy": target,
+        "confidence": confidence,
+        "yaw_proxy_degrees": yaw,
+        "pitch_proxy_degrees": pitch,
+        "reprojection_error_px": reprojection,
+        "inset_ratio": 0.10 if target == "mediapipe_expanded" else 0.20,
+        "expand_px": 7 if target == "mediapipe_expanded" else 0,
+        "feather_px": 6 if target == "mediapipe_expanded" else 5,
+    }
+
+
+def build_adaptive_mediapipe_mask(alignment, previous_strategy=None, width=256, height=256):
+    decision = choose_adaptive_mask_strategy(alignment, previous_strategy)
+    if decision["strategy"] == "face_parsing":
+        return None, decision
+    mask = build_mediapipe_mouth_mask(
+        alignment, width, height,
+        feather_px=decision["feather_px"],
+        inset_ratio=decision["inset_ratio"],
+        expand_px=decision["expand_px"],
+    )
+    return mask, decision
+
+
+def should_paste_generated_face(
+    alignment,
+    max_reprojection_error=GEOMETRY_MAX_REPROJECTION_ERROR_PX,
+    min_confidence=0.20,
+):
+    """Quality gate for paste-back; never composite a geometrically invalid crop."""
+    if not alignment:
+        return False
+    quality = alignment.get("geometry_quality", {})
+    if quality and (
+        not quality.get("finite", True)
+        or not quality.get("mouth_visible", True)
+        or float(quality.get("confidence", 1.0)) < min_confidence
+        or float(quality.get("reprojection_error_px", 0.0)) > max_reprojection_error
+    ):
+        return False
+    matrix = np.asarray(alignment.get("aligned_to_source", []), dtype=np.float32)
+    return matrix.shape == (3, 3) and bool(np.isfinite(matrix).all())
 
 
 def scale_mask_region(binary_mask, scale):
@@ -433,15 +511,6 @@ def build_landmark_lower_face_mask(mask_image, face_box, crop_box, landmarks=Non
             max(1, int(round(face_height * 0.13))),
         )
         cv2.ellipse(detail_mask, center, axes, 0, 0, 360, 255, -1)
-
-        # Existing avatars do not persist landmarks. Intersecting their stored
-        # mask with this compact mouth window upgrades them without retraining.
-        normalized_source = mask_image.astype(np.float32)
-        if normalized_source.max(initial=0.0) > 1.0:
-            normalized_source /= 255.0
-        source_support = (normalized_source > 0.02).astype(np.uint8) * 255
-        if np.any(source_support):
-            detail_mask = cv2.bitwise_and(detail_mask, source_support)
 
         nose_safe_top = int(round(y + face_height * 0.57 - y_s))
         detail_mask[:max(0, nose_safe_top), :] = 0

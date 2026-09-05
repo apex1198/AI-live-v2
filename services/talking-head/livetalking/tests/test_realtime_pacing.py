@@ -12,7 +12,7 @@ from av import AudioFrame, VideoFrame
 
 from avatars.audio_features.whisper import WhisperASR
 from avatars.base_avatar import AudioFrameData, BaseAvatar
-from avatars.musetalk_avatar import MuseReal
+from avatars.musetalk_avatar import MuseReal, _unpack_avatar_data
 from server.rtc_manager import RTCManager, session_manager
 from server.session_manager import SessionReplacedError
 from server.webrtc import HumanPlayer, PlayerStreamTrack
@@ -55,6 +55,41 @@ class HangingPeerConnection(FakePeerConnection):
 
 
 class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_default_avatar_is_reloaded_after_another_dataset_evicts_it(self):
+        import app as worker_app
+
+        previous_opt = worker_app.opt
+        previous_model = worker_app.model
+        previous_loader = getattr(worker_app, 'load_avatar', None)
+        previous_cache = dict(worker_app.global_avatars)
+        try:
+            worker_app.opt = SimpleNamespace(avatar_id='avatar_default', model='musetalk')
+            worker_app.model = object()
+            worker_app.global_avatars.clear()
+            worker_app.global_avatars['avatar_other'] = ('other-dataset',)
+            worker_app.load_avatar = lambda avatar_id: (
+                ['frame'], ['mask'], ['coord'], ['mask-coord'], ['latent'], 30,
+            )
+            with patch.object(worker_app, 'release_accelerator_cache'), patch.object(
+                worker_app.registry, 'create', side_effect=lambda *_args, **kwargs: kwargs
+            ):
+                session = worker_app.build_avatar_session('session-default', {})
+
+            self.assertEqual(session['avatar'][0], ['frame'])
+            self.assertIn('avatar_default', worker_app.global_avatars)
+            self.assertNotIn('avatar_other', worker_app.global_avatars)
+        finally:
+            worker_app.opt = previous_opt
+            worker_app.model = previous_model
+            if previous_loader is not None:
+                worker_app.load_avatar = previous_loader
+            worker_app.global_avatars.clear()
+            worker_app.global_avatars.update(previous_cache)
+
+    async def test_musetalk_rejects_missing_avatar_dataset_before_session_start(self):
+        with self.assertRaisesRegex(RuntimeError, "dataset was not loaded"):
+            _unpack_avatar_data(None)
+
     async def test_musetalk_uses_ping_pong_loop_without_last_to_first_cut(self):
         avatar = SimpleNamespace(source_fps=24, opt=SimpleNamespace(fps=24))
         indices = [MuseReal.map_frame_index(avatar, 5, index) for index in range(10)]
@@ -346,7 +381,10 @@ class RealtimePacingTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(player.video._queue.qsize(), capacity)
         self.assertEqual(avatar.dropped_video_frames, 3)
         oldest_frame, _ = player.video._queue.get_nowait()
-        self.assertEqual(int(oldest_frame.to_ndarray(format="bgr24")[0, 0, 0]), 3)
+        # HD output is letterboxed, so the source pixel is checked in the
+        # active image area rather than in the black top-left padding.
+        output = oldest_frame.to_ndarray(format="bgr24")
+        self.assertEqual(int(output[output.shape[0] // 2, output.shape[1] // 2, 0]), 3)
 
     async def test_saturated_video_drops_matching_audio_pair(self):
         avatar = SimpleNamespace(

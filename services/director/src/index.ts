@@ -31,6 +31,37 @@ import { PriorityQueue } from '@idol/priority-queue';
 import { AssetRegistry, AssetRouter, type AssetMetadata } from '@idol/asset-engine';
 import { GoalEngine, type GoalDefinition, type StreamContext } from '@idol/goal-engine';
 
+const GOAL_TONE_EMOTION_ALIASES: Readonly<Record<string, Emotion>> = {
+  calm: 'neutral',
+  friendly: 'happy',
+  cheerful: 'happy',
+  sweet: 'happy',
+  welcoming: 'happy',
+  enthusiastic: 'excited',
+  exciting: 'excited',
+  direct: 'focused',
+  helpful: 'focused',
+  curious: 'playful',
+  interactive: 'playful',
+  heartfelt: 'grateful',
+};
+
+const VALID_EMOTIONS = new Set<Emotion>([
+  'neutral', 'happy', 'excited', 'surprised', 'sad',
+  'angry', 'playful', 'focused', 'grateful', 'laughing',
+]);
+
+/** Converts descriptive goal tones into the strict emotion protocol. */
+export function goalToneToEmotion(tones: readonly string[]): Emotion {
+  for (const rawTone of tones) {
+    const tone = rawTone.trim().toLowerCase();
+    if (VALID_EMOTIONS.has(tone as Emotion)) return tone as Emotion;
+    const alias = GOAL_TONE_EMOTION_ALIASES[tone];
+    if (alias) return alias;
+  }
+  return 'playful';
+}
+
 export interface DirectorState {
   currentPhase: string;
   currentVisual: VisualState;
@@ -506,7 +537,7 @@ export class DirectorAgent {
       type: 'director.intent',
       action: 'TRIGGER_GOAL',
       intent: `goal_${goal.type.toLowerCase()}`,
-      emotion: (goal.tone[0] as Emotion) ?? 'playful',
+      emotion: goalToneToEmotion(goal.tone),
       visualState,
       goalId: goal.id,
       priority: goal.priority,

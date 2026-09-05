@@ -10,6 +10,7 @@ transform is used when the generated frame is composited back into the source.
 from __future__ import annotations
 
 import os
+import platform
 from typing import Any, Iterable, Optional
 
 import cv2
@@ -25,6 +26,9 @@ DEFAULT_MODEL_PATH = os.path.join("models", "mediapipe", "face_landmarker.task")
 # reference below, rather than being allowed to drift with each homography.
 CANONICAL_EYE_CENTER = np.array([128.0, 64.0], dtype=np.float32)
 CANONICAL_EYE_DISTANCE = 96.0
+GEOMETRY_MAX_YAW_DEG = 42.0
+GEOMETRY_MAX_PITCH_DEG = 28.0
+GEOMETRY_MAX_REPROJECTION_ERROR_PX = 12.0
 
 LEFT_EYE_INDICES = np.array([33, 133, 160, 159, 158, 157, 173], dtype=np.int32)
 RIGHT_EYE_INDICES = np.array([362, 263, 387, 386, 385, 384, 398], dtype=np.int32)
@@ -63,6 +67,19 @@ class MediaPipeFaceTracker:
     """Small IMAGE-mode wrapper that returns 478 pixel landmarks per frame."""
 
     def __init__(self, model_path: Optional[str] = None):
+        # Keep an explicit opt-out for macOS installations where MediaPipe's
+        # TFLite graph is known to be unstable. Geometry tracking is enabled by
+        # default because silently falling back produces axis-aligned masks
+        # that do not follow a moving/profile face.
+        if (
+            platform.system() == "Darwin"
+            and os.getenv("LIVETALKING_ENABLE_MEDIAPIPE_TASKS", "1").strip().lower()
+            not in {"1", "true", "yes"}
+        ):
+            raise RuntimeError(
+                "MediaPipe Tasks was disabled by LIVETALKING_ENABLE_MEDIAPIPE_TASKS; "
+                "enable it to build tracked MuseTalk masks"
+            )
         resolved = resolve_model_path(model_path)
         if not resolved:
             raise FileNotFoundError(
@@ -152,6 +169,60 @@ def face_geometry_summary(points: np.ndarray) -> dict[str, Any]:
         "roll_degrees": float(np.degrees(roll_radians)),
         "face_box": face_box,
     }
+
+
+def geometry_quality_metrics(points: np.ndarray, reprojection_error_px: float | None = None) -> dict[str, Any]:
+    """Return conservative, model-facing quality signals for adaptive masking."""
+    summary = face_geometry_summary(np.asarray(points, dtype=np.float32))
+    left_eye = summary["left_eye"]
+    right_eye = summary["right_eye"]
+    mouth = summary["mouth_center"]
+    eye_mid = summary["eye_mid"]
+    eye_distance = max(1.0, float(summary["eye_distance"]))
+    # MediaPipe does not expose a reliable 3D pose in this wrapper. These
+    # normalized asymmetries are stable enough for mask selection and are
+    # deliberately labelled as proxies, not calibrated camera angles.
+    face_width = max(1.0, float(summary["face_box"][2] - summary["face_box"][0]))
+    face_height = max(1.0, float(summary["face_box"][3] - summary["face_box"][1]))
+    yaw_proxy = float(np.clip((summary["nose_tip"][0] - eye_mid[0]) / face_width * 180.0, -90.0, 90.0))
+    pitch_proxy = float(np.clip((mouth[1] - eye_mid[1]) / face_height * 180.0 - 34.0, -90.0, 90.0))
+    finite = bool(np.isfinite(np.asarray(points)).all())
+    mouth_visible = bool(np.linalg.norm(left_eye - right_eye) > eye_distance * 0.15)
+    reprojection = float(reprojection_error_px) if reprojection_error_px is not None else 0.0
+    confidence = 1.0
+    confidence *= float(np.clip(1.0 - abs(yaw_proxy) / 90.0, 0.0, 1.0))
+    confidence *= float(np.clip(1.0 - abs(pitch_proxy) / 90.0, 0.0, 1.0))
+    confidence *= float(np.clip(1.0 - reprojection / 16.0, 0.0, 1.0))
+    if not finite or not mouth_visible:
+        confidence = 0.0
+    return {
+        "yaw_proxy_degrees": yaw_proxy,
+        "pitch_proxy_degrees": pitch_proxy,
+        "roll_degrees": float(summary["roll_degrees"]),
+        "eye_distance": eye_distance,
+        "face_width": face_width,
+        "face_height": face_height,
+        "reprojection_error_px": reprojection,
+        "mouth_visible": mouth_visible,
+        "finite": finite,
+        "confidence": float(np.clip(confidence, 0.0, 1.0)),
+    }
+
+
+class TemporalLandmarkSmoother:
+    """EMA smoother that preserves landmarks while suppressing detector jitter."""
+
+    def __init__(self, alpha: float = 0.65):
+        self.alpha = float(np.clip(alpha, 0.05, 1.0))
+        self.previous: Optional[np.ndarray] = None
+
+    def update(self, points: np.ndarray) -> np.ndarray:
+        current = np.asarray(points, dtype=np.float32)
+        if self.previous is None or self.previous.shape != current.shape:
+            self.previous = current.copy()
+        else:
+            self.previous = self.previous * (1.0 - self.alpha) + current * self.alpha
+        return self.previous.copy()
 
 
 def _normalize_points(points: np.ndarray, summary: dict[str, Any]) -> np.ndarray:
@@ -304,7 +375,7 @@ def build_alignment(points: np.ndarray, reference_points: np.ndarray) -> Optiona
     if not np.isfinite(aligned_mouth).all() or not np.isfinite(projected_points).all():
         return None
     reprojection_error = float(np.mean(np.linalg.norm(projected_points - target_anchors, axis=1)))
-    if reprojection_error > 8.0:
+    if reprojection_error > GEOMETRY_MAX_REPROJECTION_ERROR_PX:
         return None
     if not (-64.0 <= float(aligned_mouth[0]) <= ALIGNMENT_SIZE + 64.0):
         return None
@@ -320,6 +391,7 @@ def build_alignment(points: np.ndarray, reference_points: np.ndarray) -> Optiona
         ], dtype=np.float32),
         source_to_aligned,
     )
+    quality = geometry_quality_metrics(source_points, reprojection_error)
     return {
         "format": ALIGNMENT_FORMAT,
         "size": ALIGNMENT_SIZE,
@@ -347,6 +419,7 @@ def build_alignment(points: np.ndarray, reference_points: np.ndarray) -> Optiona
             float(np.max(aligned_face_box_points[:, 1])),
         ],
         "reprojection_error_px": reprojection_error,
+        "geometry_quality": quality,
     }
 
 
@@ -359,9 +432,13 @@ def track_face_geometry(frames: Iterable[np.ndarray], model_path: Optional[str] 
     """
     frame_list = list(frames)
     raw_landmarks: list[Optional[np.ndarray]] = []
+    smoother = TemporalLandmarkSmoother(
+        alpha=float(os.getenv("LIVETALKING_LANDMARK_SMOOTHING", "0.65"))
+    )
     with MediaPipeFaceTracker(model_path) as tracker:
         for frame in frame_list:
-            raw_landmarks.append(tracker.detect(frame))
+            detected = tracker.detect(frame)
+            raw_landmarks.append(smoother.update(detected) if detected is not None else None)
 
     valid = [points for points in raw_landmarks if points is not None]
     if len(valid) < max(3, int(len(frame_list) * 0.5)):

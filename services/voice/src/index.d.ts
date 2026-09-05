@@ -2,12 +2,9 @@
  * @idol/voice
  *
  * Realtime TTS & Audio Ducking Service for Hybrid AI Idol.
- *
- * Rules (from PLAN.md):
- * - AI Voice is mixed separately from video assets.
- * - Duck game audio / BGM by -12dB when voice starts, restore when finished.
- * - Visual reaction clip does not wait for TTS.
- * - Support interrupts for high priority events (Jackpot, Operator Mute).
+ * Streamlined to 2 core engines:
+ * 1. ElevenLabs TTS (Multilingual v2)
+ * 2. Web Speech API (Local zero-latency fallback)
  */
 import type { VoiceRequest, VoiceEvent } from '@idol/event-schema';
 export interface DuckingState {
@@ -20,6 +17,8 @@ export interface TTSResult {
     requestId: string;
     durationMs: number;
     audioBuffer?: ArrayBuffer | Uint8Array | undefined;
+    audioBase64?: string | undefined;
+    provider: 'elevenlabs' | 'webspeech';
 }
 export interface TTSAdapter {
     name: string;
@@ -33,30 +32,53 @@ export declare class AudioDuckingController {
     duck(): void;
     restore(): void;
 }
-export declare class MockTTSAdapter implements TTSAdapter {
-    readonly name = "mock-tts";
+export declare class WebSpeechTTSAdapter implements TTSAdapter {
+    readonly name = "webspeech-tts";
+    synthesize(request: VoiceRequest): Promise<TTSResult>;
+}
+export interface ElevenLabsConfig {
+    apiKey: string;
+    voiceId?: string;
+    modelId?: string;
+    languageCode?: string;
+    stability?: number;
+    similarityBoost?: number;
+    timeoutMs?: number;
+}
+export declare const ELEVENLABS_VOICE_PRESETS: Record<string, string>;
+export declare class ElevenLabsTTSAdapter implements TTSAdapter {
+    readonly name = "elevenlabs-tts";
+    private _config;
+    private _queue;
+    constructor(config: ElevenLabsConfig);
+    updateConfig(config: Partial<ElevenLabsConfig>): void;
+    private _resolveVoiceId;
     synthesize(request: VoiceRequest): Promise<TTSResult>;
 }
 export interface VoiceServiceListeners {
     onVoiceEvent?: (event: VoiceEvent) => void;
     onDuckingChange?: (isDucked: boolean, duckDb: number) => void;
+    onGenerationStatus?: (status: 'idle' | 'generating' | 'playing' | 'error', details?: string) => void;
 }
 export declare class VoiceService {
-    private readonly _adapter;
+    private _adapter;
     private readonly _duckingController;
     private readonly _listeners;
     private _isSpeaking;
     private _currentRequestId;
     private _currentTimer;
+    private _speakGeneration;
     constructor(options?: {
         adapter?: TTSAdapter;
         listeners?: VoiceServiceListeners;
     });
+    get adapter(): TTSAdapter;
+    setAdapter(adapter: TTSAdapter): void;
     get isSpeaking(): boolean;
     get currentRequestId(): string | null;
     get duckingController(): AudioDuckingController;
     /**
-     * Speak text with automated ducking and lifecycle events.
+     * Speak text with automated ducking, progress callback and lifecycle events.
      */
     speak(request: VoiceRequest): Promise<TTSResult>;
     interrupt(reason?: string): void;

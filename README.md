@@ -47,9 +47,9 @@ PyTorch wheel channel can be selected when required by the installed driver:
 .\setup_windows.ps1 -TorchIndexUrl https://download.pytorch.org/whl/cu126
 ```
 
-Open `http://127.0.0.1:11111` after the runtime starts. Qwen TTS and the lipsync
-worker remain lazy-loaded and start from AI Engine or when a live action needs
-them.
+Open `http://127.0.0.1:6767` after the runtime starts. The web-app shortcut
+starts the runtime automatically, then keeps a startup screen visible while
+Qwen TTS and the lipsync worker come online.
 
 ## Platform architecture
 

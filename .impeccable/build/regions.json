@@ -1,0 +1,20 @@
+{
+  "regions": [
+    { "id": "sidebar", "kind": "chrome", "grid": "A0:B9", "note": "charcoal navigation rail with product mark and active live-control item" },
+    { "id": "topbar", "kind": "chrome", "grid": "C0:J0", "note": "compact runtime status strip" },
+    { "id": "live-session-title", "kind": "text", "grid": "C0:H1", "note": "Live session heading and quiet supporting line" },
+    { "id": "surface-actions", "kind": "control", "grid": "I1:J1", "note": "Library and Connect OBS buttons" },
+    { "id": "monitor-header", "kind": "control", "grid": "C2:G2", "note": "live monitor label and HD output state" },
+    { "id": "monitor-screen", "kind": "chrome", "grid": "C3:G6", "note": "large 16 by 9 live video monitor surface" },
+    { "id": "monitor-state", "kind": "text", "grid": "D4:F4", "note": "monitor state label inside the video surface" },
+    { "id": "playback-timeline", "kind": "control", "grid": "C7:G7", "note": "compact playback and cue timeline" },
+    { "id": "cue-header", "kind": "text", "grid": "H2:J2", "note": "Cue stack heading and state tag" },
+    { "id": "cue-now", "kind": "text", "grid": "H3:J3", "note": "current live cue row" },
+    { "id": "cue-next", "kind": "text", "grid": "H4:J4", "note": "next queued cue row" },
+    { "id": "cue-after", "kind": "text", "grid": "H5:J5", "note": "later queued cue row" },
+    { "id": "cue-closing", "kind": "text", "grid": "H6:J6", "note": "closing cue row" },
+    { "id": "control-header", "kind": "text", "grid": "H7:J7", "note": "live control heading" },
+    { "id": "control-rows", "kind": "control", "grid": "H8:J8", "note": "voice and state control rows" },
+    { "id": "engine-rows", "kind": "control", "grid": "H9:J9", "note": "compact engine health rows" }
+  ]
+}

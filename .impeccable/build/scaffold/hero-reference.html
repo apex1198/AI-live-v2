@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Scaffold reference: charcoal-cue-rail.png</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Farro:wght@300&display=swap">
+  <link rel="stylesheet" href="layout.css">
+  <style>html,body{margin:0}body{background:#131313}.region{box-sizing:border-box}.region.text p{white-space:pre-wrap}</style>
+</head>
+<body>
+<!-- Reference only. Every region sits at its measured box inside a comp-aspect frame. Take the boxes (layout.css), keep your own semantic structure. -->
+<main class="comp-frame" style="max-width:1440px">
+  <div class="r-sidebar region chrome" data-region="sidebar"><!-- charcoal navigation rail with product mark and active live-control item --></div>
+  <div class="r-topbar region chrome" data-region="topbar"><!-- compact runtime status strip --></div>
+  <div class="r-live-session-title region text" data-region="live-session-title"><!-- Live session heading and quiet supporting line --><p style="font-size:var(--r-live-session-title-font);font-family:var(--r-live-session-title-family),sans-serif;font-weight:var(--r-live-session-title-weight);line-height:1.05;margin:0">live-session-title</p></div>
+  <div class="r-surface-actions region control" data-region="surface-actions"><!-- Library and Connect OBS buttons: rebuild the control's chrome from the crop (comp-spec.mjs --crop surface-actions); its ink box, border, fill, radius, and label size are the comp's --></div>
+  <div class="r-monitor-header region control" data-region="monitor-header"><!-- live monitor label and HD output state: rebuild the control's chrome from the crop (comp-spec.mjs --crop monitor-header); its ink box, border, fill, radius, and label size are the comp's --></div>
+  <div class="r-monitor-screen region chrome" data-region="monitor-screen"><!-- large 16 by 9 live video monitor surface --></div>
+  <div class="r-monitor-state region text" data-region="monitor-state"><!-- monitor state label inside the video surface --><p style="font-size:var(--r-monitor-state-font);line-height:1.05;margin:0">monitor-state</p></div>
+  <div class="r-playback-timeline region control" data-region="playback-timeline"><!-- compact playback and cue timeline: rebuild the control's chrome from the crop (comp-spec.mjs --crop playback-timeline); its ink box, border, fill, radius, and label size are the comp's --></div>
+  <div class="r-cue-header region text" data-region="cue-header"><!-- Cue stack heading and state tag --><p style="font-size:var(--r-cue-header-font);line-height:1.05;margin:0">cue-header</p></div>
+  <div class="r-cue-now region text" data-region="cue-now"><!-- current live cue row --><p style="font-size:var(--r-cue-now-font);line-height:1.05;margin:0">cue-now</p></div>
+  <div class="r-cue-next region text" data-region="cue-next"><!-- next queued cue row --><p style="font-size:var(--r-cue-next-font);line-height:1.05;margin:0">cue-next</p></div>
+  <div class="r-cue-after region text" data-region="cue-after"><!-- later queued cue row --><p style="font-size:var(--r-cue-after-font);line-height:1.05;margin:0">cue-after</p></div>
+  <div class="r-cue-closing region text" data-region="cue-closing"><!-- closing cue row --><p style="font-size:var(--r-cue-closing-font);line-height:1.05;margin:0">cue-closing</p></div>
+  <div class="r-control-header region text" data-region="control-header"><!-- live control heading --><p style="font-size:var(--r-control-header-font);line-height:1.05;margin:0">control-header</p></div>
+  <div class="r-control-rows region control" data-region="control-rows"><!-- voice and state control rows: rebuild the control's chrome from the crop (comp-spec.mjs --crop control-rows); its ink box, border, fill, radius, and label size are the comp's --></div>
+  <div class="r-engine-rows region control" data-region="engine-rows"><!-- compact engine health rows: rebuild the control's chrome from the crop (comp-spec.mjs --crop engine-rows); its ink box, border, fill, radius, and label size are the comp's --></div>
+</main>
+</body>
+</html>

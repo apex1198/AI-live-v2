@@ -475,6 +475,9 @@ async def switch_avatar_state(request):
         if not callable(switch_avatar) or not callable(get_or_load_avatar):
             return json_error("avatar state switching is unavailable", code=409)
         previous_id = str(getattr(getattr(avatar_session, 'opt', None), 'avatar_id', '') or '')
+        pipeline_state = str(getattr(avatar_session, 'pipeline_state', 'IDLE') or 'IDLE').upper()
+        if previous_id != avatar_id and (avatar_session.is_speaking() or pipeline_state not in ('IDLE', 'ERROR')):
+            return json_error("avatar dataset can only change after speech is fully idle", code=409)
         avatar = await asyncio.get_event_loop().run_in_executor(None, get_or_load_avatar, avatar_id)
         switch_avatar(avatar_id, avatar)
         return json_ok(data={

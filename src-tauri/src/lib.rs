@@ -15,10 +15,10 @@ use tauri::{AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilde
 
 const SANDBOX_VERSION: &str = "1";
 const ENGINE_LOCK_ADDRESS: &str = "127.0.0.1:18760";
-const RUNTIME_ADDRESS: &str = "127.0.0.1:11111";
+const RUNTIME_ADDRESS: &str = "127.0.0.1:6767";
 const LIVETALKING_ADDRESS: &str = "127.0.0.1:2222";
 const QWEN_TTS_ADDRESS: &str = "127.0.0.1:3333";
-const STUDIO_URL: &str = "http://127.0.0.1:11111/#studio";
+const STUDIO_URL: &str = "http://127.0.0.1:6767/#studio";
 const UI_SCALE: f64 = 0.8;
 // Desktop OAuth client IDs are public identifiers. The client secret is supplied
 // from the ignored .env file at build time and embedded only in the app binary.
@@ -668,7 +668,7 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
                 "bin/ffprobe"
             }),
         )
-        .env("PORT", "11111")
+        .env("PORT", "6767")
         .env(
             "GOOGLE_OAUTH_CLIENT_ID",
             std::env::var("GOOGLE_OAUTH_CLIENT_ID")
@@ -692,7 +692,7 @@ fn start_runtime(paths: &SandboxPaths) -> Result<Option<Child>, String> {
         )
         .env(
             "CORS_ALLOWED_ORIGINS",
-            "http://127.0.0.1:11111,http://localhost:11111",
+            "http://127.0.0.1:6767,http://localhost:6767",
         )
         .env("QWEN_TTS_ENDPOINT", "http://127.0.0.1:3333")
         .env("QWEN_TTS_RUNTIME_DIR", &paths.qwen_runtime)

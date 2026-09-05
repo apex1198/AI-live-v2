@@ -143,6 +143,8 @@ export interface ProviderHealth {
   trainingProgress: number;
 }
 
+export type MuseTalkMaskMode = 'none' | 'repo' | 'mediapipe_478' | 'adaptive';
+
 export interface AvatarSource {
   id: string;
   videoUrl?: string | undefined;
@@ -230,9 +232,9 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     if (typeof config === 'string') {
       this._config = {
         endpointUrl: config,
-        model: 'livetalking-wav2lip',
+        model: 'livetalking-musetalk',
         cachedFrames: 300,
-        fps: 60,
+        fps: 15,
         timeoutMs: 3000,
         trainingTimeoutMs: 30 * 60 * 1000,
         maxRetries: 2,
@@ -241,9 +243,9 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     } else {
       this._config = {
         endpointUrl: config.endpointUrl ?? 'http://localhost:8010',
-        model: config.model ?? 'livetalking-wav2lip',
+        model: config.model ?? 'livetalking-musetalk',
         cachedFrames: config.cachedFrames ?? 300,
-        fps: config.fps ?? 60,
+        fps: config.fps ?? 15,
         timeoutMs: config.timeoutMs ?? 3000,
         trainingTimeoutMs: config.trainingTimeoutMs ?? 30 * 60 * 1000,
         maxRetries: config.maxRetries ?? 2,
@@ -284,6 +286,20 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
     return this._sessionId!;
   }
 
+  async getMuseTalkMaskMode(): Promise<MuseTalkMaskMode> {
+    const payload = await this._request('/api/musetalk/mask-mode', {}, true);
+    return z.enum(['none', 'repo', 'mediapipe_478', 'adaptive']).parse(payload.data?.mode);
+  }
+
+  async setMuseTalkMaskMode(mode: MuseTalkMaskMode): Promise<MuseTalkMaskMode> {
+    const payload = await this._request('/api/musetalk/mask-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    return z.enum(['none', 'repo', 'mediapipe_478', 'adaptive']).parse(payload.data?.mode);
+  }
+
   private _workerModel(): 'musetalk' | 'wav2lip' {
     return this._config.model.includes('musetalk') ? 'musetalk' : 'wav2lip';
   }
@@ -306,12 +322,22 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
         const response = await fetch(`${endpoint}${pathname}`, { ...init, headers, signal: controller.signal });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || (typeof payload.code === 'number' && payload.code !== 0)) {
-          throw new Error(payload.msg || payload.error || `LiveTalking HTTP ${response.status}`);
+          const requestError = new Error(payload.msg || payload.error || `LiveTalking HTTP ${response.status}`) as Error & {
+            retryable?: boolean;
+          };
+          const statusCode = !response.ok ? response.status : Number(payload.code || 0);
+          requestError.retryable = statusCode === 429 || statusCode >= 500;
+          throw requestError;
         }
         return payload;
       } catch (error) {
         lastError = error;
-        if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        const canRetry = (error as { retryable?: boolean } | null)?.retryable !== false;
+        if (attempt < attempts && canRetry) {
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          continue;
+        }
+        break;
       } finally {
         clearTimeout(timeout);
       }
@@ -502,7 +528,7 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
       const form = new FormData();
       form.append('sessionid', activeSessionId);
       form.append('file', blob, `voice.${extension}`);
-      await this._request('/humanaudio', { method: 'POST', body: form });
+      await this._request('/humanaudio', { method: 'POST', body: form }, true, Math.max(this._config.timeoutMs, 15_000));
     };
 
     let activeSessionId = sessionId;
@@ -710,6 +736,10 @@ export class LiveTalkingProvider implements TalkingVideoProvider {
 
   async setModel(model: string): Promise<void> {
     this._config.model = model;
+  }
+
+  setFps(fps: number): void {
+    this._config.fps = Math.max(1, Math.round(fps));
   }
 
   setEndpoint(endpointUrl: string): void {

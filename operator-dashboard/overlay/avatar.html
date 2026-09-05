@@ -450,7 +450,7 @@
     // ── WebSocket Integration ───────────────────────────────
     function connectWebSocket() {
       const host = window.location.hostname || 'localhost';
-      const port = window.location.port || '11111';
+      const port = window.location.port || '6767';
       const wsUrl = `ws://${host}:${port}`;
 
       const runtimeToken = sessionStorage.getItem('idol_runtime_auth_token') || new URLSearchParams(location.hash.slice(1)).get('token') || '';
@@ -502,29 +502,9 @@
               } else if (data.event.audioUrl) {
                 const aud = new Audio(data.event.audioUrl);
                 aud.play().catch(() => {});
-              } else if ('speechSynthesis' in window && data.event.text) {
-                try {
-                  window.speechSynthesis.cancel();
-                  window.speechSynthesis.resume();
-                  const u = new SpeechSynthesisUtterance(data.event.text);
-                  u.rate = 1.05;
-                  u.pitch = 1.1;
-                  u.volume = 1.0;
-                  const voices = window.speechSynthesis.getVoices();
-                  const viVoice = voices.find(v => (v.lang && (v.lang.includes('vi') || v.lang.includes('VI'))) || (v.name && v.name.toLowerCase().includes('viet')));
-                  if (viVoice) {
-                    u.voice = viVoice;
-                    u.lang = viVoice.lang || 'vi-VN';
-                  } else if (voices.length > 0) {
-                    const altVoice = voices.find(v => v.name.toLowerCase().includes('female') || v.default) || voices[0];
-                    if (altVoice) u.voice = altVoice;
-                  }
-                  window.speechSynthesis.speak(u);
-                } catch {}
               }
             } else if (data.event?.type === 'voice.finished' || data.event?.type === 'voice.interrupted') {
               frameEl.classList.remove('speaking');
-              if ('speechSynthesis' in window) window.speechSynthesis.cancel();
               setTimeout(() => subBox.classList.remove('visible'), 1200);
             }
           }

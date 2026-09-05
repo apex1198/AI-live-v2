@@ -69,13 +69,13 @@ class WebRtcQualityTestCase(unittest.TestCase):
         frame, _ = player.video._queue.get_nowait()
         self.assertEqual((frame.width, frame.height), (1280, 720))
 
-    def test_repeated_output_frames_resize_the_model_frame_only_once(self):
+    def test_model_and_transport_emit_one_unique_frame_at_30_fps(self):
         env = {
             'LIVETALKING_VIDEO_QUALITY': 'hd',
             'LIVETALKING_MAX_WIDTH': '1280',
             'LIVETALKING_MAX_HEIGHT': '720',
         }
-        avatar = self.make_avatar(model_fps=15, output_fps=30)
+        avatar = self.make_avatar(model_fps=30, output_fps=30)
         original_resize = __import__('cv2').resize
         with patch.dict(os.environ, env, clear=False), patch(
             'server.webrtc.cv2.resize', wraps=original_resize
@@ -83,11 +83,24 @@ class WebRtcQualityTestCase(unittest.TestCase):
             player = HumanPlayer(avatar)
             player.push_video(np.zeros((1080, 1920, 3), dtype=np.uint8))
 
-        self.assertEqual(player.video._queue.qsize(), 2)
+        self.assertEqual(player.video._queue.qsize(), 1)
         self.assertEqual(resize.call_count, 1)
         while not player.video._queue.empty():
             frame, _ = player.video._queue.get_nowait()
             self.assertEqual((frame.width, frame.height), (1280, 720))
+
+    def test_portrait_avatar_is_letterboxed_to_exact_hd_output(self):
+        env = {
+            'LIVETALKING_VIDEO_QUALITY': 'hd',
+            'LIVETALKING_MAX_WIDTH': '1280',
+            'LIVETALKING_MAX_HEIGHT': '720',
+        }
+        with patch.dict(os.environ, env, clear=False):
+            player = HumanPlayer(self.make_avatar(model_fps=30, output_fps=30))
+            player.push_video(np.zeros((1280, 720, 3), dtype=np.uint8))
+
+        frame, _ = player.video._queue.get_nowait()
+        self.assertEqual((frame.width, frame.height), (1280, 720))
 
 
 if __name__ == '__main__':

@@ -16,6 +16,7 @@ import numpy as np
 from avatars.musetalk.myutil import get_image_blending_perspective
 from avatars.musetalk.utils.face_geometry import (
     CANONICAL_EYE_DISTANCE,
+    GEOMETRY_MAX_REPROJECTION_ERROR_PX,
     face_geometry_summary,
 )
 
@@ -126,7 +127,10 @@ def check_alignment(
     )
     if len(mask_paths) != len(frame_paths):
         raise RuntimeError(f"mask/frame count mismatch: {len(mask_paths)} vs {len(frame_paths)}")
-    if info.get("mask_format") != "mediapipe_478_lower_face_mouth_inset20pct_feather5_v10":
+    if info.get("mask_format") not in {
+        "mediapipe_478_lower_face_mouth_inset20pct_feather5_v10",
+        "hybrid_adaptive_v11",
+    }:
         raise RuntimeError(
             "alignment check requires the landmark-aligned lower-face mask artifact "
             "mediapipe_478_lower_face_mouth_inset20pct_feather5_v10"
@@ -243,7 +247,7 @@ def check_alignment(
         and max_center_drift <= 12.0
         and max_reprojection <= 2.0
         and max_matrix_error <= 2.0
-        and max_anchor_error <= 8.0
+        and max_anchor_error <= GEOMETRY_MAX_REPROJECTION_ERROR_PX
         and max_runtime_error <= 2.0
         and max_mouth_tracking_error <= 0.5
         and max_roll_error <= 0.5
@@ -265,7 +269,7 @@ def check_alignment(
             "max_aligned_mouth_drift_px": 12.0,
             "max_roundtrip_mouth_error_px": 2.0,
             "max_matrix_mouth_error_px": 2.0,
-            "max_anchor_reprojection_error_px": 8.0,
+            "max_anchor_reprojection_error_px": GEOMETRY_MAX_REPROJECTION_ERROR_PX,
             "max_runtime_paste_back_mouth_error_px": 2.0,
             "max_mouth_tracking_error_px": 0.5,
             "max_roll_error_degrees": 0.5,

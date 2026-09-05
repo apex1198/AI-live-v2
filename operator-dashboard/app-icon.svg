@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="AI Livestream smiling face">
+  <rect width="512" height="512" rx="112" fill="#050505"/>
+  <rect x="12" y="12" width="488" height="488" rx="101" fill="none" stroke="#34c759" stroke-opacity=".24" stroke-width="8"/>
+  <circle cx="256" cy="256" r="154" fill="#34c759" fill-opacity=".09" stroke="#34c759" stroke-width="18"/>
+  <circle cx="204" cy="220" r="17" fill="#f5fff7"/>
+  <circle cx="308" cy="220" r="17" fill="#f5fff7"/>
+  <path d="M170 283c20 52 61 78 86 78s66-26 86-78" fill="none" stroke="#34c759" stroke-width="24" stroke-linecap="round"/>
+</svg>

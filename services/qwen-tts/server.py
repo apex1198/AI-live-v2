@@ -40,6 +40,10 @@ class Engine:
         self.model_lock = threading.RLock()
         self.load_lock = threading.Lock()
         self.loaded_at = 0.0
+        self.active_generation = False
+        self.last_success_at = 0.0
+        self.last_error = ""
+        self.last_generation_ms = 0
 
     def load(self):
         if self.model is not None:
@@ -146,23 +150,41 @@ class Engine:
             raise ValueError("Voice profile not found")
         started = time.perf_counter()
         with self.model_lock:
-            result = next(self.model.generate(
-                text=payload.text.strip(),
-                lang_code="Vietnamese",
-                ref_audio=profile["ref_audio"],
-                ref_text=profile["ref_text"],
-                temperature=0.3,
-                top_k=20,
-                top_p=0.9,
-                repetition_penalty=2.0,
-                max_tokens=4096,
-                verbose=False,
-            ))
-            audio = np.asarray(result.audio, dtype=np.float32)
+            self.active_generation = True
+            try:
+                generation = self.model.generate(
+                    text=payload.text.strip(),
+                    lang_code="Vietnamese",
+                    ref_audio=profile["ref_audio"],
+                    ref_text=profile["ref_text"],
+                    temperature=0.3,
+                    top_k=20,
+                    top_p=0.9,
+                    repetition_penalty=2.0,
+                    max_tokens=4096,
+                    verbose=False,
+                )
+                try:
+                    result = next(generation)
+                    audio = np.asarray(result.audio, dtype=np.float32).copy()
+                    mx.eval(result.audio)
+                finally:
+                    close_generation = getattr(generation, "close", None)
+                    if callable(close_generation):
+                        close_generation()
+                    mx.clear_cache()
+            except Exception as error:
+                self.last_error = str(error)
+                raise
+            finally:
+                self.active_generation = False
         output = io.BytesIO()
         sf.write(output, audio, result.sample_rate, format="WAV", subtype="PCM_16")
         duration_ms = round(len(audio) / result.sample_rate * 1000)
         generation_ms = round((time.perf_counter() - started) * 1000)
+        self.last_success_at = time.time()
+        self.last_generation_ms = generation_ms
+        self.last_error = ""
         return output.getvalue(), duration_ms, generation_ms
 
 
@@ -172,13 +194,17 @@ def create_app(engine: Engine):
     @app.get("/api/health")
     def health():
         return {
-            "ready": True,
+            "ready": engine.model is not None,
             "model_loaded": engine.model is not None,
             "provider": "qwentts",
             "model": "gwen-tts-0.6B-vi-8bit",
             "backend": "mlx",
             "default_voice_id": DEFAULT_VOICE_ID,
             "loaded_at": engine.loaded_at,
+            "busy": engine.active_generation,
+            "last_success_at": engine.last_success_at,
+            "last_generation_ms": engine.last_generation_ms,
+            "last_error": engine.last_error,
         }
 
     @app.get("/api/voices")
@@ -221,6 +247,10 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
     engine = Engine(args.model, args.data_dir)
+    # Do not expose a ready HTTP service until the model and its default voice
+    # are resident. This prevents the first live utterance from paying a lazy
+    # load cost or being aborted while GPU resources are still initializing.
+    engine.load()
     uvicorn.run(create_app(engine), host=args.host, port=args.port, log_level="info")
 
 

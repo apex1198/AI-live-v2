@@ -1,0 +1,885 @@
+/* ============================================================
+   AI IDOL STREAMER — APPLE DESIGN SYSTEM (DARK CHARCOAL & GREEN)
+   Style: Apple macOS / iOS Human Interface Guidelines (Dark Mode)
+   Theme: Dark Charcoal Canvas (#141414) + Apple System Green (#34C759)
+   ============================================================ */
+
+/* ── 1. Root Tokens & Global Palette ───────────────────────── */
+:root {
+  /* Apple Dark Charcoal Canvas & Surfaces */
+  --apple-bg:                 #141414;
+  --apple-bg-subtle:          #18181a;
+  --apple-surface:            #1c1c1e;
+  --apple-surface-hover:      #242426;
+  --apple-surface-secondary:  #28282a;
+  --apple-surface-tertiary:   #323235;
+
+  /* Apple System Green (Signature Color) */
+  --apple-green:              #34c759;
+  --apple-green-hover:        #30d158;
+  --apple-green-dark:         #248a3d;
+  --apple-green-light:        #4ade80;
+  --apple-green-subtle:       rgba(52, 199, 89, 0.15);
+  --apple-green-subtle-hover: rgba(52, 199, 89, 0.22);
+  --apple-green-border:       rgba(52, 199, 89, 0.35);
+  --apple-green-glow:         rgba(52, 199, 89, 0.30);
+
+  /* Apple Semantics (Dark Adjusted) */
+  --apple-amber:              #ff9f0a;
+  --apple-amber-subtle:       rgba(255, 159, 10, 0.15);
+  --apple-red:                #ff453a;
+  --apple-red-subtle:         rgba(255, 69, 58, 0.15);
+  --apple-blue:               #0a84ff;
+  --apple-blue-subtle:        rgba(10, 132, 255, 0.15);
+  --apple-purple:             #bf5af2;
+  --apple-purple-subtle:      rgba(191, 90, 242, 0.15);
+
+  /* Apple Typography Scale (Dark Mode SF Pro) */
+  --apple-text-primary:       #f5f5f7;
+  --apple-text-secondary:     #a1a1a6;
+  --apple-text-tertiary:      #86868b;
+  --apple-text-quaternary:    #545458;
+
+  /* Apple Hairline Borders & Dividers */
+  --apple-border:             rgba(255, 255, 255, 0.08);
+  --apple-border-subtle:      rgba(255, 255, 255, 0.05);
+  --apple-border-strong:      rgba(255, 255, 255, 0.14);
+  --apple-divider:            rgba(255, 255, 255, 0.07);
+
+  /* Apple Continuous Squircles */
+  --apple-radius-xs:          6px;
+  --apple-radius-sm:          10px;
+  --apple-radius-md:          14px;
+  --apple-radius-lg:          18px;
+  --apple-radius-xl:          24px;
+  --apple-radius-full:        9999px;
+
+  /* Apple Dark Ambient Shadows */
+  --apple-shadow-xs:          0 1px 3px rgba(0, 0, 0, 0.35);
+  --apple-shadow-sm:          0 2px 8px rgba(0, 0, 0, 0.40);
+  --apple-shadow-md:          0 8px 24px rgba(0, 0, 0, 0.50);
+  --apple-shadow-lg:          0 16px 40px rgba(0, 0, 0, 0.60);
+  --apple-shadow-dialog:      0 24px 64px rgba(0, 0, 0, 0.75);
+
+  /* Overriding Legacy Variables */
+  --bg:                       var(--apple-bg) !important;
+  --bg-subtle:                var(--apple-bg-subtle) !important;
+  --bg-card:                  var(--apple-surface) !important;
+  --bg-el:                    var(--apple-surface-secondary) !important;
+  --bg-el2:                   var(--apple-surface-tertiary) !important;
+  --border:                   var(--apple-border) !important;
+  --border-s:                 var(--apple-border-strong) !important;
+  --border-focus:             rgba(52, 199, 89, 0.55) !important;
+
+  --t1:                       var(--apple-text-primary) !important;
+  --t2:                       var(--apple-text-secondary) !important;
+  --t3:                       var(--apple-text-tertiary) !important;
+
+  --green:                    var(--apple-green) !important;
+  --accent:                   var(--apple-green) !important;
+  --green-d:                  var(--apple-green-subtle) !important;
+  --accent-d:                 var(--apple-green-subtle) !important;
+  --amber:                    var(--apple-amber) !important;
+  --amber-d:                  var(--apple-amber-subtle) !important;
+  --red:                      var(--apple-red) !important;
+  --red-d:                    var(--apple-red-subtle) !important;
+  --purple:                   var(--apple-purple) !important;
+  --purple-d:                 var(--apple-purple-subtle) !important;
+
+  /* Overriding Material Roles */
+  --md-sys-color-primary:     var(--apple-green) !important;
+  --md-sys-color-on-primary:  #ffffff !important;
+  --md-sys-color-primary-container: var(--apple-green-subtle) !important;
+  --md-sys-color-on-primary-container: var(--apple-green-light) !important;
+  --md-sys-color-surface:     var(--apple-surface) !important;
+  --md-sys-color-surface-container-low: var(--apple-bg) !important;
+  --md-sys-color-surface-container: var(--apple-surface-secondary) !important;
+  --md-sys-color-surface-container-high: var(--apple-surface-tertiary) !important;
+  --md-sys-color-on-surface:  var(--apple-text-primary) !important;
+  --md-sys-color-on-surface-variant: var(--apple-text-secondary) !important;
+  --md-sys-color-outline:     var(--apple-border) !important;
+
+  color-scheme: dark !important;
+}
+
+/* ── 2. Reset & Base Typography ────────────────────────────── */
+html, body {
+  background: var(--apple-bg) !important;
+  color: var(--apple-text-primary) !important;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "SF Pro", "Helvetica Neue", sans-serif !important;
+  -webkit-font-smoothing: antialiased !important;
+  -moz-osx-font-smoothing: grayscale !important;
+  letter-spacing: -0.012em;
+}
+
+body {
+  background-image: none !important;
+}
+
+/* ── 3. Apple Frosted Topbar (Dark Charcoal) ───────────────── */
+.topbar {
+  background: rgba(20, 20, 20, 0.85) !important;
+  backdrop-filter: blur(25px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(25px) saturate(180%) !important;
+  border-bottom: 1px solid var(--apple-border) !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4) !important;
+  height: 52px !important;
+  padding: 0 18px !important;
+  color: var(--apple-text-primary) !important;
+}
+
+.tb-brand {
+  color: var(--apple-text-primary) !important;
+  font-weight: 600 !important;
+  font-size: 13.5px !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+.tb-brand em {
+  color: var(--apple-text-tertiary) !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+  font-size: 12px !important;
+}
+
+.logo-dot {
+  background: var(--apple-green) !important;
+  box-shadow: 0 0 12px rgba(52, 199, 89, 0.7) !important;
+}
+
+.live-pill {
+  background: var(--apple-red-subtle) !important;
+  color: var(--apple-red) !important;
+  border: 1px solid rgba(255, 69, 58, 0.35) !important;
+  border-radius: var(--apple-radius-full) !important;
+  font-weight: 700 !important;
+}
+
+.live-dot {
+  background: var(--apple-red) !important;
+}
+
+.stream-clock {
+  font-family: -apple-system, "SF Mono", Menlo, monospace !important;
+  color: var(--apple-text-secondary) !important;
+  font-weight: 500 !important;
+}
+
+/* System Status Bar in Header */
+.tb-system {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-full) !important;
+  padding: 4px 10px !important;
+}
+
+.sys-item {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  font-size: 11px !important;
+  color: var(--apple-text-secondary) !important;
+}
+
+.sys-k {
+  color: var(--apple-text-secondary) !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+}
+
+.sys-dot {
+  width: 7px !important;
+  height: 7px !important;
+  border-radius: 50% !important;
+}
+
+.sys-dot.ok {
+  background: var(--apple-green) !important;
+  box-shadow: 0 0 8px rgba(52, 199, 89, 0.7) !important;
+}
+
+.sys-dot.warn {
+  background: var(--apple-amber) !important;
+  box-shadow: 0 0 8px rgba(255, 159, 10, 0.6) !important;
+}
+
+.sys-dot.err {
+  background: var(--apple-red) !important;
+  box-shadow: 0 0 8px rgba(255, 69, 58, 0.6) !important;
+}
+
+.dialogue-provider-badge {
+  background: var(--apple-green-subtle) !important;
+  color: var(--apple-green-light) !important;
+  border: 1px solid var(--apple-green-border) !important;
+  border-radius: var(--apple-radius-xs) !important;
+  padding: 2px 7px !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.03em !important;
+}
+
+.lat-tag {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: var(--apple-text-secondary) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-xs) !important;
+  padding: 2px 6px !important;
+  font-family: -apple-system, "SF Mono", Menlo, monospace !important;
+  font-size: 10px !important;
+}
+
+/* Topbar Buttons */
+.btn-tb, .topbar-icon-button {
+  background: var(--apple-surface) !important;
+  color: var(--apple-text-primary) !important;
+  border: 1px solid var(--apple-border-strong) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  box-shadow: var(--apple-shadow-xs) !important;
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  font-weight: 500 !important;
+}
+
+.btn-tb:hover, .topbar-icon-button:hover {
+  background: var(--apple-surface-hover) !important;
+  border-color: rgba(255, 255, 255, 0.22) !important;
+  transform: translateY(-0.5px);
+}
+
+.btn-tb:active, .topbar-icon-button:active {
+  transform: translateY(0.5px);
+  background: var(--apple-surface-secondary) !important;
+}
+
+#btn-magic-connect {
+  background: var(--apple-green) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--apple-green-hover) !important;
+  box-shadow: 0 2px 10px rgba(52, 199, 89, 0.40) !important;
+  font-weight: 600 !important;
+}
+
+#btn-magic-connect:hover {
+  background: var(--apple-green-hover) !important;
+  box-shadow: 0 4px 16px rgba(52, 199, 89, 0.55) !important;
+}
+
+.livetalking-worker-button[data-state="READY"] {
+  background: var(--apple-green-subtle) !important;
+  color: var(--apple-green-light) !important;
+  border-color: var(--apple-green-border) !important;
+}
+
+.livetalking-worker-button .livetalking-worker-dot {
+  background: var(--apple-green) !important;
+}
+
+/* ── 4. Apple Sidebar Navigation ───────────────────────────── */
+.studio-sidebar {
+  background: rgba(24, 24, 26, 0.90) !important;
+  backdrop-filter: blur(28px) saturate(190%) !important;
+  -webkit-backdrop-filter: blur(28px) saturate(190%) !important;
+  border-right: 1px solid var(--apple-border) !important;
+}
+
+.studio-mark-orb {
+  background: var(--apple-green) !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 10px rgba(52, 199, 89, 0.45) !important;
+}
+
+.studio-nav-label {
+  color: var(--apple-text-tertiary) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.05em !important;
+  text-transform: uppercase !important;
+}
+
+.studio-nav-item {
+  color: var(--apple-text-secondary) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  font-weight: 500 !important;
+  transition: all 0.15s ease !important;
+}
+
+.studio-nav-item span {
+  color: var(--apple-text-tertiary) !important;
+  transition: color 0.15s ease !important;
+}
+
+.studio-nav-item:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: var(--apple-text-primary) !important;
+}
+
+.studio-nav-item:hover span {
+  color: var(--apple-text-primary) !important;
+}
+
+.studio-nav-item.active {
+  background: var(--apple-green-subtle) !important;
+  color: var(--apple-green-light) !important;
+  border: 1px solid var(--apple-green-border) !important;
+  font-weight: 600 !important;
+}
+
+.studio-nav-item.active span {
+  color: var(--apple-green) !important;
+}
+
+.studio-health-card {
+  background: var(--apple-surface) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-md) !important;
+  box-shadow: var(--apple-shadow-xs) !important;
+}
+
+.studio-health-card strong {
+  color: var(--apple-text-primary) !important;
+}
+
+.studio-health-card small {
+  color: var(--apple-text-secondary) !important;
+}
+
+/* ── 5. Main 3-Column Layout & Bento Cards ─────────────────── */
+.app-body {
+  background: var(--apple-bg) !important;
+  gap: 12px !important;
+  padding: 12px !important;
+}
+
+.panel-section,
+.voice-status-panel,
+.state-chips-panel,
+.monitor-box {
+  background: var(--apple-surface) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-lg) !important;
+  box-shadow: var(--apple-shadow-sm) !important;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease !important;
+}
+
+.panel-section:hover,
+.state-chips-panel:hover,
+.monitor-box:hover {
+  border-color: var(--apple-border-strong) !important;
+  box-shadow: var(--apple-shadow-md) !important;
+}
+
+.panel-hdr, .monitor-hdr {
+  background: transparent !important;
+  border-bottom: 1px solid var(--apple-divider) !important;
+  min-height: 46px !important;
+  padding: 10px 16px !important;
+}
+
+.sec-label, .monitor-title {
+  color: var(--apple-text-primary) !important;
+  font-weight: 600 !important;
+  font-size: 12.5px !important;
+  letter-spacing: -0.01em !important;
+  text-transform: none !important;
+}
+
+.count-badge, .plat-pill-sm, .monitor-state-tag {
+  background: var(--apple-surface-secondary) !important;
+  color: var(--apple-text-secondary) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-full) !important;
+  font-weight: 600 !important;
+}
+
+/* ── 6. Live Chat & Community Stream (Left Column) ─────────── */
+.chat-platform-filters {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-radius: var(--apple-radius-full) !important;
+  padding: 3px !important;
+  gap: 3px !important;
+}
+
+.chat-plat-pill {
+  border-radius: var(--apple-radius-full) !important;
+  color: var(--apple-text-secondary) !important;
+  font-weight: 500 !important;
+  border: none !important;
+  background: transparent !important;
+  transition: all 0.15s ease !important;
+}
+
+.chat-plat-pill.active {
+  background: var(--apple-surface-hover) !important;
+  color: var(--apple-text-primary) !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3) !important;
+  font-weight: 600 !important;
+}
+
+.chat-list {
+  gap: 8px !important;
+}
+
+.chat-msg {
+  background: var(--apple-bg-subtle) !important;
+  border: 1px solid var(--apple-border-subtle) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  padding: 8px 11px !important;
+  color: var(--apple-text-primary) !important;
+  transition: background 0.15s ease !important;
+}
+
+.chat-msg:hover {
+  background: var(--apple-surface-secondary) !important;
+}
+
+.chat-user {
+  color: var(--apple-text-primary) !important;
+  font-weight: 600 !important;
+}
+
+.chat-time {
+  color: var(--apple-text-tertiary) !important;
+}
+
+.chat-body {
+  color: #e5e5e7 !important;
+  line-height: 1.45 !important;
+}
+
+/* AI Idol Reply Row in Chat */
+.chat-msg.reply, .chat-msg.assistant-reply {
+  background: var(--apple-green-subtle) !important;
+  border: 1px solid var(--apple-green-border) !important;
+}
+
+.chat-msg.reply .chat-user, .chat-msg.assistant-reply .chat-user {
+  color: var(--apple-green-light) !important;
+}
+
+/* Chat Input Bar */
+.chat-input-row, .chat-quick-row {
+  border-top: 1px solid var(--apple-divider) !important;
+  padding: 10px 14px !important;
+  background: var(--apple-surface) !important;
+}
+
+.chat-quick-row input, input[type="text"], input[type="password"], input[type="url"], input[type="number"], select, textarea {
+  background: var(--apple-surface-secondary) !important;
+  color: var(--apple-text-primary) !important;
+  border: 1px solid var(--apple-border-strong) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25) !important;
+  transition: all 0.15s ease !important;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none !important;
+  border-color: var(--apple-green) !important;
+  box-shadow: 0 0 0 3px rgba(52, 199, 89, 0.32) !important;
+}
+
+.btn-chat-submit, .btn-primary, .workspace-primary {
+  background: var(--apple-green) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--apple-green-hover) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  font-weight: 600 !important;
+  box-shadow: 0 2px 10px rgba(52, 199, 89, 0.40) !important;
+  transition: all 0.15s ease !important;
+}
+
+.btn-chat-submit:hover, .btn-primary:hover, .workspace-primary:hover {
+  background: var(--apple-green-hover) !important;
+  box-shadow: 0 4px 16px rgba(52, 199, 89, 0.55) !important;
+  transform: translateY(-0.5px);
+}
+
+.btn-secondary, .workspace-secondary {
+  background: var(--apple-surface-secondary) !important;
+  color: var(--apple-text-primary) !important;
+  border: 1px solid var(--apple-border-strong) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  font-weight: 600 !important;
+  box-shadow: var(--apple-shadow-xs) !important;
+  transition: all 0.15s ease !important;
+}
+
+.btn-secondary:hover, .workspace-secondary:hover {
+  background: var(--apple-surface-hover) !important;
+  border-color: rgba(255, 255, 255, 0.22) !important;
+}
+
+/* ── 7. Studio 16:9 Monitor & State Chips (Center Column) ──── */
+.monitor-screen-wrap {
+  background: #0a0a0c !important;
+  border-radius: var(--apple-radius-md) !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08), var(--apple-shadow-sm) !important;
+  overflow: hidden !important;
+}
+
+.talking-live-badge {
+  background: rgba(28, 28, 30, 0.88) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  color: var(--apple-text-primary) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-full) !important;
+  font-weight: 600 !important;
+  box-shadow: var(--apple-shadow-xs) !important;
+}
+
+/* State Chips (Tactile Apple Buttons) */
+.state-chips-wrap {
+  gap: 8px !important;
+  padding: 10px 14px !important;
+}
+
+.sc, .btn-game-act {
+  background: var(--apple-surface-secondary) !important;
+  color: var(--apple-text-primary) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  font-weight: 600 !important;
+  box-shadow: var(--apple-shadow-xs) !important;
+  transition: all 0.15s ease !important;
+}
+
+.sc:hover, .btn-game-act:hover {
+  background: var(--apple-surface-hover) !important;
+  border-color: var(--apple-border-strong) !important;
+  transform: translateY(-0.5px);
+}
+
+.sc.active {
+  background: var(--apple-green) !important;
+  color: #ffffff !important;
+  border-color: var(--apple-green-hover) !important;
+  box-shadow: 0 2px 12px rgba(52, 199, 89, 0.45) !important;
+}
+
+.sc.win.active {
+  background: var(--apple-amber) !important;
+  color: #ffffff !important;
+  border-color: #d97706 !important;
+  box-shadow: 0 2px 12px rgba(255, 159, 10, 0.45) !important;
+}
+
+.sc.purple.active {
+  background: var(--apple-purple) !important;
+  color: #ffffff !important;
+  border-color: #9333ea !important;
+  box-shadow: 0 2px 12px rgba(191, 90, 242, 0.45) !important;
+}
+
+/* ── 8. Health, Metrics & Logging (Right Column) ───────────── */
+.voice-status-panel, .panel-section {
+  padding: 14px !important;
+}
+
+.vstatus-progress-track {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-radius: var(--apple-radius-full) !important;
+  height: 6px !important;
+  overflow: hidden !important;
+}
+
+.vstatus-progress-fill, .tl-fill, .phase-track-fill {
+  background: var(--apple-green) !important;
+  border-radius: var(--apple-radius-full) !important;
+}
+
+.metric-grid {
+  display: grid !important;
+  gap: 10px !important;
+}
+
+.metric-box {
+  background: var(--apple-bg-subtle) !important;
+  border: 1px solid var(--apple-border-subtle) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  padding: 10px 12px !important;
+}
+
+.metric-k {
+  color: var(--apple-text-secondary) !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+}
+
+.metric-v {
+  color: var(--apple-text-primary) !important;
+  font-size: 15px !important;
+  font-weight: 700 !important;
+}
+
+.log-item, .ev-row {
+  background: var(--apple-bg-subtle) !important;
+  border-left: 3px solid var(--apple-green) !important;
+  border-radius: var(--apple-radius-xs) !important;
+  padding: 7px 10px !important;
+  margin-bottom: 6px !important;
+  color: var(--apple-text-primary) !important;
+}
+
+.log-t, .ev-time {
+  color: var(--apple-text-tertiary) !important;
+  font-family: -apple-system, "SF Mono", Menlo, monospace !important;
+}
+
+.log-m, .ev-msg {
+  color: var(--apple-text-primary) !important;
+}
+
+/* ── 9. Apple Sliders, Toggles & Form Controls ─────────────── */
+input[type="range"] {
+  accent-color: var(--apple-green) !important;
+  cursor: pointer !important;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--apple-green) !important;
+  width: 17px !important;
+  height: 17px !important;
+  cursor: pointer !important;
+}
+
+/* ── 10. Apple Frosted Drawers & Modals ─────────────────────── */
+.session-quick-settings {
+  background: rgba(24, 24, 26, 0.92) !important;
+  backdrop-filter: blur(35px) saturate(200%) !important;
+  -webkit-backdrop-filter: blur(35px) saturate(200%) !important;
+  border-left: 1px solid var(--apple-border) !important;
+  box-shadow: -6px 0 35px rgba(0, 0, 0, 0.65) !important;
+  border-radius: var(--apple-radius-xl) 0 0 var(--apple-radius-xl) !important;
+}
+
+.session-quick-head {
+  border-bottom: 1px solid var(--apple-divider) !important;
+  padding: 16px 20px !important;
+}
+
+.session-quick-head strong {
+  color: var(--apple-text-primary) !important;
+  font-size: 16px !important;
+}
+
+.session-quick-list label {
+  border-bottom: 1px solid var(--apple-divider) !important;
+  padding: 12px 18px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
+
+.session-quick-list label span strong {
+  color: var(--apple-text-primary) !important;
+  font-size: 13px !important;
+}
+
+.session-quick-list label span small {
+  color: var(--apple-text-secondary) !important;
+}
+
+/* Full Settings Modal */
+.modal-backdrop, .settings-backdrop {
+  background: rgba(0, 0, 0, 0.65) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+}
+
+.modal-card, .settings-center-card {
+  background: var(--apple-surface) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-xl) !important;
+  box-shadow: var(--apple-shadow-dialog) !important;
+  overflow: hidden !important;
+}
+
+.settings-head {
+  background: var(--apple-bg-subtle) !important;
+  border-bottom: 1px solid var(--apple-divider) !important;
+  padding: 22px 28px !important;
+}
+
+.settings-head h3 {
+  color: var(--apple-text-primary) !important;
+  font-size: 20px !important;
+  font-weight: 700 !important;
+}
+
+.settings-tabs {
+  background: var(--apple-bg) !important;
+  border-right: 1px solid var(--apple-divider) !important;
+  padding: 16px 10px !important;
+}
+
+.settings-tab {
+  border-radius: var(--apple-radius-sm) !important;
+  color: var(--apple-text-secondary) !important;
+  font-weight: 500 !important;
+  transition: all 0.15s ease !important;
+}
+
+.settings-tab:hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: var(--apple-text-primary) !important;
+}
+
+.settings-tab.active {
+  background: var(--apple-surface-hover) !important;
+  color: var(--apple-green-light) !important;
+  border: 1px solid var(--apple-green-border) !important;
+  box-shadow: var(--apple-shadow-xs) !important;
+  font-weight: 600 !important;
+}
+
+.settings-content {
+  background: var(--apple-surface) !important;
+  padding: 24px 30px !important;
+}
+
+.settings-action-card, .settings-tool-card, .project-storage-card, .avatar-pool-card {
+  background: var(--apple-bg-subtle) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-md) !important;
+  box-shadow: var(--apple-shadow-xs) !important;
+  color: var(--apple-text-primary) !important;
+}
+
+.settings-action-card strong, .settings-tool-card strong, .project-storage-title strong, .avatar-pool-head strong {
+  color: var(--apple-text-primary) !important;
+}
+
+.settings-action-card small, .settings-tool-card small, .project-storage-title small, .avatar-pool-head small {
+  color: var(--apple-text-secondary) !important;
+}
+
+/* ── 11. App Startup Overlay ───────────────────────────────── */
+.app-startup-overlay {
+  background: var(--apple-bg) !important;
+  color: var(--apple-text-primary) !important;
+}
+
+.app-startup-mark {
+  background: var(--apple-green-subtle) !important;
+  color: var(--apple-green) !important;
+  border: 1px solid var(--apple-green-border) !important;
+  border-radius: var(--apple-radius-md) !important;
+}
+
+.app-startup-progress {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-radius: var(--apple-radius-full) !important;
+}
+
+.app-startup-progress span {
+  background: var(--apple-green) !important;
+  border-radius: var(--apple-radius-full) !important;
+}
+
+.app-startup-workers > div {
+  background: var(--apple-surface) !important;
+  border-color: var(--apple-border) !important;
+  box-shadow: var(--apple-shadow-xs) !important;
+}
+
+.app-startup-workers span:not(.app-startup-worker-dot) {
+  color: var(--apple-text-primary) !important;
+}
+
+.app-startup-workers small {
+  color: var(--apple-text-secondary) !important;
+}
+
+.app-startup-retry {
+  color: #fff !important;
+  background: var(--apple-green) !important;
+  border-color: var(--apple-green) !important;
+}
+
+/* ── 12. Director & AI Persona Settings View ───────────────── */
+.director-view, .web-app-main {
+  background: var(--apple-bg) !important;
+}
+
+.director-brief-panel, .director-sources-panel, .ai-profile-panel, .reply-skill-panel {
+  background: var(--apple-surface) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-lg) !important;
+  box-shadow: var(--apple-shadow-sm) !important;
+  color: var(--apple-text-primary) !important;
+}
+
+.ai-profile-section-head h2, .ai-profile-panel-head h2, .director-panel-title h2 {
+  color: var(--apple-text-primary) !important;
+  font-weight: 700 !important;
+}
+
+.ai-profile-panel-head > .material-symbols-rounded {
+  background: var(--apple-green-subtle) !important;
+  color: var(--apple-green) !important;
+  border-radius: var(--apple-radius-sm) !important;
+}
+
+.ai-voice-profile-item, .reply-skill-item {
+  background: var(--apple-bg-subtle) !important;
+  border: 1px solid var(--apple-border) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  color: var(--apple-text-primary) !important;
+}
+
+.ai-voice-profile-item.selected, .reply-skill-item.active {
+  background: var(--apple-green-subtle) !important;
+  border-color: var(--apple-green-border) !important;
+}
+
+.reply-skill-active-badge {
+  background: var(--apple-green) !important;
+  color: #ffffff !important;
+  border-radius: var(--apple-radius-full) !important;
+}
+.musetalk-mask-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 2px 0 14px;
+}
+
+.musetalk-mask-options label {
+  position: relative;
+  min-height: 58px;
+  cursor: pointer;
+}
+
+.musetalk-mask-options input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.musetalk-mask-options span {
+  display: flex;
+  min-height: 58px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,.12));
+  border-radius: 12px;
+  background: rgba(255,255,255,.035);
+  flex-direction: column;
+  justify-content: center;
+  transition: border-color .16s ease, background .16s ease, transform .16s ease;
+}
+
+.musetalk-mask-options small { margin-top: 2px; opacity: .64; line-height: 1.25; }
+.musetalk-mask-options input:checked + span { border-color: #8b5cf6; background: rgba(139,92,246,.16); }
+.musetalk-mask-options input:focus-visible + span { outline: 2px solid #a78bfa; outline-offset: 2px; }
+.musetalk-mask-options label:hover span { transform: translateY(-1px); }
+.musetalk-mask-options[aria-busy="true"] { opacity: .58; pointer-events: none; }
+
+@media (max-width: 720px) {
+  .musetalk-mask-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

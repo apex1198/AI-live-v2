@@ -26,7 +26,7 @@ import json
 import re
 import os
 import numpy as np
-from threading import Thread,Event
+from threading import Thread, Event, RLock
 #import multiprocessing
 import torch.multiprocessing as mp
 
@@ -62,6 +62,7 @@ app = Flask(__name__)
 opt = None
 model = None
 global_avatars = {} # avatar_id: payload
+avatar_cache_lock = RLock()
         
 
 def release_accelerator_cache():
@@ -76,18 +77,25 @@ def release_accelerator_cache():
 
 
 def evict_avatar_cache(keep_avatar_id=None, remove_avatar_id=None):
-    for cached_id in list(global_avatars):
-        should_remove = cached_id == remove_avatar_id or (keep_avatar_id and cached_id != keep_avatar_id)
-        if should_remove:
-            global_avatars.pop(cached_id, None)
+    with avatar_cache_lock:
+        for cached_id in list(global_avatars):
+            should_remove = cached_id == remove_avatar_id or (keep_avatar_id and cached_id != keep_avatar_id)
+            if should_remove:
+                global_avatars.pop(cached_id, None)
     release_accelerator_cache()
 
 
 def get_or_load_avatar(avatar_id):
-    if avatar_id not in global_avatars:
+    with avatar_cache_lock:
+        cached_avatar = global_avatars.get(avatar_id)
+        if cached_avatar is not None:
+            return cached_avatar
         evict_avatar_cache(keep_avatar_id=avatar_id)
-        global_avatars[avatar_id] = load_avatar(avatar_id)
-    return global_avatars[avatar_id]
+        loaded_avatar = load_avatar(avatar_id)
+        if loaded_avatar is None:
+            raise RuntimeError(f"Avatar {avatar_id} loader returned no dataset")
+        global_avatars[avatar_id] = loaded_avatar
+        return loaded_avatar
 
 
 #####webrtc###############################
@@ -106,17 +114,12 @@ def build_avatar_session(sessionid:str, params:dict)->BaseAvatar:
 
     avatar_id = params.get('avatar',opt.avatar_id) 
     opt_this.avatar_id = avatar_id
-    evict_avatar_cache(keep_avatar_id=avatar_id)
     ref_audio = params.get('refaudio','') #音色
     ref_text = params.get('reftext','')
-    if (avatar_id and avatar_id != opt.avatar_id):
-        # Avoid reloading if already cached globally
-        if avatar_id not in global_avatars:
-            global_avatars[avatar_id] = load_avatar(avatar_id)
-        avatar_this = global_avatars[avatar_id]
-    else:
-        # Default avatar loaded at startup
-        avatar_this = global_avatars.get(opt.avatar_id)
+    # The single-entry cache may currently hold another emotion dataset. Always
+    # go through the loader so reconnecting the configured default cannot pass
+    # a missing payload into MuseTalk after a previous avatar switch.
+    avatar_this = get_or_load_avatar(avatar_id)
     if ref_audio: #请求参数配置了参考音频
         opt_this.REF_FILE = ref_audio
         opt_this.REF_TEXT = ref_text
@@ -220,7 +223,7 @@ def main():
     # Configure default CORS settings.
     allowed_origins = csv_env(
         "LIVETALKING_CORS_ALLOWED_ORIGINS",
-        "http://127.0.0.1:11111,http://localhost:11111",
+        "http://127.0.0.1:6767,http://localhost:6767",
     )
     cors = aiohttp_cors.setup(appasync, defaults={
             origin: aiohttp_cors.ResourceOptions(

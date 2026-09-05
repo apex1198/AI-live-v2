@@ -70,7 +70,22 @@ export class SmartChatFilter {
     }
 
     // 2. Profanity / Moderation Check
-    const hasBanned = this._bannedKeywords.some((k) => textLower.includes(k));
+    const normalizedForModeration = textLower
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/đ/g, 'd')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+    const hasBanned = this._bannedKeywords.some((keyword) => {
+      const normalizedKeyword = keyword
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+      return normalizedForModeration.split(/\s+/).includes(normalizedKeyword)
+        || (normalizedKeyword.includes(' ') && normalizedForModeration.includes(` ${normalizedKeyword} `));
+    });
     if (hasBanned) {
       return {
         allowed: false,

@@ -13,6 +13,7 @@
       videoEl: null,
       audioEl: null,
       endpoint: null,
+      connectionId: null,
       outputStream: new MediaStream(),
       operation: Promise.resolve(),
       connectionStartedAt: 0,
@@ -30,6 +31,13 @@
         if (!this.sessionId || !this.pc) return false;
         return !['failed', 'closed'].includes(this.pc.connectionState)
           && !['failed', 'closed'].includes(this.pc.iceConnectionState);
+      },
+
+      isNegotiating(maxAgeMs = 20_000) {
+        if (!this.pc || !this.connectionStartedAt) return false;
+        if (Date.now() - this.connectionStartedAt > maxAgeMs) return false;
+        return ['new', 'connecting'].includes(this.pc.connectionState)
+          || ['new', 'checking'].includes(this.pc.iceConnectionState);
       },
 
       needsServerProbe() {
@@ -101,6 +109,7 @@
         return {
           type: 'LIVETALKING_MEDIA_STATE',
           clientId: getClientId(),
+          connectionId: this.connectionId,
           sessionId: this.sessionId,
           connectionState,
           audioTrack: Boolean(audioTrack),
@@ -150,12 +159,15 @@
         await this._disconnect();
         this.connectionStartedAt = Date.now();
         this.endpoint = String(endpoint || 'http://localhost:2222').replace(/\/$/, '');
+        this.connectionId = global.crypto?.randomUUID?.().replace(/-/g, '')
+          || `rtc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
         if (global.location.protocol === 'file:') throw new Error('Open the dashboard through the runtime server');
         const health = await global.LiveTalkingApi.health();
         if (!health.health?.healthy) throw new Error(health.error || 'LiveTalking worker is not ready');
 
         const pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan' });
         this.pc = pc;
+        const connectionId = this.connectionId;
         pc.addTransceiver('video', { direction: 'recvonly' });
         pc.addTransceiver('audio', { direction: 'recvonly' });
 
@@ -181,6 +193,7 @@
         pc.addEventListener('iceconnectionstatechange', reportConnectionState);
 
         pc.addEventListener('track', event => {
+          if (this.pc !== pc || this.connectionId !== connectionId) return;
           const stream = event.streams?.[0] || new MediaStream([event.track]);
           for (const existingTrack of this.outputStream.getTracks()) {
             if (existingTrack.kind === event.track.kind) this.outputStream.removeTrack(existingTrack);
@@ -216,7 +229,13 @@
             setTimeout(resolve, 3000);
           });
         }
-        const answer = await global.LiveTalkingApi.offer(pc.localDescription.sdp, 'offer', avatarId, getClientId());
+        const answer = await global.LiveTalkingApi.offer(
+          pc.localDescription.sdp,
+          'offer',
+          avatarId,
+          getClientId(),
+          connectionId,
+        );
         if (!answer.sdp) throw new Error(answer.error || 'Worker returned no WebRTC SDP');
         this.sessionId = answer.sessionid || null;
         let remoteDescriptionTimer;
@@ -271,6 +290,7 @@
         onOutputStreamChanged(null);
         this.connectionStartedAt = 0;
         await this.emitMediaState('disconnected');
+        this.connectionId = null;
         if (sessionId) {
           try {
             await global.LiveTalkingApi.closeSession(sessionId);

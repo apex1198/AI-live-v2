@@ -5,40 +5,40 @@
 
 /* ── Tokens ────────────────────────────────────────────── */
 :root {
-  --bg:           #09090c;
-  --bg-subtle:    #0e0e13;
-  --bg-card:      #121218;
-  --bg-el:        #181820;
-  --bg-el2:       #22222d;
-  --border:       rgba(255,255,255,0.08);
-  --border-s:     rgba(255,255,255,0.14);
-  --border-focus: rgba(59,127,255,0.5);
+  --bg:           #f5f5f7;
+  --bg-subtle:    #fbfbfd;
+  --bg-card:      #ffffff;
+  --bg-el:        #f0f1f4;
+  --bg-el2:       #e5e6eb;
+  --border:       rgba(0,0,0,0.08);
+  --border-s:     rgba(0,0,0,0.14);
+  --border-focus: rgba(52,199,89,0.45);
 
-  --t1: rgba(255,255,255,0.94);
-  --t2: rgba(255,255,255,0.58);
-  --t3: rgba(255,255,255,0.30);
+  --t1: #1d1d1f;
+  --t2: #6e6e73;
+  --t3: #86868b;
 
-  --green:  #30d158;
-  --amber:  #ff9f0a;
-  --red:    #ff453a;
-  --accent: #3b7fff;
-  --purple: #bf5af2;
+  --green:  #34c759;
+  --amber:  #ff9500;
+  --red:    #ff3b30;
+  --accent: #34c759;
+  --purple: #af52de;
 
-  --green-d:  rgba(48,209,88,0.14);
-  --amber-d:  rgba(255,159,10,0.14);
-  --red-d:    rgba(255,69,58,0.16);
-  --accent-d: rgba(59,127,255,0.14);
-  --purple-d: rgba(191,90,242,0.14);
+  --green-d:  rgba(52,199,89,0.12);
+  --amber-d:  rgba(255,149,0,0.12);
+  --red-d:    rgba(255,59,48,0.12);
+  --accent-d: rgba(52,199,89,0.12);
+  --purple-d: rgba(175,82,222,0.12);
 
-  --r-xs: 5px;
-  --r-sm: 8px;
-  --r-md: 11px;
-  --r-lg: 15px;
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 18px;
 
-  --font:      -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
-  --font-mono: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+  --font:      -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'SF Pro', 'Helvetica Neue', sans-serif;
+  --font-mono: -apple-system, 'SF Mono', 'Fira Code', 'Menlo', monospace;
 
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 /* ── Reset ─────────────────────────────────────────────── */

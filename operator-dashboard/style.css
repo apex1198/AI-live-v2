@@ -2804,7 +2804,7 @@ body {
   font-style: normal;
   font-weight: 400;
   font-display: block;
-  src: url('./assets/fonts/material-symbols-rounded.ttf') format('truetype');
+  src: local('Material Symbols Rounded'), local('Material Symbols Rounded Regular');
 }
 
 .material-symbols-rounded,

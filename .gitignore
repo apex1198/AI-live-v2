@@ -20,6 +20,10 @@ services/talking-head/livetalking/data/
 services/talking-head/livetalking/results/
 services/talking-head/livetalking/.git-upstream-backup/
 
+# FasterLivePortrait MLX upstream checkout, weights, and generated jobs
+services/faster-liveportrait/vendor/
+services/faster-liveportrait/runtime-data/
+
 # Secrets and local overrides
 .env.*
 !.env.example

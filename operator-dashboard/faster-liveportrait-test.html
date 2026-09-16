@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#111312" />
+  <title>FasterLivePortrait MLX Test</title>
+  <link rel="stylesheet" href="faster-liveportrait-test.css" />
+</head>
+<body>
+  <main class="flp-shell">
+    <header class="flp-header">
+      <div>
+        <p class="flp-eyebrow">AI IDOL STREAMER V2</p>
+        <h1>FasterLivePortrait MLX</h1>
+        <p class="flp-subtitle">Portrait lipsync batch test</p>
+      </div>
+      <a class="flp-back" href="index.html#settings">Back to Studio</a>
+    </header>
+
+    <section class="flp-status" aria-live="polite">
+      <span class="flp-status-dot" id="worker-dot" data-state="checking"></span>
+      <div><strong id="worker-state">Checking worker</strong><small id="worker-detail">Connecting to local MLX service.</small></div>
+      <span class="flp-output-spec">1280 x 720 · 30 FPS</span>
+    </section>
+
+    <section class="flp-workspace" aria-label="FasterLivePortrait lipsync test">
+      <form class="flp-form" id="flp-form">
+        <div class="flp-section-head"><h2>Input</h2><span>One queued render at a time</span></div>
+
+        <label class="flp-file-field" id="source-dropzone">
+          <input id="source-file" type="file" accept="image/*,video/*" required />
+          <span class="flp-file-label">Portrait image or source video</span>
+          <strong id="source-file-name">Choose source</strong>
+          <small>Use a clear, forward-facing face.</small>
+        </label>
+
+        <div class="flp-mode-group" role="group" aria-label="Driving source">
+          <button class="flp-mode active" type="button" data-mode="audio" aria-pressed="true">Audio</button>
+          <button class="flp-mode" type="button" data-mode="text" aria-pressed="false">Text</button>
+        </div>
+
+        <label class="flp-file-field" id="audio-field">
+          <input id="audio-file" type="file" accept="audio/*" />
+          <span class="flp-file-label">Driving audio</span>
+          <strong id="audio-file-name">Choose audio</strong>
+          <small>WAV, MP3, M4A, or another FFmpeg-readable audio file.</small>
+        </label>
+
+        <label class="flp-text-field" id="text-field" hidden>
+          <span>Driving text</span>
+          <textarea id="driving-text" rows="4" maxlength="500" placeholder="Enter a short line for the avatar to speak."></textarea>
+          <small>Uses local Qwen TTS Vietnamese, then FasterLivePortrait MLX.</small>
+        </label>
+
+        <div class="flp-options">
+          <label><span>MLX profile</span><select id="mlx-profile"><option value="quality">Quality</option><option value="turbo">Turbo</option><option value="speed">Speed</option><option value="ultra">Ultra</option></select></label>
+          <label id="voice-field" hidden><span>Qwen voice ID</span><input id="voice-name" type="text" value="qwen-default" autocomplete="off" /></label>
+        </div>
+
+        <div class="flp-actions">
+          <button class="flp-run" id="submit-job" type="submit">Generate lipsync</button>
+          <output id="job-status" role="status">Add source and driving input.</output>
+        </div>
+      </form>
+
+      <section class="flp-result" aria-label="Generated result">
+        <div class="flp-section-head"><h2>Output</h2><span id="result-meta">No render yet</span></div>
+        <div class="flp-video-wrap" id="result-frame">
+          <video id="result-video" controls playsinline hidden></video>
+          <div class="flp-video-empty" id="result-empty">The generated MP4 will appear here.</div>
+        </div>
+        <a class="flp-download" id="download-result" hidden download>Download MP4</a>
+      </section>
+    </section>
+  </main>
+  <script src="faster-liveportrait-test.js"></script>
+</body>
+</html>

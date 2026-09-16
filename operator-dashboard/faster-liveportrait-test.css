@@ -1,0 +1,83 @@
+:root {
+  color-scheme: dark;
+  --flp-bg: #111312;
+  --flp-panel: #1a1d1b;
+  --flp-panel-muted: #151816;
+  --flp-line: #343a36;
+  --flp-text: #f3f6f2;
+  --flp-muted: #9ea8a0;
+  --flp-dim: #68736b;
+  --flp-accent: #a5e65a;
+  --flp-accent-ink: #0c1605;
+  --flp-error: #ff9c97;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { min-width: 320px; margin: 0; color: var(--flp-text); background: var(--flp-bg); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+button, input, select, textarea { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+
+.flp-shell { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 44px 0 60px; }
+.flp-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 30px; border-bottom: 1px solid var(--flp-line); }
+.flp-eyebrow { margin: 0 0 8px; color: var(--flp-accent); font-size: 11px; font-weight: 800; }
+h1, h2, p { margin: 0; }
+h1 { font-size: clamp(28px, 4vw, 42px); font-weight: 760; line-height: 1.05; }
+.flp-subtitle { margin-top: 9px; color: var(--flp-muted); font-size: 14px; }
+.flp-back, .flp-download { display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; color: var(--flp-text); border: 1px solid var(--flp-line); border-radius: 6px; text-decoration: none; font-size: 12px; font-weight: 700; }
+.flp-back:hover, .flp-download:hover { border-color: #617062; background: #202420; }
+
+.flp-status { display: flex; align-items: center; gap: 10px; min-height: 62px; margin: 20px 0; padding: 12px 16px; border: 1px solid var(--flp-line); border-radius: 8px; background: var(--flp-panel-muted); }
+.flp-status-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: #e4bd6a; box-shadow: 0 0 0 3px rgba(228, 189, 106, .12); }
+.flp-status-dot[data-state="ready"] { background: var(--flp-accent); box-shadow: 0 0 0 3px rgba(165, 230, 90, .12); }
+.flp-status-dot[data-state="error"] { background: #f77b75; box-shadow: 0 0 0 3px rgba(247, 123, 117, .12); }
+.flp-status strong, .flp-status small { display: block; }
+.flp-status strong { font-size: 13px; }
+.flp-status small { margin-top: 3px; color: var(--flp-muted); font-size: 11px; }
+.flp-output-spec { margin-left: auto; color: var(--flp-muted); font-size: 11px; font-weight: 700; white-space: nowrap; }
+
+.flp-workspace { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: 20px; }
+.flp-form, .flp-result { min-width: 0; padding: 20px; border: 1px solid var(--flp-line); border-radius: 8px; background: var(--flp-panel); }
+.flp-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.flp-section-head h2 { font-size: 16px; font-weight: 760; }
+.flp-section-head span { color: var(--flp-dim); font-size: 11px; text-align: right; }
+
+.flp-file-field, .flp-text-field { display: flex; flex-direction: column; gap: 5px; width: 100%; min-height: 116px; padding: 15px; border: 1px dashed #536055; border-radius: 7px; background: #151815; cursor: pointer; }
+.flp-file-field + .flp-mode-group, .flp-mode-group + .flp-file-field, .flp-mode-group + .flp-text-field, .flp-file-field + .flp-options, .flp-text-field + .flp-options { margin-top: 14px; }
+.flp-file-field:hover { border-color: #849d86; background: #181d18; }
+.flp-file-field input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+.flp-file-label, .flp-text-field > span, .flp-options span { color: var(--flp-muted); font-size: 11px; font-weight: 700; }
+.flp-file-field strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.flp-file-field small, .flp-text-field small { color: var(--flp-dim); font-size: 11px; line-height: 1.4; }
+
+.flp-mode-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.flp-mode-group.flp-single-mode { grid-template-columns: minmax(0, 1fr); }
+.flp-mode { min-height: 38px; color: var(--flp-muted); border: 1px solid var(--flp-line); border-radius: 6px; background: #151815; font-size: 12px; font-weight: 750; cursor: pointer; }
+.flp-mode:hover { color: var(--flp-text); border-color: #606b61; }
+.flp-mode.active { color: var(--flp-accent-ink); border-color: var(--flp-accent); background: var(--flp-accent); }
+.flp-text-field { cursor: text; }
+.flp-text-field textarea, .flp-options select, .flp-options input { width: 100%; color: var(--flp-text); border: 1px solid var(--flp-line); border-radius: 6px; background: #101210; outline: none; }
+.flp-text-field textarea { min-height: 88px; padding: 10px; resize: vertical; }
+.flp-text-field textarea:focus, .flp-options select:focus, .flp-options input:focus { border-color: var(--flp-accent); box-shadow: 0 0 0 2px rgba(165, 230, 90, .15); }
+.flp-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.flp-options label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.flp-options select, .flp-options input { min-height: 38px; padding: 0 10px; font-size: 12px; }
+.flp-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+.flp-run { min-height: 40px; padding: 0 15px; color: var(--flp-accent-ink); border: 0; border-radius: 6px; background: var(--flp-accent); font-size: 12px; font-weight: 800; cursor: pointer; }
+.flp-run:hover { background: #b6f370; }
+.flp-run:disabled { cursor: wait; opacity: .58; }
+#job-status { color: var(--flp-muted); font-size: 11px; line-height: 1.35; }
+#job-status[data-state="error"] { color: var(--flp-error); }
+
+.flp-video-wrap { display: grid; place-items: center; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid var(--flp-line); border-radius: 6px; background: #0a0c0a; }
+.flp-video-wrap video { width: 100%; height: 100%; object-fit: contain; }
+.flp-video-empty { padding: 22px; color: var(--flp-dim); font-size: 12px; text-align: center; }
+.flp-download { margin-top: 13px; }
+
+@media (max-width: 760px) {
+  .flp-shell { width: min(100% - 24px, 1180px); padding-top: 24px; }
+  .flp-header { align-items: flex-start; flex-direction: column; gap: 16px; padding-bottom: 22px; }
+  .flp-output-spec { margin-left: 0; }
+  .flp-status { align-items: flex-start; flex-wrap: wrap; }
+  .flp-workspace { grid-template-columns: 1fr; }
+}

@@ -17,6 +17,7 @@
   --green-d: #1c2a1d !important;
   --accent-d: #1c2a1d !important;
   --purple-d: #292537 !important;
+  --font-mono: var(--font) !important;
   --r-xs: 4px !important;
   --r-sm: 5px !important;
   --r-md: 6px !important;
@@ -31,6 +32,7 @@ html, body {
 
 body {
   padding-left: 0 !important;
+  min-width: 0 !important;
   font-size: 12px !important;
   letter-spacing: 0 !important;
 }
@@ -105,8 +107,12 @@ body {
 
 .web-app-main {
   margin-left: 200px !important;
+  min-width: 0 !important;
   background: var(--bg) !important;
 }
+.web-app-view,
+#view-studio,
+#view-studio .app-body { min-width: 0 !important; }
 .topbar {
   width: calc(100% - 200px) !important;
   height: 52px !important;
@@ -120,6 +126,10 @@ body {
 .stream-clock,
 .sys-item { color: var(--t3) !important; font-size: 10px !important; }
 .tb-system { background: transparent !important; border: 0 !important; gap: 12px !important; }
+.topbar .tb-system { min-width: 0 !important; }
+.topbar .sys-item { white-space: nowrap !important; }
+.topbar .sys-k { font-variant-numeric: tabular-nums !important; }
+.system-power-button { border-radius: 8px !important; }
 .sys-dot.ok { background: var(--green) !important; box-shadow: none !important; }
 .live-pill {
   padding: 4px 7px !important;
@@ -175,6 +185,7 @@ body {
 .workspace-strip p,
 .web-page-head p { margin-top: 5px !important; color: var(--t2) !important; font-size: 12px !important; }
 .workspace-actions { gap: 6px !important; }
+.workspace-actions button { min-height: 30px !important; }
 
 /* Shared controls */
 button, input, select, textarea { font: inherit !important; font-size: 12px !important; letter-spacing: 0 !important; }
@@ -215,6 +226,7 @@ input[type="text"], input[type="password"], input[type="url"], input[type="numbe
   border-radius: 4px !important;
 }
 input::placeholder, textarea::placeholder { color: #70716f !important; }
+select { appearance: auto !important; }
 
 /* Studio layout: monitor first, support panels subdued. */
 .app-body,
@@ -651,7 +663,7 @@ input::placeholder, textarea::placeholder { color: #70716f !important; }
   left: 12px;
   height: 1px;
   background: #343434;
-  transition: background-color .15s ease, height .15s ease;
+  transition: background-color .15s ease;
 }
 #view-studio .live-two-column-layout .monitor-chat-splitter:hover::after,
 #view-studio .live-two-column-layout .monitor-chat-splitter:focus-visible::after,
@@ -952,6 +964,39 @@ input::placeholder, textarea::placeholder { color: #70716f !important; }
   border-top: 1px solid #303030 !important;
 }
 
+/* Keep operational metadata in the text rail; never let badges become media overlays. */
+#view-studio .live-two-column-layout .library-panel .clip-thumb > .clip-format-tag,
+#view-studio .live-two-column-layout .library-panel .clip-thumb > .clip-state,
+#view-studio .live-two-column-layout .library-panel .clip-thumb > .clip-duration,
+#view-studio .live-two-column-layout .library-panel .clip-thumb > .now-badge {
+  position: static !important;
+  inset: auto !important;
+  transform: none !important;
+}
+#view-studio .live-two-column-layout .library-panel .clip-meta {
+  position: relative !important;
+  z-index: 1 !important;
+  overflow: hidden !important;
+}
+#view-studio .live-two-column-layout .library-panel .live-avatar-card .clip-state {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  font-size: 8px !important;
+}
+
+/* CapCut-style chrome: compact status bar, quiet labels, obvious action icons. */
+@media (min-width: 901px) {
+  .topbar .tb-brand { display: none !important; }
+  .topbar .tb-left { gap: 8px !important; }
+  .topbar .tb-system { gap: 8px !important; }
+  .topbar .sys-item { gap: 4px !important; }
+  .topbar .sys-k { max-width: 122px !important; overflow: hidden !important; text-overflow: ellipsis !important; white-space: nowrap !important; }
+  .topbar .btn-tb { min-width: 32px !important; padding: 0 7px !important; }
+  .topbar .topbar-control-label { font-size: 10px !important; }
+}
+
 #view-studio .live-two-column-layout .library-panel .clip-card .btn-clip-mode,
 #view-studio .live-two-column-layout .library-panel .clip-card .btn-delete-clip,
 #view-studio .live-two-column-layout .library-panel .clip-card .btn-remove-live-avatar {
@@ -995,6 +1040,75 @@ input::placeholder, textarea::placeholder { color: #70716f !important; }
 }
 
 @media (max-width: 900px) {
+  /* Mobile containment: no source pane or tab may widen the document. */
+  html,
+  body,
+  .web-app-main,
+  .web-app-view,
+  #app,
+  #view-studio,
+  #view-studio .app-body,
+  #view-studio .app-body.live-two-column-layout,
+  #view-studio .live-two-column-layout > .fcp-source-workspace,
+  #view-studio .live-two-column-layout > .fcp-center-workspace,
+  #view-studio .live-source-tabs,
+  #view-studio .live-source-panes,
+  #view-studio .live-source-panes > [data-live-source-pane]:not([hidden]) {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  html,
+  body {
+    min-width: 0 !important;
+    overflow-x: hidden !important;
+  }
+
+  .web-app-main,
+  .web-app-view,
+  #view-studio {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    overflow-x: hidden !important;
+  }
+
+  #view-studio,
+  #view-studio .app-body,
+  #view-studio .app-body.live-two-column-layout,
+  #view-studio .live-two-column-layout > .fcp-source-workspace,
+  #view-studio .live-two-column-layout > .fcp-center-workspace,
+  #view-studio .live-source-panes {
+    overflow-x: hidden !important;
+  }
+
+  #view-studio .live-source-tabs {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 3px !important;
+    overflow: hidden !important;
+  }
+
+  #view-studio .live-source-tab {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
+    white-space: nowrap !important;
+    text-overflow: ellipsis !important;
+  }
+
+  #view-studio .live-source-tab > span:last-child {
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+
+  #view-studio .live-source-panes > [data-live-source-pane]:not([hidden]) {
+    overflow-x: hidden !important;
+  }
+
   /* Mobile stage is content-sized, so restore a full-width 16:9 viewport. */
   #view-studio .live-two-column-layout .monitor-screen-wrap {
     width: 100% !important;

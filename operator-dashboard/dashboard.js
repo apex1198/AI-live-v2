@@ -136,6 +136,197 @@ let liveMediaRecoveryAttempt = 0;
 let operationalAvatarRestorePromise = null;
 let operationalAvatarRestoreTimer = null;
 let appStartupComplete = false;
+let runtimeTickTimer = null;
+let runtimeEngineStatusTimer = null;
+let runtimeEngineStatusRefresh = null;
+let runtimeWakePromise = null;
+const RuntimeSystem = {
+  released: false,
+  busy: false,
+  policy: {
+    webOnly: false,
+    qwenTtsAutostart: true,
+    liveTalkingAutostart: true,
+    fasterLivePortraitAutostart: false,
+    workerWatchdogEnabled: true,
+    maintenanceEnabled: true,
+  },
+};
+
+function applyRuntimePolicy(policy = {}) {
+  if (!policy || typeof policy !== 'object') return;
+  RuntimeSystem.policy = {
+    ...RuntimeSystem.policy,
+    ...Object.fromEntries(Object.entries(policy).filter(([, value]) => typeof value === 'boolean')),
+  };
+  document.documentElement.dataset.runtimePolicy = RuntimeSystem.policy.webOnly ? 'web-only' : 'full';
+  const workersStopped = RuntimeSystem.policy.webOnly
+    && !LiveTalkingWorker.ready
+    && LiveTalkingWorker.state === 'OFFLINE';
+  if (workersStopped && !RuntimeSystem.released) {
+    $('sys-tts-dot')?.classList.remove('ok');
+    $('sys-tts-dot')?.classList.add('warn');
+    $('sys-talking-dot')?.classList.remove('ok');
+    $('sys-talking-dot')?.classList.add('warn');
+    if ($('sys-tts-engine')) $('sys-tts-engine').textContent = 'Voice: Stopped';
+    if ($('sys-talking-engine')) $('sys-talking-engine').textContent = 'Avatar: Stopped';
+    if ($('sys-latency-tag')) $('sys-latency-tag').textContent = 'Workers paused';
+  }
+}
+
+function runtimeAutomationAllowed() {
+  return !RuntimeSystem.released && document.visibilityState === 'visible';
+}
+
+function stopRuntimeFrontendAutomation() {
+  if (LiveTalkingWorker?.pollTimer) clearInterval(LiveTalkingWorker.pollTimer);
+  if (runtimeTickTimer) clearInterval(runtimeTickTimer);
+  if (runtimeEngineStatusTimer) clearInterval(runtimeEngineStatusTimer);
+  clearTimeout(liveMediaRecoveryTimer);
+  clearTimeout(operationalAvatarRestoreTimer);
+  clearTimeout(runtimeRealtimeReconnectTimer);
+  LiveTalkingWorker.pollTimer = null;
+  runtimeTickTimer = null;
+  runtimeEngineStatusTimer = null;
+  liveMediaRecoveryTimer = null;
+  operationalAvatarRestoreTimer = null;
+  runtimeRealtimeReconnectTimer = null;
+}
+
+function startRuntimeFrontendAutomation() {
+  if (!runtimeAutomationAllowed()) return;
+  const shouldPollWorker = RuntimeSystem.policy.liveTalkingAutostart
+    || LiveTalkingWorker.ready
+    || !['OFFLINE', 'ERROR'].includes(LiveTalkingWorker.state);
+  if (shouldPollWorker && !LiveTalkingWorker.pollTimer) {
+    void refreshLiveTalkingWorkerStatus({ silent: true });
+    LiveTalkingWorker.pollTimer = setInterval(() => {
+      if (!runtimeAutomationAllowed()) return;
+      void refreshLiveTalkingWorkerStatus({ silent: true });
+    }, 15000);
+  }
+  const shouldPollEngineStatus = Boolean(
+    runtimeEngineStatusRefresh
+    && (RuntimeSystem.policy.qwenTtsAutostart
+      || RuntimeSystem.policy.liveTalkingAutostart
+      || LiveTalkingWorker.ready
+      || document.querySelector('#view-settings.active')),
+  );
+  if (shouldPollEngineStatus && !runtimeEngineStatusTimer) {
+    void runtimeEngineStatusRefresh({ quiet: true });
+    runtimeEngineStatusTimer = setInterval(() => {
+      if (!runtimeAutomationAllowed()) return;
+      void runtimeEngineStatusRefresh({ quiet: true });
+    }, 20000);
+  } else if (!shouldPollEngineStatus && runtimeEngineStatusTimer) {
+    clearInterval(runtimeEngineStatusTimer);
+    runtimeEngineStatusTimer = null;
+  }
+}
+
+function startRuntimeActivityLoop() {
+  if (!runtimeAutomationAllowed() || runtimeTickTimer) return;
+  const autoWorkersEnabled = RuntimeSystem.policy.qwenTtsAutostart || RuntimeSystem.policy.liveTalkingAutostart;
+  if (!autoWorkersEnabled && !runtimeRealtimeConnected && !LiveTalkingWorker.ready) return;
+  tick();
+  runtimeTickTimer = setInterval(tick, 200);
+}
+
+function suspendRuntimeFrontend(reason = 'Runtime services released') {
+  stopRuntimeFrontendAutomation();
+  liveMediaReconnectRequested = false;
+  runtimeRealtimeSuspended = true;
+  settleLiveMediaOwnership('STANDBY');
+  OBSOutputBridge.closePeer();
+  void disconnectLiveMedia(reason, false);
+  releaseRuntimeRealtime();
+}
+
+function applyRuntimeSystemUI(settings = {}) {
+  const system = settings.system;
+  if (!system || typeof system.released !== 'boolean') return;
+  RuntimeSystem.released = system.released;
+
+  document.documentElement.dataset.runtimeMode = RuntimeSystem.released ? 'released' : 'active';
+  document.body.dataset.runtimeMode = RuntimeSystem.released ? 'released' : 'active';
+
+  const button = $('btn-system-power');
+  const icon = $('system-power-icon');
+  const label = $('system-power-label');
+  const released = RuntimeSystem.released;
+  if (button) {
+    button.dataset.mode = released ? 'released' : 'active';
+    button.disabled = RuntimeSystem.busy;
+    button.setAttribute('aria-pressed', String(released));
+    button.title = released ? 'Wake runtime services' : 'Release runtime services';
+    button.setAttribute('aria-label', button.title);
+  }
+  if (icon) icon.textContent = released ? 'play_arrow' : 'power_settings_new';
+  if (label) label.textContent = RuntimeSystem.busy
+    ? (released ? 'Waking services…' : 'Releasing…')
+    : (released ? 'Wake services' : 'Release machine');
+
+  if (released) {
+    $('sys-tts-dot')?.classList.remove('ok');
+    $('sys-tts-dot')?.classList.add('warn');
+    $('sys-talking-dot')?.classList.remove('ok');
+    $('sys-talking-dot')?.classList.add('warn');
+    $('sys-chat-dot')?.classList.remove('ok');
+    $('sys-chat-dot')?.classList.add('warn');
+    if ($('sys-tts-engine')) $('sys-tts-engine').textContent = 'Voice: Released';
+    if ($('sys-talking-engine')) $('sys-talking-engine').textContent = 'Avatar: Released';
+    if ($('sys-chat-status')) $('sys-chat-status').textContent = 'Chat: Released';
+    if ($('sys-latency-tag')) $('sys-latency-tag').textContent = 'Runtime paused';
+    if (!runtimeRealtimeSuspended) suspendRuntimeFrontend();
+  } else if ($('sys-latency-tag')) {
+    $('sys-latency-tag').textContent = 'A/V <35ms';
+  }
+}
+
+async function toggleRuntimeSystem() {
+  if (RuntimeSystem.busy || location.protocol === 'file:') return;
+  const targetReleased = !RuntimeSystem.released;
+  RuntimeSystem.busy = true;
+  applyRuntimeSystemUI({ system: { released: RuntimeSystem.released } });
+  const button = $('btn-system-power');
+  if (button) button.setAttribute('aria-busy', 'true');
+  try {
+    if (targetReleased) {
+      const payload = await window.RuntimeApi.post('/api/system/release-machine', {});
+      applyRuntimeSettingsUI(payload.settings || { system: { released: true } });
+      suspendRuntimeFrontend();
+      addLog('Runtime services released; local worker load is paused.', 'ok');
+      return;
+    }
+
+    runtimeRealtimeSuspended = false;
+    const payload = await window.RuntimeApi.post('/api/system/wake-machine', {});
+    applyRuntimeSettingsUI(payload.settings || { system: { released: false } });
+    connectRuntimeRealtime();
+    const workersReady = await waitForRequiredWorkers();
+    if (!workersReady) throw new Error('Runtime services were released before workers became ready');
+    await refreshMuseTalkMaskMode();
+    startRuntimeFrontendAutomation();
+    startRuntimeActivityLoop();
+    const startupStatus = $('app-startup-status');
+    if (startupStatus) startupStatus.textContent = 'Live workspace ready';
+    if (appStartupComplete) {
+      await restoreOperationalAvatar({ attempts: 5, status: startupStatus });
+    }
+    addLog('Runtime services are awake and ready.', 'ok');
+  } catch (error) {
+    addLog(`Runtime power action failed: ${error.message}`, 'err');
+    try {
+      const payload = await window.RuntimeApi.get('/api/settings/all');
+      applyRuntimeSettingsUI(payload);
+    } catch {}
+    throw error;
+  } finally {
+    RuntimeSystem.busy = false;
+    applyRuntimeSystemUI({ system: { released: RuntimeSystem.released } });
+    button?.removeAttribute('aria-busy');
+  }
+}
 
 function settleLiveMediaOwnership(state, ownerClientId = '') {
   LiveMediaOwnership.state = state;
@@ -654,6 +845,10 @@ async function savePlatformReplySettings() {
 }
 
 function handleRuntimeRealtimeMessage(payload) {
+  if (payload.type === 'SYSTEM_STATE') {
+    applyRuntimeSettingsUI(payload.settings || {});
+    return;
+  }
   if (payload.type === 'LIVETALKING_MEDIA_OWNER_GRANTED') {
     settleLiveMediaOwnership('OWNER', payload.clientId || LIVE_MEDIA_CLIENT_ID);
     applyLiveMediaSnapshot(payload.media || {});
@@ -758,6 +953,11 @@ function connectRuntimeRealtime() {
   runtimeRealtimeSocket = window.RuntimeApi.connectRealtime(handleRuntimeRealtimeMessage, state => {
     runtimeRealtimeConnected = state === 'open';
     if (state === 'open') {
+      if (RuntimeSystem.released) return;
+      if (!RuntimeSystem.policy.liveTalkingAutostart && !LiveTalkingWorker.ready) {
+        startRuntimeActivityLoop();
+        return;
+      }
       registerLiveMediaClient();
       let attempts = 0;
       const reinforceOwnership = () => {
@@ -777,10 +977,11 @@ function connectRuntimeRealtime() {
     }
     if (state === 'closed') {
       settleLiveMediaOwnership('PENDING');
-      void disconnectLiveMedia('runtime connection closed');
+      if (!RuntimeSystem.released) void disconnectLiveMedia('runtime connection closed');
       OBSOutputBridge.closePeer();
       clearTimeout(runtimeRealtimeReconnectTimer);
       if (runtimeRealtimeSuspended) return;
+      if (RuntimeSystem.released) return;
       runtimeRealtimeReconnectTimer = setTimeout(connectRuntimeRealtime, 2000);
     }
   });
@@ -810,14 +1011,27 @@ window.addEventListener('pageshow', event => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (!runtimeRealtimeConnected) return;
-  registerLiveMediaClient();
-  sendRuntimeSignal({
-    type: 'OBS_OUTPUT_REGISTER',
-    role: 'publisher',
-    peerId: OBS_OUTPUT_PUBLISHER_ID,
-    priority: document.visibilityState === 'visible' ? 100 : 10,
-  });
+  if (document.visibilityState === 'hidden') {
+    stopRuntimeFrontendAutomation();
+    if (runtimeRealtimeConnected) {
+      registerLiveMediaClient();
+      sendRuntimeSignal({ type: 'OBS_OUTPUT_REGISTER', role: 'publisher', peerId: OBS_OUTPUT_PUBLISHER_ID, priority: 10 });
+    }
+    return;
+  }
+  if (runtimeRealtimeConnected) {
+    registerLiveMediaClient();
+    sendRuntimeSignal({
+      type: 'OBS_OUTPUT_REGISTER',
+      role: 'publisher',
+      peerId: OBS_OUTPUT_PUBLISHER_ID,
+      priority: 100,
+    });
+  }
+  if (!RuntimeSystem.released) {
+    startRuntimeFrontendAutomation();
+    startRuntimeActivityLoop();
+  }
 });
 window.addEventListener('focus', registerLiveMediaClient);
 window.addEventListener('blur', registerLiveMediaClient);
@@ -2980,7 +3194,9 @@ async function restoreOperationalAvatar({ attempts = 5, status = null } = {}) {
 }
 
 function scheduleOperationalAvatarRestore(reason = 'state changed', delayMs = 350) {
-  if (!appStartupComplete) return;
+  if (!appStartupComplete
+    || RuntimeSystem.released
+    || (!RuntimeSystem.policy.liveTalkingAutostart && !LiveTalkingWorker.ready)) return;
   clearTimeout(operationalAvatarRestoreTimer);
   operationalAvatarRestoreTimer = setTimeout(() => {
     if (!runtimeRealtimeConnected || LiveMediaOwnership.state === 'STANDBY') return;
@@ -3136,6 +3352,8 @@ async function startLiveTalkingWorker() {
   try {
     const payload = await window.LiveTalkingApi.startWorker();
     applyLiveTalkingWorkerState(payload.worker || { state: 'STARTING' });
+    if (runtimeRealtimeConnected) registerLiveMediaClient();
+    else if (!runtimeRealtimeSuspended) connectRuntimeRealtime();
     addLog('Lipsync Engine startup requested.', 'ok');
     return LiveTalkingWorker;
   } catch (error) {
@@ -6689,6 +6907,8 @@ function applyLiveSessionSettingsUI(settings = {}) {
 }
 
 function applyRuntimeSettingsUI(settings = {}) {
+  applyRuntimePolicy(settings.runtimePolicy || {});
+  applyRuntimeSystemUI(settings);
   if (settings.voice) {
     const provider = ['qwentts', 'omnivoice'].includes(settings.voice.provider)
       ? settings.voice.provider
@@ -6737,15 +6957,18 @@ function applyRuntimeSettingsUI(settings = {}) {
   if (settings.platformChat) applyPlatformChatStatus(settings.platformChat, settings.platformReply);
   else if (settings.platformReply) applyPlatformReplySettings(settings.platformReply);
   loadPersistedSettings();
+  applyRuntimePolicy(settings.runtimePolicy || {});
 }
 
 async function loadLiveSessionSettings() {
-  if (location.protocol === 'file:') return;
+  if (location.protocol === 'file:') return null;
   try {
     const payload = await window.RuntimeApi.get('/api/settings/all');
     applyRuntimeSettingsUI(payload);
+    return payload;
   } catch (error) {
     if ($('live-session-save-status')) $('live-session-save-status').textContent = `Could not load session: ${error.message}`;
+    return null;
   }
 }
 
@@ -6858,6 +7081,7 @@ function loadPersistedSettings() {
       updateObsCustomOutputUI();
     } catch {}
   }
+  applyRuntimePolicy(RuntimeSystem.policy);
 }
 
 function isDraftableControl(control) {
@@ -8005,6 +8229,9 @@ async function setMuseTalkMaskMode(mode) {
 
 // ── Event Listeners ───────────────────────────────────────
 function bindEventListeners() {
+  $('btn-system-power')?.addEventListener('click', () => {
+    void toggleRuntimeSystem().catch(() => {});
+  });
   $('musetalk-mask-options')?.addEventListener('change', event => {
     const input = event.target.closest('input[name="musetalk-mask-mode"]');
     if (input) void setMuseTalkMaskMode(input.value);
@@ -9304,7 +9531,8 @@ function setupMonitorFirstStudio() {
   const chat = appBody.querySelector('.chat-panel');
   const library = appBody.querySelector('.library-panel');
   const states = appBody.querySelector('.state-chips-panel');
-  if (!monitor || !chat || !library || !states) return;
+  const controlRail = appBody.querySelector('.col-right');
+  if (!monitor || !chat || !library || !states || !controlRail) return;
 
   const stage = document.createElement('section');
   stage.className = 'monitor-first-stage';
@@ -9411,7 +9639,8 @@ function setupMonitorFirstStudio() {
   splitter.setAttribute('aria-valuemin', '25');
   splitter.setAttribute('aria-valuemax', '40');
   splitter.tabIndex = 0;
-  appBody.replaceChildren(sourcePanel, center, splitter);
+  controlRail.classList.add('live-control-rail');
+  appBody.replaceChildren(sourcePanel, center, controlRail, splitter);
   appBody.classList.add('monitor-first-layout', 'fcp-editor-layout', 'svg-reference-layout', 'live-two-column-layout');
   setupLiveTwoColumnResize(appBody);
   setupLiveMonitorResize(center);
@@ -9639,7 +9868,6 @@ function setupStudioShell() {
   // surface. Avatar creation remains available through the AI Profile flow.
   $('modal-avatar')?.remove();
 
-  let engineStatusTimer = null;
   const setSettingsPane = (target = 'output') => {
     const allowed = ['output', 'engine', 'chat', 'storage', 'engines'];
     const selected = allowed.includes(target) ? target : 'output';
@@ -9800,6 +10028,7 @@ function setupStudioShell() {
     if (!quiet) refresh?.setAttribute('aria-busy', 'true');
     try {
       const payload = await window.RuntimeApi.get('/api/engines');
+      applyRuntimePolicy(payload.runtimePolicy || {});
       renderEngineCards(payload.engines || []);
       const readyCount = (payload.engines || []).filter(engine => ['READY', 'CONFIGURED'].includes(engine.state)).length;
       if ($('engine-manager-summary')) $('engine-manager-summary').textContent = `${readyCount}/${(payload.engines || []).length} active`;
@@ -9830,7 +10059,7 @@ function setupStudioShell() {
     }
   });
   void refreshAiEngines();
-  engineStatusTimer = setInterval(() => void refreshAiEngines({ quiet: true }), 5000);
+  runtimeEngineStatusRefresh = refreshAiEngines;
 
   const navigateAppView = (name = 'studio', updateHash = true, settingsPane = null, liveSettingPane = null) => {
     if (name === 'avatar') { name = 'live-settings'; liveSettingPane = 'avatar'; }
@@ -9851,8 +10080,6 @@ function setupStudioShell() {
       window.setLiveSettingPane?.(liveSettingPane || 'avatar');
       setupDirectorBrief();
     }
-    clearInterval(engineStatusTimer);
-    engineStatusTimer = null;
     if (name === 'settings') {
       if (settingsPane) setSettingsPane(settingsPane);
       loadProjectStorageConfig();
@@ -10054,6 +10281,40 @@ function renderStartupEngine(engineId, state, detail = '') {
 async function waitForRequiredWorkers() {
   const status = $('app-startup-status');
   const retry = $('app-startup-retry');
+  if (RuntimeSystem.released) {
+    if (status) status.textContent = 'Runtime services released. Wake services to start workers.';
+    REQUIRED_STARTUP_ENGINES.forEach(id => renderStartupEngine(id, 'OFFLINE', 'Released'));
+    if (retry) retry.hidden = true;
+    return false;
+  }
+  let initialPayload = null;
+  try {
+    initialPayload = await window.RuntimeApi.get('/api/engines');
+    applyRuntimePolicy(initialPayload.runtimePolicy || {});
+    const initialEngines = Array.isArray(initialPayload.engines) ? initialPayload.engines : [];
+    const initialRequired = REQUIRED_STARTUP_ENGINES.map(id => initialEngines.find(engine => engine.id === id));
+    initialRequired.forEach((engine, index) => renderStartupEngine(
+      REQUIRED_STARTUP_ENGINES[index],
+      engine?.state || 'OFFLINE',
+      engine?.detail || '',
+    ));
+    if (initialRequired.every(engine => engine?.state === 'READY')) {
+      if (status) status.textContent = 'Workers already online. Opening Studio…';
+      return true;
+    }
+  } catch (error) {
+    if (status) status.textContent = `Runtime status unavailable. Opening workspace…`;
+  }
+
+  const autoStartAllowed = RuntimeSystem.policy.qwenTtsAutostart && RuntimeSystem.policy.liveTalkingAutostart;
+  if (!autoStartAllowed) {
+    if (status) status.textContent = RuntimeSystem.policy.webOnly
+      ? 'Web-only mode. Workers are stopped until you start them manually.'
+      : 'Manual worker mode. Start voice and lipsync from Settings when needed.';
+    REQUIRED_STARTUP_ENGINES.forEach(id => renderStartupEngine(id, 'OFFLINE', 'Manual'));
+    if (retry) retry.hidden = true;
+    return false;
+  }
   if (retry) retry.hidden = true;
   if (status) status.textContent = 'Starting voice and live avatar workers…';
   REQUIRED_STARTUP_ENGINES.forEach(id => renderStartupEngine(id, 'STARTING'));
@@ -10062,11 +10323,17 @@ async function waitForRequiredWorkers() {
   // smaller and becomes ready first, then MuseTalk can claim the remaining
   // memory without a large startup spike.
   for (const id of REQUIRED_STARTUP_ENGINES) {
+    if (RuntimeSystem.released) return false;
     await window.RuntimeApi.post(`/api/engines/${id}/action`, { action: 'start' }).catch(() => {});
   }
 
   const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
+    if (RuntimeSystem.released) {
+      if (status) status.textContent = 'Runtime services released. Wake services to start workers.';
+      REQUIRED_STARTUP_ENGINES.forEach(id => renderStartupEngine(id, 'OFFLINE', 'Released'));
+      return false;
+    }
     try {
       const payload = await window.RuntimeApi.get('/api/engines');
       const engines = Array.isArray(payload.engines) ? payload.engines : [];
@@ -10078,7 +10345,7 @@ async function waitForRequiredWorkers() {
       ));
       if (required.every(engine => engine?.state === 'READY')) {
         if (status) status.textContent = 'All workers online. Opening Studio…';
-        return;
+        return true;
       }
     } catch (error) {
       if (status) status.textContent = `Still waiting for local workers… ${error.message}`;
@@ -10115,11 +10382,16 @@ async function init() {
     console.warn('bindEventListeners error:', e);
   }
 
-  await waitForRequiredWorkers();
-  await refreshMuseTalkMaskMode();
+  // Load the persisted runtime mode before starting any worker. A released
+  // runtime must remain idle until the operator explicitly wakes it.
+  await loadLiveSessionSettings();
+  const runtimeReleasedAtStartup = RuntimeSystem.released;
+  const workersReady = runtimeReleasedAtStartup ? false : await waitForRequiredWorkers();
+  if (workersReady) await refreshMuseTalkMaskMode();
 
-  // Establish Live Monitor ownership before any avatar offer can replace a session.
-  connectRuntimeRealtime();
+  // Keep the control channel available for an explicit Wake action. It does
+  // not claim the Live Monitor or OBS publisher while the runtime is released.
+  if (!RuntimeSystem.released) connectRuntimeRealtime();
 
   const persistedMedia = await Promise.allSettled([
     loadPersistedAvatar(),
@@ -10135,7 +10407,6 @@ async function init() {
     console.warn('loadPersistedSettings error:', e);
   }
 
-  await loadLiveSessionSettings();
   loadReplySkills();
   loadVoiceProfiles();
 
@@ -10165,34 +10436,43 @@ async function init() {
   localStorage.setItem(STORAGE_KEYS.TALKING_PROVIDER, 'livetalking');
   const startupOverlay = $('app-startup-overlay');
   const startupStatus = $('app-startup-status');
-  if (startupStatus) startupStatus.textContent = LiveTalkingWorker.alwaysOn ? 'Preparing realtime avatar…' : 'Opening live workspace…';
-  void refreshLiveTalkingWorkerStatus({ silent: true });
-  clearInterval(LiveTalkingWorker.pollTimer);
-  LiveTalkingWorker.pollTimer = setInterval(() => refreshLiveTalkingWorkerStatus({ silent: true }), 3000);
+  if (startupStatus) startupStatus.textContent = LiveTalkingWorker.alwaysOn && RuntimeSystem.policy.liveTalkingAutostart
+    ? 'Preparing realtime avatar…'
+    : 'Opening live workspace…';
   App.isMuted = false;
   void unlockAudio(false);
   appStartupComplete = true;
-  void restoreOperationalAvatar({ attempts: 5, status: startupStatus })
-    .then(avatarId => addLog(`Avatar ${avatarId} restored.`, 'ok'))
-    .catch(error => {
-      addLog(`Live avatar auto-connect failed: ${error.message}`, 'warn');
-      scheduleOperationalAvatarRestore('startup retry');
-    });
-  if (startupStatus) startupStatus.textContent = 'Live workspace ready';
+  if (workersReady && !RuntimeSystem.released) {
+    startRuntimeFrontendAutomation();
+    void restoreOperationalAvatar({ attempts: 5, status: startupStatus })
+      .then(avatarId => addLog(`Avatar ${avatarId} restored.`, 'ok'))
+      .catch(error => {
+        addLog(`Live avatar auto-connect failed: ${error.message}`, 'warn');
+        scheduleOperationalAvatarRestore('startup retry');
+      });
+    if (startupStatus) startupStatus.textContent = 'Live workspace ready';
+  } else if (startupStatus) {
+    startupStatus.textContent = 'Runtime services released. Wake services to continue.';
+  }
   startupOverlay?.classList.add('is-ready');
   setTimeout(() => startupOverlay?.remove(), 450);
   
-  try {
-    setVisualState('GAMEPLAY_IDLE', 7, 'boot');
-  } catch (e) {
-    console.warn('setVisualState error:', e);
+  if (!RuntimeSystem.released) {
+    try {
+      setVisualState('GAMEPLAY_IDLE', 7, 'boot');
+    } catch (e) {
+      console.warn('setVisualState error:', e);
+    }
   }
 
   addLog('AI Idol Operator Dashboard started.', 'ok');
-  addLog('Realtime avatar pipeline active.', 'ok');
+  addLog(RuntimeSystem.released
+    ? 'Runtime services are released.'
+    : RuntimeSystem.policy.webOnly
+      ? 'Web-only mode: workers remain stopped until manually started.'
+      : 'Realtime avatar pipeline active.', 'ok');
 
-  tick();
-  setInterval(tick, 200);
+  startRuntimeActivityLoop();
 
   const monitorAudioUnlock = () => { void unlockAudio(false); };
   document.querySelector('.monitor-box')?.addEventListener('pointerdown', monitorAudioUnlock, { passive: true });

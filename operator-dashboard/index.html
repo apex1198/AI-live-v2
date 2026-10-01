@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#050505" />
+  <meta name="theme-color" content="#090c09" />
   <title>AI IDOL STREAMER</title>
   <link rel="icon" href="app-icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="app-icon-192.png" />
   <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=20260917-ui-repair-1" />
   <link rel="stylesheet" href="design-system.css?v=20260831-live-layout-9" />
-  <link rel="stylesheet" href="apple-theme.css?v=20260903-apple-green" />
-  <link rel="stylesheet" href="clean-ui.css?v=20260904-1" />
+  <link rel="stylesheet" href="clean-ui.css?v=20260918-capcut-2" />
+  <link rel="stylesheet" href="ui-kit.css?v=20260918-capcut-audit-3" />
   <script src="material-icons.js"></script>
   <!-- MediaPipe Face Mesh for 468 Landmark Extraction -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
@@ -19,10 +19,12 @@
 </head>
 <body>
 
+  <a class="skip-link" href="#app-main">Skip to workspace</a>
+
   <div class="app-startup-overlay" id="app-startup-overlay" aria-live="polite">
     <div class="app-startup-mark"><span class="material-symbols-rounded" aria-hidden="true">graphic_eq</span></div>
     <strong>Starting AI Livestream</strong>
-    <span id="app-startup-status">Connecting to local runtime…</span>
+    <span id="app-startup-status">Opening workspace; workers stay stopped until started.</span>
     <div class="app-startup-workers" aria-label="Worker startup status">
       <div><span class="app-startup-worker-dot" id="startup-qwen-dot"></span><span>Qwen Voice</span><small id="startup-qwen-status">Waiting</small></div>
       <div><span class="app-startup-worker-dot" id="startup-avatar-dot"></span><span>Live Avatar</span><small id="startup-avatar-status">Waiting</small></div>
@@ -46,16 +48,16 @@
         <span class="sys-dot warn" id="sys-obs-dot"></span>
         <span class="sys-k" id="sys-obs-status">OBS: Waiting</span>
       </div>
-      <div class="sys-item" title="TTS Engine Active">
-        <span class="sys-dot ok" id="sys-tts-dot"></span>
-        <span class="sys-k" id="sys-tts-engine">Voice: Ready</span>
+      <div class="sys-item" title="TTS Engine status">
+        <span class="sys-dot warn" id="sys-tts-dot"></span>
+        <span class="sys-k" id="sys-tts-engine">Voice: Stopped</span>
       </div>
       <div class="sys-item" title="Dialogue provider used for the latest reply">
         <span class="dialogue-provider-badge" id="sys-dialogue-provider">QWEN</span>
       </div>
-      <div class="sys-item" title="Live Video Pipeline">
-        <span class="sys-dot ok" id="sys-talking-dot"></span>
-        <span class="sys-k" id="sys-talking-engine">Avatar: Ready</span>
+      <div class="sys-item" title="Live Video Pipeline status">
+        <span class="sys-dot warn" id="sys-talking-dot"></span>
+        <span class="sys-k" id="sys-talking-engine">Avatar: Stopped</span>
       </div>
       <div class="sys-item" title="Chat input">
         <span class="sys-dot warn" id="sys-chat-dot"></span>
@@ -74,6 +76,10 @@
         <span class="livetalking-worker-dot" aria-hidden="true"></span>
         <span class="material-symbols-rounded" aria-hidden="true">power_settings_new</span>
         <span class="topbar-control-label" id="livetalking-worker-label">Prepare live avatar</span>
+      </button>
+      <button class="btn-tb topbar-icon-button system-power-button" id="btn-system-power" type="button" title="Release runtime services" aria-label="Release runtime services">
+        <span class="material-symbols-rounded" id="system-power-icon" aria-hidden="true">power_settings_new</span>
+        <span class="topbar-control-label" id="system-power-label">Release machine</span>
       </button>
       <button class="btn-tb topbar-icon-button session-quick-settings-button" id="btn-quick-settings" type="button" title="Quick Settings" aria-label="Quick Settings" aria-expanded="false" aria-controls="quick-settings-panel">
         <span class="material-symbols-rounded" aria-hidden="true">tune</span><span class="topbar-control-label">Quick Settings</span>
@@ -121,13 +127,13 @@
       <button class="mobile-nav-close" id="mobile-nav-close" type="button" aria-label="Close navigation"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
     </div>
     <nav class="web-side-menu">
-      <button type="button" class="web-nav-item" data-app-view="live-settings">
+      <button type="button" class="web-nav-item" data-app-view="live-settings" aria-label="Live Setting" title="Live Setting">
         <span class="material-symbols-rounded" aria-hidden="true">tune</span><span>Live Setting</span>
       </button>
-      <button type="button" class="web-nav-item active" data-app-view="studio">
+      <button type="button" class="web-nav-item active" data-app-view="studio" aria-label="Live" title="Live">
         <span class="material-symbols-rounded" aria-hidden="true">space_dashboard</span><span>Live</span>
       </button>
-      <button type="button" class="web-nav-item" data-app-view="settings">
+      <button type="button" class="web-nav-item" data-app-view="settings" aria-label="Settings" title="Settings">
         <span class="material-symbols-rounded" aria-hidden="true">settings</span><span>Settings</span>
       </button>
     </nav>
@@ -138,7 +144,7 @@
   </aside>
   <button class="mobile-nav-scrim" id="mobile-nav-scrim" type="button" aria-label="Close navigation" tabindex="-1"></button>
 
-  <main class="web-app-main">
+  <main class="web-app-main" id="app-main" tabindex="-1">
   <section class="web-app-view active" id="view-studio" data-view="studio">
 
   <!-- ══ STREAM PHASE BAR (below header) ════════════════ -->
@@ -253,7 +259,7 @@
           <!-- Group 1: Gameplay & Focus -->
           <div class="lib-group-card" data-cat="gameplay">
             <div class="lib-gh">
-              <span class="lib-gd" style="background:var(--green)"></span>
+              <span class="lib-gd lib-gd-ready"></span>
               <span class="lib-gn">1. Gameplay & Focus</span>
               <span class="lib-gc" id="cnt-group-gameplay">0</span>
               <button class="btn-group-random is-active" data-rand-group="gameplay" title="Toggle random video (Gameplay)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
@@ -268,7 +274,7 @@
           <!-- Group 2: Talking & Chat -->
           <div class="lib-group-card" data-cat="talking">
             <div class="lib-gh">
-              <span class="lib-gd" style="background:var(--accent)"></span>
+              <span class="lib-gd lib-gd-accent"></span>
               <span class="lib-gn">2. Talking & Chat</span>
               <span class="lib-gc" id="cnt-group-talking">0</span>
               <button class="btn-group-random is-active" data-rand-group="talking" title="Toggle random reply video"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
@@ -283,7 +289,7 @@
           <!-- Group 3: Goals & CTA -->
           <div class="lib-group-card" data-cat="cta">
             <div class="lib-gh">
-              <span class="lib-gd" style="background:var(--purple)"></span>
+              <span class="lib-gd lib-gd-warn"></span>
               <span class="lib-gn">3. CTA</span>
               <span class="lib-gc" id="cnt-group-cta">0</span>
               <button class="btn-group-random is-active" data-rand-group="cta" title="Toggle random video (Goals & CTA)"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
@@ -298,7 +304,7 @@
           <!-- Group 4: Away from keyboard -->
           <div class="lib-group-card" data-cat="afk">
             <div class="lib-gh">
-              <span class="lib-gd" style="background:var(--t3)"></span>
+              <span class="lib-gd lib-gd-muted"></span>
               <span class="lib-gn">4. AFK</span>
               <span class="lib-gc" id="cnt-group-afk">0</span>
               <button class="btn-group-random is-active" data-rand-group="afk" title="Toggle random AFK video"><span class="material-symbols-rounded" aria-hidden="true">shuffle</span></button>
@@ -449,6 +455,22 @@
         ══════════════════════════════════════════════════ -->
         <aside class="col-right">
 
+          <!-- Compact cue stack: primary live sequence at a glance. -->
+          <section class="panel-section cue-stack-panel" aria-labelledby="cue-stack-title">
+            <div class="panel-hdr">
+              <div class="panel-title-box">
+                <span class="sec-label" id="cue-stack-title">Cue stack</span>
+                <span class="settings-status">Live</span>
+              </div>
+            </div>
+            <div class="cue-stack-list">
+              <div class="cue-stack-row is-current"><div><strong>Now</strong><small>Gameplay idle</small></div><span>Live</span></div>
+              <div class="cue-stack-row"><div><strong>Next</strong><small>Audience reply</small></div><span>2m</span></div>
+              <div class="cue-stack-row"><div><strong>After</strong><small>CTA prompt</small></div><span>8m</span></div>
+              <div class="cue-stack-row"><div><strong>Closing</strong><small>Sign-off</small></div><span>35m</span></div>
+            </div>
+          </section>
+
           <!-- 1. AI Voice Engine & Video Engine Config -->
           <section class="panel-section voice-config-panel">
             <div class="panel-hdr">
@@ -497,7 +519,7 @@
               <div class="form-group" style="margin-top:2px;">
                 <div class="label-with-action">
                   <label>Speech rate</label>
-                  <span id="quick-voice-speed-val" style="font-size:11px; font-weight:700; color:var(--accent); font-family:var(--font-mono);">1.00x</span>
+                  <span id="quick-voice-speed-val" class="metric-value metric-value-accent">1.00x</span>
                 </div>
                 <div class="speed-slider-wrap">
                   <input type="range" class="form-range" id="quick-voice-speed" min="0.7" max="1.5" step="0.05" value="1.00" />
@@ -1044,15 +1066,15 @@
           <label>3. Playback mode</label>
           <div class="loop-mode-toggle">
             <label class="loop-radio-label active" id="lbl-mode-loop">
-              <input type="radio" name="uploadPlayMode" value="loop" checked style="accent-color:var(--green);" />
+              <input type="radio" name="uploadPlayMode" value="loop" checked class="radio-ready" />
               <span>🔄 Loop</span>
             </label>
             <label class="loop-radio-label" id="lbl-mode-once">
-              <input type="radio" name="uploadPlayMode" value="once" style="accent-color:var(--accent);" />
+              <input type="radio" name="uploadPlayMode" value="once" class="radio-accent" />
               <span>▶ Play once</span>
             </label>
             <label class="loop-radio-label" id="lbl-mode-off">
-              <input type="radio" name="uploadPlayMode" value="off" style="accent-color:var(--red);" />
+              <input type="radio" name="uploadPlayMode" value="off" class="radio-danger" />
               <span>⛔ Off</span>
             </label>
           </div>

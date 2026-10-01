@@ -166,6 +166,17 @@ ul, ol { list-style: none; }
 .sys-dot.warn { background: var(--amber); }
 .sys-dot.err { background: var(--red); }
 
+.system-power-button {
+  color: var(--amber);
+  border-color: rgba(251, 191, 36, .25);
+}
+.system-power-button[data-mode="released"] {
+  color: var(--green);
+  border-color: rgba(164, 255, 74, .3);
+  background: rgba(164, 255, 74, .08);
+}
+.system-power-button[data-busy="true"] { opacity: .65; cursor: wait; }
+
 .sys-latency {
   border-left: 1px solid var(--border);
   padding-left: 8px;
@@ -227,7 +238,7 @@ ul, ol { list-style: none; }
   height: 100%;
   background: linear-gradient(to right, var(--accent), var(--green));
   border-radius: 2px;
-  transition: width 1s ease;
+  transition: none;
 }
 
 .phase-info {
@@ -1009,7 +1020,7 @@ ul, ol { list-style: none; }
   height: 100%;
   background: linear-gradient(to right, var(--accent), var(--green));
   border-radius: 2px;
-  transition: width .25s linear;
+  transition: none;
 }
 
 .tl-thumb {
@@ -1108,7 +1119,7 @@ ul, ol { list-style: none; }
   height: 100%;
   background: linear-gradient(to right, var(--amber), var(--green));
   border-radius: 2px;
-  transition: width 0.15s ease;
+  transition: none;
 }
 
 .vstatus-body {
@@ -1132,7 +1143,7 @@ ul, ol { list-style: none; }
   border-radius: 1px;
   background: var(--border-s);
   height: 3px;
-  transition: height .1s;
+  transition: none;
 }
 
 .voice-viz.speaking .vb {
@@ -1360,9 +1371,9 @@ ul, ol { list-style: none; }
   display: flex; align-items: center; gap: 4px; padding: 2px 4px;
   background: var(--bg-el); border: 1px solid var(--border); border-radius: 3px; font-size:11px;
 }
-.eq-item.p1 { border-left: 2px solid var(--red); }
-.eq-item.p2 { border-left: 2px solid var(--amber); }
-.eq-item.p3 { border-left: 2px solid var(--accent); }
+.eq-item.p1 { background: color-mix(in srgb, var(--red) 8%, var(--bg-el)); }
+.eq-item.p2 { background: color-mix(in srgb, var(--amber) 8%, var(--bg-el)); }
+.eq-item.p3 { background: color-mix(in srgb, var(--accent) 8%, var(--bg-el)); }
 .eq-pri { font-weight: 700; font-family: var(--font-mono); font-size:11px; }
 .eq-item.p1 .eq-pri { color: var(--red); }
 .eq-item.p2 .eq-pri { color: var(--amber); }
@@ -2221,7 +2232,7 @@ ul, ol { list-style: none; }
   width: 0%;
   background: linear-gradient(90deg, #3b82f6, #8b5cf6, #10b981);
   border-radius: 4px;
-  transition: width 0.35s ease;
+  transition: none;
 }
 
 .lt-stages-list {
@@ -2423,7 +2434,7 @@ ul, ol { list-style: none; }
   width: 0%;
   background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444);
   border-radius: 3px;
-  transition: width 0.05s ease;
+  transition: none;
 }
 
 .lt-voice-config-box {
@@ -2803,8 +2814,10 @@ body {
   font-family: 'Material Symbols Rounded';
   font-style: normal;
   font-weight: 400;
-  font-display: block;
-  src: local('Material Symbols Rounded'), local('Material Symbols Rounded Regular');
+  font-display: swap;
+  src: local('Material Symbols Rounded'),
+       local('Material Symbols Rounded Regular'),
+       url('assets/fonts/material-symbols-rounded.ttf') format('truetype');
 }
 
 .material-symbols-rounded,
